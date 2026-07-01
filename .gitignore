@@ -19,6 +19,7 @@ node_modules/
 .nuxt/
 .output/
 dist/
+web/dist/
 
 # Local runtime data
 archives/
