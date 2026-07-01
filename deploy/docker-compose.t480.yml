@@ -24,3 +24,8 @@ services:
       MAX_PARALLEL_INDEX_JOBS: 1
       MAX_TURN_EVENT_BYTES: 256KB
       MAX_TOOL_OUTPUT_BYTES: 64KB
+
+  memory-web:
+    build:
+      args:
+        NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-http://ddns.08121.top:18081}
