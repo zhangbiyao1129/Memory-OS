@@ -1,0 +1,9 @@
+{
+  "session_id": "session_claude_1",
+  "thread_id": "thread_claude_1",
+  "turn_id": "turn_claude_1",
+  "events": [
+    {"id":"claude_event_1","role":"user","text":"remember deploy uses docker compose sk-test-redacted-example","created_at":"2026-07-01T00:00:00Z"},
+    {"id":"claude_event_2","role":"assistant","text":"I will use the Memory OS workflow.","created_at":"2026-07-01T00:00:01Z"}
+  ]
+}

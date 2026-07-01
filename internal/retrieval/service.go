@@ -1,0 +1,213 @@
+package retrieval
+
+import (
+	"errors"
+	"sort"
+	"strings"
+
+	"memory-os/internal/hotmemory"
+	"memory-os/internal/qdrant"
+	"memory-os/internal/rag"
+	"memory-os/internal/secret"
+)
+
+type HotMemory interface {
+	Search(hotmemory.SearchRequest) ([]hotmemory.SearchResult, error)
+	MarkUsed(string) (hotmemory.Memory, error)
+}
+
+type ArchiveRAG interface {
+	Search(rag.SearchRequest) ([]rag.SearchResult, error)
+}
+
+type Options struct {
+	HotMemory  HotMemory
+	ArchiveRAG ArchiveRAG
+	Reranker   Reranker
+	AccessLog  AccessLog
+}
+
+type Service struct {
+	hotMemory  HotMemory
+	archiveRAG ArchiveRAG
+	reranker   Reranker
+	accessLog  AccessLog
+}
+
+func NewService(options Options) Service {
+	return Service{hotMemory: options.HotMemory, archiveRAG: options.ArchiveRAG, reranker: options.Reranker, accessLog: options.AccessLog}
+}
+
+func (s Service) Search(request SearchRequest) (SearchResponse, error) {
+	if err := validateRequest(request); err != nil {
+		return SearchResponse{}, err
+	}
+	candidates, markedUsed, err := s.collect(request)
+	if err != nil {
+		return SearchResponse{}, err
+	}
+	rerankDegraded := false
+	if s.reranker != nil && len(candidates) > 0 {
+		scores, err := s.reranker.Rerank(request.Query, rerankCandidates(candidates))
+		if err != nil {
+			rerankDegraded = true
+		} else {
+			applyRerankScores(candidates, scores)
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
+	results := resultsFromCandidates(candidates)
+	context := compress(results, request.MaxContextBytes)
+	response := SearchResponse{RequestID: request.RequestID, Context: context, Results: results, RerankDegraded: rerankDegraded, MarkedUsedCount: markedUsed}
+	if s.accessLog != nil {
+		_ = s.accessLog.LogRequest(request, rerankDegraded)
+		for index, result := range results {
+			_ = s.accessLog.LogResult(request.RequestID, index+1, result)
+			response.AccessLogCount++
+		}
+	}
+	return response, nil
+}
+
+func (s Service) collect(request SearchRequest) ([]candidate, int, error) {
+	candidates := []candidate{}
+	markedUsed := 0
+	recallQuery := primaryRecallQuery(request.Query)
+	if s.hotMemory != nil {
+		projectFilter, err := hotmemory.BuildFilter(hotmemory.FilterContext{OrgID: request.Actor.OrgID, ProjectID: request.Actor.ProjectID, UserID: request.Actor.UserID, AgentID: request.Actor.AgentID, Scope: request.Scope, Visibility: request.Visibility, PermissionLabels: request.PermissionLabels})
+		if err != nil {
+			return nil, 0, err
+		}
+		results, err := s.hotMemory.Search(hotmemory.SearchRequest{Query: recallQuery, Filter: projectFilter})
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, result := range results {
+			memory := result.Memory
+			candidates = append(candidates, candidate{id: "hot_memory:" + memory.MemoryID, text: memory.Fact, score: result.Score, source: SourceRef{Kind: SourceHotMemory, MemoryID: memory.MemoryID}})
+			if _, err := s.hotMemory.MarkUsed(memory.MemoryID); err == nil {
+				markedUsed++
+			}
+		}
+		if request.Scope != hotmemory.ScopeAgentSpecific {
+			agentFilter, err := hotmemory.BuildFilter(hotmemory.FilterContext{OrgID: request.Actor.OrgID, ProjectID: request.Actor.ProjectID, UserID: request.Actor.UserID, AgentID: request.Actor.AgentID, Scope: hotmemory.ScopeAgentSpecific, Visibility: request.Visibility, PermissionLabels: request.PermissionLabels})
+			if err != nil {
+				return nil, 0, err
+			}
+			agentResults, err := s.hotMemory.Search(hotmemory.SearchRequest{Query: recallQuery, Filter: agentFilter})
+			if err != nil {
+				return nil, 0, err
+			}
+			for _, result := range agentResults {
+				memory := result.Memory
+				candidates = append(candidates, candidate{id: "hot_memory:" + memory.MemoryID, text: memory.Fact, score: result.Score, source: SourceRef{Kind: SourceHotMemory, MemoryID: memory.MemoryID}})
+				if _, err := s.hotMemory.MarkUsed(memory.MemoryID); err == nil {
+					markedUsed++
+				}
+			}
+		}
+	}
+	if s.archiveRAG != nil {
+		filter, err := qdrant.BuildPayloadFilter(qdrant.FilterContext{OrgID: request.Actor.OrgID, ProjectID: request.Actor.ProjectID, UserID: request.Actor.UserID, Visibility: request.Visibility, PermissionLabels: request.PermissionLabels, DocType: "archive_chunk", IndexGeneration: request.ArchiveIndexGeneration})
+		if err != nil {
+			return nil, 0, err
+		}
+		results, err := s.archiveRAG.Search(rag.SearchRequest{Query: recallQuery, Filter: filter})
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, result := range results {
+			candidates = append(candidates, candidate{id: "archive:" + result.Source.ChunkID, text: result.Text, score: result.Score, source: SourceRef{Kind: SourceArchiveChunk, ArchiveID: result.Source.ArchiveID, ChunkID: result.Source.ChunkID, SourceEventIDs: result.Source.SourceEventIDs}})
+		}
+	}
+	return dedupeCandidates(candidates), markedUsed, nil
+}
+
+func primaryRecallQuery(query string) string {
+	fields := strings.Fields(query)
+	if len(fields) == 0 {
+		return query
+	}
+	return fields[0]
+}
+
+func validateRequest(request SearchRequest) error {
+	if strings.TrimSpace(request.Query) == "" {
+		return errors.New("query is required")
+	}
+	if request.Actor.UserID == "" || request.Actor.OrgID == "" || request.Actor.ProjectID == "" || request.Actor.AgentID == "" {
+		return errors.New("actor context is required")
+	}
+	if request.Scope != hotmemory.ScopeUser && request.Scope != hotmemory.ScopeProject && request.Scope != hotmemory.ScopeOrg && request.Scope != hotmemory.ScopeAgentSpecific {
+		return errors.New("invalid scope")
+	}
+	if request.Visibility == "" {
+		return errors.New("visibility is required")
+	}
+	if request.Visibility != "private" && len(request.PermissionLabels) == 0 {
+		return errors.New("permission labels are required")
+	}
+	return nil
+}
+
+func rerankCandidates(candidates []candidate) []RerankCandidate {
+	items := []RerankCandidate{}
+	for _, candidate := range candidates {
+		items = append(items, RerankCandidate{ID: candidate.id, Text: candidate.text})
+	}
+	return items
+}
+
+func applyRerankScores(candidates []candidate, scores []RerankScore) {
+	byID := map[string]float64{}
+	for _, score := range scores {
+		byID[score.ID] = score.Score
+	}
+	for index := range candidates {
+		if score, ok := byID[candidates[index].id]; ok {
+			candidates[index].score = score
+		}
+	}
+}
+
+func dedupeCandidates(candidates []candidate) []candidate {
+	seen := map[string]bool{}
+	out := []candidate{}
+	for _, candidate := range candidates {
+		if seen[candidate.id] {
+			continue
+		}
+		seen[candidate.id] = true
+		out = append(out, candidate)
+	}
+	return out
+}
+
+func resultsFromCandidates(candidates []candidate) []SearchResult {
+	results := []SearchResult{}
+	for _, candidate := range candidates {
+		results = append(results, SearchResult{Text: candidate.text, Score: candidate.score, Source: candidate.source})
+	}
+	return results
+}
+
+func compress(results []SearchResult, budget int) string {
+	builder := strings.Builder{}
+	for _, result := range results {
+		line := result.Text
+		sanitized := secret.Sanitize(line, func(index int, match string) string { return "secret_ref_retrieval" })
+		line = sanitized.Text
+		if budget > 0 && builder.Len()+len(line) > budget {
+			remaining := budget - builder.Len()
+			if remaining > 0 {
+				builder.WriteString(line[:remaining])
+			}
+			break
+		}
+		if builder.Len() > 0 {
+			builder.WriteString("\n")
+		}
+		builder.WriteString(line)
+	}
+	return builder.String()
+}

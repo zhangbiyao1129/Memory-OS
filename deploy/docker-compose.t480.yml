@@ -1,0 +1,26 @@
+services:
+  postgres:
+    command:
+      - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=128MB
+      - -c
+      - max_connections=50
+
+  qdrant:
+    environment:
+      QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS: 2
+
+  memory-worker:
+    environment:
+      WORKER_CONCURRENCY: 1
+      ARCHIVE_BATCH_INTERVAL: 30m
+      EMBED_BATCH_SIZE: 8
+      RERANK_BATCH_SIZE: 8
+      MAX_PARALLEL_INDEX_JOBS: 1
+      MAX_TURN_EVENT_BYTES: 256KB
+      MAX_TOOL_OUTPUT_BYTES: 64KB

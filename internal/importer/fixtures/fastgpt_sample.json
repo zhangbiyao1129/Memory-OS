@@ -1,0 +1,1 @@
+{"documents":[{"id":"fg_doc_1","title":"FastGPT Deploy Doc","chunks":[{"id":"fg_chunk_1","content":"Deploy API with docker compose on T480 sk-test-redacted-example"},{"id":"fg_chunk_2","content":"Qdrant filter must run at query time"}]}]}

@@ -1,0 +1,9 @@
+{
+  "session":"session_open_1",
+  "thread":"thread_open_1",
+  "turn":"turn_open_1",
+  "items":[
+    {"event_id":"open_event_1","kind":"message","role":"user","content":"open code should index archive","time":"2026-07-01T00:01:00Z"},
+    {"event_id":"open_event_2","kind":"tool_result","tool":"shell","content":"build ok sk-test-redacted-example","time":"2026-07-01T00:01:01Z"}
+  ]
+}

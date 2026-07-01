@@ -1,0 +1,12 @@
+FROM golang:1.25-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go build -o /out/memory-mcp ./cmd/memory-mcp
+
+FROM debian:bookworm-slim
+WORKDIR /app
+COPY --from=build /out/memory-mcp /usr/local/bin/memory-mcp
+EXPOSE 18082
+ENTRYPOINT ["memory-mcp"]

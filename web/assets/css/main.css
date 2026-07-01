@@ -1,0 +1,18 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --memory-ink: #17211b;
+  --memory-moss: #536b4f;
+  --memory-paper: #f4efe3;
+  --memory-clay: #b8603b;
+}
+
+body {
+  color: var(--memory-ink);
+  background:
+    radial-gradient(circle at 20% 10%, rgba(184, 96, 59, 0.22), transparent 28rem),
+    linear-gradient(135deg, #f4efe3 0%, #d8e0c8 100%);
+  min-height: 100vh;
+}

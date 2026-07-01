@@ -1,0 +1,29 @@
+.DS_Store
+docs.zip
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Go
+bin/
+coverage.out
+
+# Node / Nuxt
+node_modules/
+.nuxt/
+.output/
+dist/
+
+# Local runtime data
+archives/
+tmp/
+
+backups/
+
+artifacts/

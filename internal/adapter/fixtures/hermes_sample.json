@@ -1,0 +1,9 @@
+{
+  "conversation_id":"thread_hermes_1",
+  "session_id":"session_hermes_1",
+  "turn_id":"turn_hermes_1",
+  "records":[
+    {"uuid":"hermes_event_1","type":"human","body":"Hermes adapter sends TurnEvent","timestamp":"2026-07-01T00:02:00Z"},
+    {"uuid":"hermes_event_2","type":"assistant_final","body":"Hermes done","timestamp":"2026-07-01T00:02:01Z"}
+  ]
+}

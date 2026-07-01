@@ -1,0 +1,2 @@
+{"id":"mem0_1","memory":"Project uses docker compose on T480 sk-test-redacted-example","user_id":"user_1","metadata":{"source":"mem0"}}
+{"id":"mem0_2","memory":"Use bge-m3 for embeddings","user_id":"user_1","metadata":{"source":"mem0"}}
