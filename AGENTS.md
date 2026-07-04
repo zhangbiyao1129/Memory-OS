@@ -484,7 +484,6 @@ Phase 10：兼容与迁移。
 - 操作服务器前先读取 `~/.codex/servers.md` 获取连接信息。
 - 部署新服务前必须检查端口冲突，优先在目标服务器执行 `ss -tlnp`。
 - 若新增长期服务端口，更新对应项目 memory；如果 mem0 MCP 可用且用户要求同步，再同步 mem0。
-- 内网服务器访问外网可使用 Mihomo 代理：`http://admin:mihomo8121@ddns.08121.top:9999`。
 
 ## Git Rules
 
@@ -496,9 +495,8 @@ Phase 10：兼容与迁移。
 
 ## SSH And GitLab Credentials
 
-- `gitlab.zhenguanyu.com` 默认使用 `~/.ssh/id_ed25519_gitlab`；认证检查命令：`ssh -T gitlab.zhenguanyu.com`。
-- `gitlab-ee.zhenguanyu.com` 默认复用当前 SSH 配置中的 GitLab 凭据；认证检查命令：`ssh -T git@gitlab-ee.zhenguanyu.com`。
-- 两个 GitLab 域名都应已在 `~/.ssh/known_hosts` 中登记；克隆仓库时优先使用 SSH 地址。
+- 公司内网 GitLab 默认使用配置好的 SSH 密钥；认证检查命令：`ssh -T git@your-gitlab.example.com`。
+- GitLab 域名应已在 `~/.ssh/known_hosts` 中登记；克隆仓库时优先使用 SSH 地址。
 - 如需排查凭据，优先检查 `~/.ssh/config` 中对应 `Host` 段与 `IdentityFile` 配置。
 - 不要在日志、memory、mem0 或回复中明文记录私钥内容。
 

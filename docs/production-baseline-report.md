@@ -12,8 +12,8 @@
 
 - 服务器：`thinkpad`
 - 项目目录：`/opt/memory-os`
-- Web：`http://ddns.08121.top:18080`
-- API：`http://ddns.08121.top:18081`
+- Web：`http://your-server:18080`
+- API：`http://your-server:18081`
 - MCP：`18082`
 - Qdrant：`18083`
 - 服务器目录状态：`/opt/memory-os` 不是 git 仓库，不能在服务器直接做 branch、diff、commit 级追踪。
@@ -113,13 +113,13 @@ curl http://127.0.0.1:18081/openapi.json
 
 ### 浏览器 API 链路
 
-Phase 0 审计时，浏览器调用 `POST http://ddns.08121.top:18081/memory/search` 失败。
+Phase 0 审计时，浏览器调用 `POST http://your-server:18081/memory/search` 失败。
 
 服务器验证：
 
 ```bash
 curl -i -X OPTIONS http://127.0.0.1:18081/memory/search \
-  -H "Origin: http://ddns.08121.top:18080" \
+  -H "Origin: http://your-server:18080" \
   -H "Access-Control-Request-Method: POST"
 ```
 
@@ -131,7 +131,7 @@ Phase 1.1 已修复该网络层问题：
 
 ```bash
 curl -i -X OPTIONS http://127.0.0.1:18081/memory/search \
-  -H "Origin: http://ddns.08121.top:18080" \
+  -H "Origin: http://your-server:18080" \
   -H "Access-Control-Request-Method: POST" \
   -H "Access-Control-Request-Headers: content-type, authorization"
 ```

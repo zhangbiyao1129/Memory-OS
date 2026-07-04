@@ -46,7 +46,7 @@ func TestComposePassesExternalAPIBaseForT480WebBuild(t *testing.T) {
 	if !strings.Contains(string(baseCompose), "NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-http://localhost:18081}") {
 		t.Fatalf("base compose must pass NUXT_PUBLIC_API_BASE to the web image build")
 	}
-	if !strings.Contains(string(t480Compose), "NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-http://ddns.08121.top:18081}") {
+	if !strings.Contains(string(t480Compose), "NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-http://your-server:18081}") {
 		t.Fatalf("T480 compose must default the generated web app API base to the external API URL")
 	}
 }

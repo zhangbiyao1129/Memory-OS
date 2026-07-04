@@ -60,13 +60,13 @@ func TestCORSPreflightAllowsBrowserAPIRequests(t *testing.T) {
 		"OPTIONS",
 		"/memory/search",
 		nil,
-		ut.Header{Key: "Origin", Value: "http://ddns.08121.top:18080"},
+		ut.Header{Key: "Origin", Value: "http://your-server:18080"},
 		ut.Header{Key: "Access-Control-Request-Method", Value: "POST"},
 		ut.Header{Key: "Access-Control-Request-Headers", Value: "content-type, authorization"},
 	)
 
 	assert.DeepEqual(t, 204, response.Code)
-	assert.DeepEqual(t, "http://ddns.08121.top:18080", string(response.Header().Peek("Access-Control-Allow-Origin")))
+	assert.DeepEqual(t, "http://your-server:18080", string(response.Header().Peek("Access-Control-Allow-Origin")))
 	if !strings.Contains(string(response.Header().Peek("Access-Control-Allow-Methods")), "POST") {
 		t.Fatalf("Access-Control-Allow-Methods missing POST: %s", response.Header().Peek("Access-Control-Allow-Methods"))
 	}
@@ -78,10 +78,10 @@ func TestCORSPreflightAllowsBrowserAPIRequests(t *testing.T) {
 func TestCORSHeadersAreAttachedToAPIResponses(t *testing.T) {
 	router := NewRouter(health.NewService(nil))
 
-	response := ut.PerformRequest(router, "GET", "/healthz", nil, ut.Header{Key: "Origin", Value: "http://ddns.08121.top:18080"})
+	response := ut.PerformRequest(router, "GET", "/healthz", nil, ut.Header{Key: "Origin", Value: "http://your-server:18080"})
 
 	assert.DeepEqual(t, 200, response.Code)
-	assert.DeepEqual(t, "http://ddns.08121.top:18080", string(response.Header().Peek("Access-Control-Allow-Origin")))
+	assert.DeepEqual(t, "http://your-server:18080", string(response.Header().Peek("Access-Control-Allow-Origin")))
 }
 
 func TestOpenAPIJSON(t *testing.T) {

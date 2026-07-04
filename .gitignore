@@ -45,3 +45,7 @@ tmp/
 backups/
 
 artifacts/
+
+# 内部交付记录与截图（不公开）
+docs/production-delivery-log.md
+memory-os-home.png

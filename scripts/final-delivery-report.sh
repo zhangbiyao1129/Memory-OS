@@ -12,10 +12,10 @@ PERMISSION_ISOLATION_BUNDLE_PATH="${PERMISSION_ISOLATION_BUNDLE_PATH:-$REPO_ROOT
 CHECKLIST_AUDIT_PATH="${CHECKLIST_AUDIT_PATH:-$REPO_ROOT/artifacts/completion-checklist-audit.md}"
 RUN_RUNTIME_CHECKS="${RUN_RUNTIME_CHECKS:-0}"
 
-WEB_BASE="${WEB_BASE:-http://ddns.08121.top:18080}"
+WEB_BASE="${WEB_BASE:-http://your-server:18080}"
 API_BASE="${API_BASE:-http://127.0.0.1:18081}"
-MCP_BASE="${MCP_BASE:-http://ddns.08121.top:18082}"
-QDRANT_BASE="${QDRANT_BASE:-http://ddns.08121.top:18083}"
+MCP_BASE="${MCP_BASE:-http://your-server:18082}"
+QDRANT_BASE="${QDRANT_BASE:-http://your-server:18083}"
 
 VERSION_CMD="${VERSION_CMD:-curl -fsS "$API_BASE/version"}"
 HEALTHZ_CMD="${HEALTHZ_CMD:-curl -fsS "$API_BASE/healthz"}"
@@ -102,7 +102,7 @@ cat > "$FINAL_REPORT_PATH" <<REPORT
 ## Runtime Endpoints
 
 - Web: $WEB_BASE
-- API: http://ddns.08121.top:18081
+- API: http://your-server:18081
 - MCP: $MCP_BASE
 - Qdrant: $QDRANT_BASE
 

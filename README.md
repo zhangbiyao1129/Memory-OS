@@ -14,20 +14,18 @@ Memory OS 是一个 Native Multi-Agent Memory Platform，用于把 Codex、Claud
 
 ## 默认运行环境
 
-Memory OS 项目的开发、测试、构建、部署默认在服务器执行：
+Memory OS 项目的开发、测试、构建、部署默认在服务器执行。本地不运行 Memory OS 容器，本地工作区仅用于受控编辑、补丁审查和同步。
 
-- 服务器：`thinkpad`
-- 项目目录：`/opt/memory-os`
-- Web：`http://ddns.08121.top:18080`
-- API：`http://ddns.08121.top:18081`
+默认端口（部署到自己的服务器时按需替换）：
+
+- Web：`18080`
+- API：`18081`
 - MCP：`18082`
 - Qdrant：`18083`
 
-本地不运行 Memory OS 容器。本地工作区仅用于受控编辑、补丁审查和同步。
-
 ## 常用验证命令
 
-在服务器 `/opt/memory-os` 下运行：
+在项目根目录下运行：
 
 ```bash
 make test
@@ -58,7 +56,7 @@ MCP 配置示例：
     "memory-os": {
       "command": "/Users/你的用户名/bin/memory-mcp-local",
       "env": {
-        "MEMORY_OS_MCP_URL": "http://ddns.08121.top:18082",
+        "MEMORY_OS_MCP_URL": "http://your-server:18082",
         "MEMORY_OS_TOKEN": "<在后台 Token 页面创建的一次性明文 Token>",
         "MEMORY_OS_AGENT_ID": "codex"
       }
