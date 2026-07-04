@@ -75,4 +75,27 @@ if (( available_kb < MIN_DISK_KB )); then
   exit 1
 fi
 
+# placeholder secret 检查：生产环境不允许占位值
+check_placeholder_secrets() {
+  local app_env="${APP_ENV:-}"
+  if [[ "$app_env" != "production" ]]; then
+    return 0
+  fi
+  local placeholder_patterns='replace-me|example|dev-only|mock'
+  local secret_vars=("POSTGRES_PASSWORD" "LLM_API_KEY" "SECRET_VAULT_KEY_ID" "SECRET_VAULT_KEY_B64")
+  for var in "${secret_vars[@]}"; do
+    local val="${!var:-}"
+    # 使用 :- 兜底，兼容脚本里的 set -u。
+    if [[ -z "$val" ]]; then
+      echo "production secret check failed: $var is empty" >&2
+      exit 1
+    fi
+    if [[ "$val" =~ ^($placeholder_patterns) ]]; then
+      echo "production secret check failed: $var has placeholder value" >&2
+      exit 1
+    fi
+  done
+}
+check_placeholder_secrets
+
 echo "preflight ok: ports=[$PORTS] available_disk_kb=$available_kb"
