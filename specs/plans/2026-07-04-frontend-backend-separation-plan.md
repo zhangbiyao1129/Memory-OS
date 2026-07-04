@@ -35,6 +35,7 @@
 - `deploy/backend/Dockerfile.llm-mock` — `COPY deploy/memory-llm-mock.py` → `COPY deploy/backend/memory-llm-mock.py`
 - `deploy/frontend/Dockerfile.web` — `web/` → `frontend/`，nginx.conf 路径
 - `internal/webdeploy/*_test.go` — `web/` → `frontend/`，`../../web/` → `../../frontend/`
+- `internal/verify/verify_script_test.go` — 同步 Makefile `backup`/`restore` target 文本断言
 - `.gitignore` — `web/dist` → `frontend/dist`
 - `.dockerignore` — `web/...` → `frontend/...`
 - `frontend/package.json` — name `memory-os-web` → `memory-os-frontend`
@@ -289,9 +290,9 @@ test:
 
 把 `smoke` target 里的 `if command -v go >/dev/null 2>&1` 改为 `if command -v go >/dev/null 2>&1 && go version | grep -q 'go1\.25'`。
 
-- [ ] **步骤 4：给 prod-up 加 export COMPOSE_PROJECT_NAME=deploy**
+- [ ] **步骤 4：给 prod-up 加 export COMPOSE_PROJECT_NAME=deploy，并让 preflight 以 production 环境运行**
 
-在 `prod-up` target 的 `APP_ENV=production` 前加 `export COMPOSE_PROJECT_NAME=deploy && \`。
+在 `prod-up` target 中先导出 `COMPOSE_PROJECT_NAME=deploy`，并把 `APP_ENV=production` 传给 `scripts/preflight.sh`。这样任务 14 新增的生产 secret placeholder 检查会在 compose 启动前生效。
 
 当前：
 ```makefile
@@ -309,8 +310,8 @@ prod-up:
 prod-up:
 	. scripts/load-prod-env.sh && \
 	. scripts/load-build-info.sh && \
-	ALLOW_EXISTING_DEPLOYMENT=1 scripts/preflight.sh && \
 	export COMPOSE_PROJECT_NAME=deploy && \
+	APP_ENV=production ALLOW_EXISTING_DEPLOYMENT=1 scripts/preflight.sh && \
 	APP_ENV=production ENABLE_DEV_ENDPOINTS=false \
 	$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) up -d --build memory-api memory-worker memory-mcp memory-web && \
 	DRY_RUN=0 DOCKER_IMAGE_CLEANUP_MODE=dangling CONFIRM_DOCKER_IMAGE_CLEANUP=I_UNDERSTAND_IMAGE_DELETE bash scripts/docker-cleanup-images.sh
@@ -336,7 +337,14 @@ restore:
 	. scripts/load-prod-env.sh && export COMPOSE_PROJECT_NAME=deploy && scripts/restore.sh
 ```
 
-- [ ] **步骤 6：确认 Makefile 无残留 web 引用（除 NO_PROXY 里的 memory-web 服务名）**
+- [ ] **步骤 6：同步更新 internal/verify 里的 Makefile 文本断言**
+
+`internal/verify/verify_script_test.go` 里对 `backup`、`restore` target 有精确字符串断言。同步改为包含 `export COMPOSE_PROJECT_NAME=deploy` 的新文本，避免 `go test ./...` 因旧断言失败。
+
+运行：`grep -n "backup target must\\|restore target must\\|backup:" internal/verify/verify_script_test.go`
+预期：断言文本已匹配新的 `backup`/`restore` target。
+
+- [ ] **步骤 7：确认 Makefile 无残留 web 引用（除 NO_PROXY 里的 memory-web 服务名）**
 
 运行：`grep -n "web" Makefile | grep -v "memory-web\|memory-web"`
 预期：无 `cd web` 或 `$(pwd)/web` 残留（`memory-web` 是 compose 服务名，保留）
@@ -593,6 +601,24 @@ COPY migrations/ ./migrations/
 运行：`grep -n "deploy/Dockerfile" deploy/docker-compose*.yml`
 预期：无输出（所有都改为 `deploy/backend/Dockerfile.*` 或 `deploy/frontend/Dockerfile.*`）
 
+- [ ] **步骤 4：同步更新 internal/webdeploy 里的 Dockerfile 路径断言**
+
+把 `internal/webdeploy/*_test.go` 中仍指向旧 Dockerfile 位置的断言同步更新：
+
+```bash
+cd "/Users/kanyun/Memory OS"
+sed -i '' \
+  -e 's|\.\./\.\./deploy/Dockerfile\.web|../../deploy/frontend/Dockerfile.web|g' \
+  -e 's|dockerfile: deploy/Dockerfile\.web|dockerfile: deploy/frontend/Dockerfile.web|g' \
+  -e 's|\.\./\.\./deploy/Dockerfile\.api|../../deploy/backend/Dockerfile.api|g' \
+  -e 's|\.\./\.\./deploy/Dockerfile\.worker|../../deploy/backend/Dockerfile.worker|g' \
+  -e 's|\.\./\.\./deploy/Dockerfile\.mcp|../../deploy/backend/Dockerfile.mcp|g' \
+  internal/webdeploy/*_test.go
+```
+
+运行：`grep -n "deploy/Dockerfile" internal/webdeploy/*_test.go`
+预期：无输出。
+
 ---
 
 ### 任务 13：阶段 2 验证和 commit
@@ -647,11 +673,11 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 **文件：**
 - 修改：`scripts/preflight.sh`
 
-> 当前 preflight.sh（78 行）只检查端口、磁盘、docker/compose 命令，不检查 secret 值。新增：当 `APP_ENV=production` 或检测到生产 compose 命令时，拒绝 `replace-me`、`example`、`dev-only`、`mock` 这类占位值出现在 `POSTGRES_PASSWORD`、`LLM_API_KEY`、`SECRET_VAULT_KEY_ID`、`SECRET_VAULT_KEY_B64` 中。
+> 当前 preflight.sh（78 行）只检查端口、磁盘、docker/compose 命令，不检查 secret 值。新增：当 `APP_ENV=production` 时，拒绝 `replace-me`、`example`、`dev-only`、`mock` 这类占位值出现在 `POSTGRES_PASSWORD`、`LLM_API_KEY`、`SECRET_VAULT_KEY_ID`、`SECRET_VAULT_KEY_B64` 中。`prod-up` 必须按任务 6 的顺序把 `APP_ENV=production` 传给 preflight。
 
-- [ ] **步骤 1：在 preflight.sh 末尾（exit 0 之前）加 placeholder 检查函数**
+- [ ] **步骤 1：在 preflight.sh 成功输出前加 placeholder 检查函数**
 
-在 `scripts/preflight.sh` 末尾、最终 `exit 0` 之前，插入：
+在 `scripts/preflight.sh` 末尾的 `echo "preflight ok: ..."` 之前插入：
 
 ```bash
 # placeholder secret 检查：生产环境不允许占位值
@@ -663,6 +689,7 @@ check_placeholder_secrets() {
   local placeholder_patterns='replace-me|example|dev-only|mock'
   local secret_vars=("POSTGRES_PASSWORD" "LLM_API_KEY" "SECRET_VAULT_KEY_ID" "SECRET_VAULT_KEY_B64")
   for var in "${secret_vars[@]}"; do
+    # 使用 :- 兜底，兼容脚本里的 set -u。
     local val="${!var:-}"
     if [[ -z "$val" ]]; then
       echo "production secret check failed: $var is empty" >&2
@@ -795,7 +822,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 运行：`ssh thinkpad "cd /opt/memory-os && make backup 2>&1 | tail -10"`
 预期：备份成功，产物在 `/opt/memory-os/backups/`
 
-> 此步骤需用户确认后执行。
+> 此步骤需用户确认后执行。如果 `/opt/memory-os/.env.production` 不存在，`make backup` 会因 `scripts/load-prod-env.sh` 无法加载生产密钥而失败；需先按当前生产环境的既有方式补齐 `.env.production`，或改用已验证的现有备份方式。
 
 ---
 
