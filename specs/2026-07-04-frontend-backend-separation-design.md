@@ -81,7 +81,7 @@ build-web:  ; $(MAKE) -C frontend build
 smoke:      ; $(MAKE) -C backend smoke
 dev-up:     ; docker-compose -f deploy/docker-compose.yml -f deploy/docker-compose.t480.yml up -d --build
 dev-down:   ; docker-compose -f deploy/docker-compose.yml down
-prod-up:    ; 同 dev-up(生产 profile)
+prod-up:    ; docker-compose -f deploy/docker-compose.yml -f deploy/docker-compose.t480.yml up -d --build
 backup:     ; . scripts/load-prod-env.sh && scripts/backend/backup.sh
 restore:    ; . scripts/load-prod-env.sh && scripts/backend/restore.sh
 # 其余统筹 target(docker-cleanup/audit-report/verify 等)
@@ -89,15 +89,15 @@ restore:    ; . scripts/load-prod-env.sh && scripts/backend/restore.sh
 
 ### `backend/Makefile`
 
+> Go module 在根目录,backend/Makefile 的 go 命令必须 `cd ..` 到根目录执行(不用 GOFLAGS,统一用 cd)。
+
 ```makefile
-test:    ; cd .. && go test ./backend/...
-build:   ; cd .. && go build -o bin/memory-api ./backend/cmd/memory-api  # 各 cmd
-smoke:   ; cd .. && go run ./backend/cmd/memory-smoke
-lint:    ; cd .. && go vet ./backend/...
+test:     ; cd .. && go test ./backend/...
+build:    ; cd .. && go build -o bin/memory-api ./backend/cmd/memory-api  # 各 cmd 分别 build
+smoke:    ; cd .. && go run ./backend/cmd/memory-smoke
+lint:     ; cd .. && go vet ./backend/...
 seed-dev: ; cd .. && go run ./backend/cmd/memory-bootstrap
 ```
-
-> Go module 在根目录,backend/Makefile 里的 go 命令需 `cd ..` 到根目录执行,或用 `GOFLAGS` 指定。具体实现时确认。
 
 ### `frontend/Makefile`
 
@@ -109,17 +109,20 @@ generate: ; npm run generate
 
 ## 5. 路径引用同步修改清单
 
+> 关键前提:docker-compose.yml 在 `deploy/` 下,build context 是 `..`(即仓库根)。所有 Dockerfile 的 COPY 路径都相对仓库根。
+
 | 文件 | 改动 |
 |------|------|
-| `deploy/docker-compose*.yml` | `Dockerfile.api` → `backend/Dockerfile.api`(build context 仍为根 `.`),`Dockerfile.web` → `frontend/Dockerfile.web` |
-| `deploy/backend/Dockerfile.*` | 确认 `COPY cmd/ internal/ migrations/` 路径(build context 为根时改为 `COPY backend/cmd/` 等,或 context 改为 `backend/`) |
-| `deploy/frontend/Dockerfile.web` | `COPY web/` → build context 为根时 `COPY frontend/`,`COPY --from=build /src/web/.output` → `/src/frontend/.output` |
+| `deploy/docker-compose*.yml` | `dockerfile: deploy/Dockerfile.api` → `deploy/backend/Dockerfile.api`;`deploy/Dockerfile.web` → `deploy/frontend/Dockerfile.web`;`deploy/Dockerfile.mcp/worker/llm-mock` → `deploy/backend/...`。context 保持 `..` 不变 |
+| `deploy/backend/Dockerfile.api/mcp/worker` | `COPY go.mod go.sum ./` 不变;`COPY . .` 改为 `COPY backend/ ./backend/` + `COPY migrations/ ./migrations/`(避免拷 frontend);`go build ./cmd/memory-api` 改为 `go build ./backend/cmd/memory-api` |
+| `deploy/backend/Dockerfile.llm-mock` | 确认 `COPY` 的 `memory-llm-mock.py` 路径(同目录,改 `COPY deploy/backend/memory-llm-mock.py`) |
+| `deploy/frontend/Dockerfile.web` | `COPY web/package*.json` → `COPY frontend/package*.json`;`COPY web/` → `COPY frontend/`;`COPY --from=build /src/web/.output` → `/src/frontend/.output`(WORKDIR 同步改 `/src/frontend`);`COPY deploy/nginx.conf` → `COPY deploy/frontend/nginx.conf` |
 | `Makefile`(根+子) | 全部 `web/` → `frontend/`,`cd web` → `cd frontend` |
-| `internal/webdeploy/*_test.go` | `web/` → `frontend/`,`../../web/` → `../../frontend/`(注意:这些测试现在在 `backend/internal/webdeploy/` 下,相对路径要重新算) |
-| `.dockerignore` | `web/node_modules` 等 → `frontend/node_modules` 等 |
+| `backend/internal/webdeploy/*_test.go` | 目录层级从 `internal/webdeploy/` 变 `backend/internal/webdeploy/`(深一级)。原 `../../web/`(到根进 web)→ `../../../frontend/`(到根进 frontend)。字符串断言里的 `web/` → `frontend/` |
+| `.dockerignore` | `web/node_modules` 等 → `frontend/node_modules` 等;确认 `backend/` 不需额外排除 |
 | `.gitignore` | `web/dist` 等 → `frontend/dist` 等 |
 | `frontend/package.json` | name `memory-os-web` → `memory-os-frontend` |
-| `scripts/*` 内路径引用 | 跟着目录变(`$REPO_ROOT/web` → `$REPO_ROOT/frontend`,`scripts/backup.sh` → `scripts/backend/backup.sh` 等) |
+| `scripts/*` 内路径引用 | `$REPO_ROOT/web` → `$REPO_ROOT/frontend`;`scripts/backup.sh` → `scripts/backend/backup.sh`;脚本自身位置变了,内部 `$REPO_ROOT` 计算逻辑需同步(`$(dirname $0)/..` 的层级可能变) |
 
 ## 6. Go 代码改动范围
 
@@ -183,7 +186,14 @@ deploy-status:  ; docker-compose -f deploy/docker-compose.yml ps
 - volume 名 `deploy_*` 不改(改要重建数据卷)。
 - 无 systemd 托管(容器靠 docker `restart: unless-stopped`,机器重启靠 docker daemon 自启,不额外加 systemd)。
 
-## 8. 验证计划
+## 8. Dockerfile build context 策略(明确)
+
+所有 Dockerfile 的 build context 统一为仓库根(`context: ..`),Dockerfile 内 COPY 路径相对根:
+- Go 后端 Dockerfile 只 `COPY backend/`、`COPY go.mod go.sum`、`COPY migrations/`,**不 COPY frontend/**(由 `.dockerignore` + 精确 COPY 双重保证)。
+- 前端 Dockerfile 只 `COPY frontend/`、`COPY deploy/frontend/nginx.conf`。
+- `.dockerignore` 补充排除 `frontend/node_modules`、`frontend/.nuxt`、`frontend/.output`、`backend/` 不需额外排除(本就不拷)。
+
+## 9. 验证计划
 
 ### 本地(分区规范化后)
 
@@ -203,7 +213,7 @@ deploy-status:  ; docker-compose -f deploy/docker-compose.yml ps
 - Web 访问 `http://127.0.0.1:18080` 登录页正常
 - `make backup` 手动跑一次确认备份正常
 
-## 9. 风险与缓解
+## 10. 风险与缓解
 
 | 风险 | 缓解 |
 |------|------|
@@ -213,7 +223,7 @@ deploy-status:  ; docker-compose -f deploy/docker-compose.yml ps
 | `.env.production` 密钥值错误导致容器起不来 | 先用 `.env.example` 占位值跑通,再换真实密钥;密钥错误时容器会报明确错误 |
 | 旧备份 cron 删除后备份中断 | 先确认新 cron 正常,再删旧 cron |
 
-## 10. 范围检查
+## 11. 范围检查
 
 本规格聚焦「目录结构 + 部署流程」规范化,不涉及业务功能。可用一个实现计划覆盖,分两阶段执行:
 - 阶段一:本地分区规范化(第 3-6 节)。
