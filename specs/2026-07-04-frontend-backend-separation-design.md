@@ -1,232 +1,546 @@
-# Memory OS 前后端分区规范化与部署规范化 设计规格
+# Memory OS 前后端分区规范化与部署规范化设计规格
 
 - 日期: 2026-07-04
-- 状态: 待实现
-- 范围: 本地仓库结构规范化 + T480 部署规范化
+- 状态: 已修订,待实现
+- 范围: 前端目录规范化 + Docker/Makefile 路径规范化 + T480 安全部署规范化
 
-## 1. 背景与目标
+## 1. 结论
 
-当前 Memory OS 仓库是单 Go module + Nuxt 子目录的混合结构,目录平铺、命名不统一、前后端配置脚本混杂。T480 上的 `/opt/memory-os` 是 rsync 同步的快照(非 git 仓库),生产密钥靠手动 export 注入,脚本散落根目录,存在新旧两套备份 cron。
+本轮规范化不移动 Go 后端源码目录。
+
+保留:
+
+- `cmd/`
+- `internal/`
+- `migrations/`
+- `go.mod`
+- `go.sum`
+
+原因:
+
+- 当前 Go import 使用 `memory-os/internal/xxx`。
+- 如果把 `internal/` 移到 `backend/internal/`,import path 必须变成 `memory-os/backend/internal/xxx`。
+- Go 的 `internal` 包规则会让“移动目录但 import 不变”这件事直接构建失败。
+
+本轮只做低风险、可验证、可回滚的规范化:
+
+1. `web/` 改名为 `frontend/`。
+2. 前端 Dockerfile 和 nginx 配置移动到 `deploy/frontend/`。
+3. 后端 Dockerfile 移动到 `deploy/backend/`,但仍从根目录复制 `cmd/`、`internal/`、`migrations/`。
+4. Makefile 保留现有 target 名,只修正路径和生产环境加载入口。
+5. T480 先使用新目录演练 git clone 部署,不直接覆盖当前 `/opt/memory-os`。
+6. 旧备份、旧 cron、旧 volume 不在本轮直接删除,进入单独清理清单。
+
+## 2. 背景与目标
+
+当前 Memory OS 仓库是单 Go module + Nuxt 子目录结构。后端 Go 代码位于根目录 `cmd/`、`internal/`、`migrations/`,前端位于 `web/`,部署文件位于 `deploy/`。
+
+T480 上的 `/opt/memory-os` 目前以同步快照方式维护,还存在生产环境变量加载、备份脚本、历史产物和 cron 入口需要统一的问题。
 
 目标:
-1. **本地仓库**:前后端分区规范化,每个分区自包含源码/Dockerfile/配置/文档入口,根目录只放真正跨前后端的统筹件。
-2. **T480 部署**:改为 git clone 部署,密钥用 `.env.production` 文件注入,清理散落文件和旧备份,标准化部署流程。
 
-不动业务逻辑,不动 Go import 路径,不动数据卷。
+1. **前端规范化**:把 Nuxt 管理台从 `web/` 统一命名为 `frontend/`。
+2. **部署规范化**:按前端/后端拆分 Dockerfile 和 nginx 配置,但不改变运行端口、volume 名和服务名。
+3. **生产入口规范化**:生产环境变量只通过 `.env.production` + `scripts/load-prod-env.sh` 进入 Makefile 和 compose。
+4. **T480 规范化**:从快照部署逐步迁移到 git clone 部署,但先在新目录演练,验证成功后再切换。
+5. **后端重构延后**:Go 后端目录拆分不和本轮前端/部署规范化混在一起。
 
-## 2. 约束
+## 3. 硬约束
 
-- `go.mod` 留根,module 名 `memory-os` 不变 → 所有 Go `import "memory-os/internal/xxx"` 完全不变。
-- 不改业务代码,只动目录结构、路径引用、Makefile、Dockerfile、配置。
-- Docker compose 服务定义基本不动,只改 Dockerfile 路径和 build context。
-- volume 名 `deploy_*` 暂不改(改要重建数据卷,风险高)。
-- 所有操作可回滚:已对 T480 做全量备份(`/root/memory-os-rollback-20260704-093720/`),代码+PostgreSQL+Qdrant 三路验证可恢复。
+- 不移动 `cmd/`、`internal/`、`migrations/`。
+- 不修改 Go import path。
+- 不修改 Go module 名 `memory-os`。
+- 不改数据库 schema。
+- 不改 Docker volume 名。
+- 不改对外端口。
+- 不删除线上数据。
+- 不删除旧备份、旧 cron、旧 volume,除非进入单独清理计划并再次确认。
+- 不把 `.env.example` 或 placeholder secret 用于生产启动。
+- 不允许 T480 在 Go 1.25 不可用时直接执行宿主机 `go test`、`go build` 或 `go run`。
+- 所有生产 compose 命令必须固定 `COMPOSE_PROJECT_NAME=deploy`,不能依赖当前目录名推导 project name。
+- 不自动 push、commit、deploy。执行这些动作前必须再次确认。
 
-## 3. 本地仓库目标布局
+## 4. 目标仓库布局
 
-```
+```text
 Memory OS/
-├── go.mod / go.sum              # 留根,module memory-os 不变
-├── Makefile                     # 根 Makefile,只做统筹调用
+├── go.mod / go.sum
+├── Makefile
 ├── .gitignore / .dockerignore / .env.example
-├── README.md                    # 项目总入口
-├── specs/                       # 设计规格(进 git)
+├── README.md
+├── specs/
 │
-├── backend/                     # 后端自包含
-│   ├── Makefile                 # 后端专属: test/build/smoke/seed-dev/lint
-│   ├── README.md                # 后端说明
-│   ├── cmd/                     # 10 个 Go 入口
-│   ├── internal/                # 37 个 Go 包
-│   └── migrations/              # SQL
+├── cmd/                         # 保留根目录:Go 入口
+├── internal/                    # 保留根目录:Go 内部包
+├── migrations/                  # 保留根目录:SQL + embed
 │
-├── frontend/                    # 前端自包含(原 web/ 改名)
-│   ├── Makefile                 # 前端专属: build/dev/generate
-│   ├── README.md                # 前端说明
-│   ├── .env.example             # 前端环境变量样例(NUXT_PUBLIC_API_BASE 等)
-│   ├── app.vue / nuxt.config.ts / package.json
-│   ├── pages/ components/ composables/ stores/ assets/
+├── frontend/                    # 原 web/
+│   ├── README.md
+│   ├── .env.example
+│   ├── app.vue
+│   ├── nuxt.config.ts
+│   ├── package.json
+│   ├── pages/
+│   ├── components/
+│   ├── composables/
+│   ├── stores/
+│   └── assets/
 │
-├── deploy/                      # 部署统筹件
-│   ├── docker-compose.yml       # 留根(统筹前后端)
+├── deploy/
+│   ├── docker-compose.yml
 │   ├── docker-compose.t480.yml
 │   ├── docker-compose.restore-rehearsal.yml
-│   ├── backend/                 # 后端 Dockerfile
+│   ├── backend/
 │   │   ├── Dockerfile.api
-│   │   ├── Dockerfile.mcp
 │   │   ├── Dockerfile.worker
+│   │   ├── Dockerfile.mcp
 │   │   ├── Dockerfile.llm-mock
 │   │   └── memory-llm-mock.py
-│   └── frontend/                # 前端 Dockerfile
-│       ├── Dockerfile.web       # 原 deploy/Dockerfile.web
-│       └── nginx.conf           # 原 deploy/nginx.conf
+│   └── frontend/
+│       ├── Dockerfile.web
+│       └── nginx.conf
 │
-├── scripts/                     # 运维脚本
-│   ├── backend/                 # backup/restore/secret-scan/audit-report/preflight/post-deploy-verify/restore-rehearsal*/verify/secret-injection-audit
-│   ├── frontend/                # validate-openapi-runtime
-│   └── (通用留根)               # docker-cleanup*/load-build-info/load-prod-env/install-*-cron/final-delivery-report
-│
-└── docs/                        # 留根(.gitignore 已排除,不进 git)
+├── scripts/                     # 本轮先不整体搬迁,避免脚本相对路径批量失效
+├── docs/                        # 当前按项目规则不进 git
+├── artifacts/                   # 本地/服务器验收产物,不进 git
+└── backups/                     # 本地/服务器备份产物,不进 git
 ```
 
-## 4. Makefile 三层拆分
+## 5. Makefile 规范
 
-### 根 Makefile(统筹)
+根 Makefile 继续作为统一入口。保留现有 target 名,避免破坏使用习惯。
 
-保留现有 target 名不变(兼容使用习惯),内部改为调用子 Makefile 或直接调 compose:
+推荐目标:
 
 ```makefile
-test:       ; $(MAKE) -C backend test
-build-api:  ; $(MAKE) -C backend build
-build-web:  ; $(MAKE) -C frontend build
-smoke:      ; $(MAKE) -C backend smoke
-dev-up:     ; docker-compose -f deploy/docker-compose.yml -f deploy/docker-compose.t480.yml up -d --build
-dev-down:   ; docker-compose -f deploy/docker-compose.yml down
-prod-up:    ; docker-compose -f deploy/docker-compose.yml -f deploy/docker-compose.t480.yml up -d --build
-backup:     ; . scripts/load-prod-env.sh && scripts/backend/backup.sh
-restore:    ; . scripts/load-prod-env.sh && scripts/backend/restore.sh
-# 其余统筹 target(docker-cleanup/audit-report/verify 等)
+test:
+	@if command -v go >/dev/null 2>&1 && go version | grep -q 'go1\.25'; then \
+		GOPROXY=$(GOPROXY) go test ./...; \
+	else \
+		docker run --rm -e GOPROXY=$(GOPROXY) -e NO_PROXY=$(NO_PROXY) -e no_proxy=$(NO_PROXY) -v "$$(pwd)":/src -w /src golang:1.25-bookworm go test ./...; \
+	fi
+
+build-api:
+	@if command -v go >/dev/null 2>&1 && go version | grep -q 'go1\.25'; then \
+		GOPROXY=$(GOPROXY) go build -o bin/memory-api ./cmd/memory-api; \
+	else \
+		docker run --rm -e GOPROXY=$(GOPROXY) -e NO_PROXY=$(NO_PROXY) -e no_proxy=$(NO_PROXY) -v "$$(pwd)":/src -w /src golang:1.25-bookworm go build -o bin/memory-api ./cmd/memory-api; \
+	fi
+
+build-worker:
+	@if command -v go >/dev/null 2>&1 && go version | grep -q 'go1\.25'; then \
+		GOPROXY=$(GOPROXY) go build -o bin/memory-worker ./cmd/memory-worker; \
+	else \
+		docker run --rm -e GOPROXY=$(GOPROXY) -e NO_PROXY=$(NO_PROXY) -e no_proxy=$(NO_PROXY) -v "$$(pwd)":/src -w /src golang:1.25-bookworm go build -o bin/memory-worker ./cmd/memory-worker; \
+	fi
+
+build-mcp:
+	@if command -v go >/dev/null 2>&1 && go version | grep -q 'go1\.25'; then \
+		GOPROXY=$(GOPROXY) go build -o bin/memory-mcp ./cmd/memory-mcp; \
+	else \
+		docker run --rm -e GOPROXY=$(GOPROXY) -e NO_PROXY=$(NO_PROXY) -e no_proxy=$(NO_PROXY) -v "$$(pwd)":/src -w /src golang:1.25-bookworm go build -o bin/memory-mcp ./cmd/memory-mcp; \
+	fi
+
+build-web:
+	npm --prefix frontend install
+	npm --prefix frontend run build
+
+smoke:
+	@if command -v go >/dev/null 2>&1 && go version | grep -q 'go1\.25'; then \
+		GOPROXY=$(GOPROXY) go run ./cmd/memory-smoke; \
+	else \
+		docker run --rm -e GOPROXY=$(GOPROXY) -e NO_PROXY=$(NO_PROXY) -e no_proxy=$(NO_PROXY) -v "$$(pwd)":/src -w /src golang:1.25-bookworm go run ./cmd/memory-smoke; \
+	fi
+
+prod-up:
+	. scripts/load-prod-env.sh && \
+	. scripts/load-build-info.sh && \
+	ALLOW_EXISTING_DEPLOYMENT=1 scripts/preflight.sh && \
+	export COMPOSE_PROJECT_NAME=deploy && \
+	APP_ENV=production ENABLE_DEV_ENDPOINTS=false \
+	docker-compose -f deploy/docker-compose.yml -f deploy/docker-compose.t480.yml up -d --build memory-api memory-worker memory-mcp memory-web
+
+backup:
+	. scripts/load-prod-env.sh && export COMPOSE_PROJECT_NAME=deploy && scripts/backup.sh
+
+restore:
+	. scripts/load-prod-env.sh && export COMPOSE_PROJECT_NAME=deploy && scripts/restore.sh
 ```
 
-### `backend/Makefile`
+注意:
 
-> Go module 在根目录,backend/Makefile 的 go 命令必须 `cd ..` 到根目录执行(不用 GOFLAGS,统一用 cd)。
+- 后端测试必须继续使用 `go test ./...`。
+- 不使用 `go test ./backend/...`,因为本轮没有 `backend/` Go 目录。
+- 根 Makefile 是唯一强制入口;本轮不新增 `backend/Makefile`,也不强制新增 `frontend/Makefile`,避免前后端入口不对称。
+- `test` 必须先确认宿主机 Go 是 1.25;如果不是,必须用 `golang:1.25-bookworm` 容器执行,避免 T480 当前 Go 1.24.1 触发失败。
+- 所有生产 target 和脚本内 compose 调用必须显式 `COMPOSE_PROJECT_NAME=deploy`,避免换目录后 compose project name 改变导致 volume 名变化。
 
-```makefile
-test:     ; cd .. && go test ./backend/...
-build:    ; cd .. && go build -o bin/memory-api ./backend/cmd/memory-api  # 各 cmd 分别 build
-smoke:    ; cd .. && go run ./backend/cmd/memory-smoke
-lint:     ; cd .. && go vet ./backend/...
-seed-dev: ; cd .. && go run ./backend/cmd/memory-bootstrap
-```
+## 6. 路径修改清单
 
-### `frontend/Makefile`
+### 6.1 前端路径
 
-```makefile
-build:    ; npm install && npm run build
-dev:      ; npm run dev
-generate: ; npm run generate
-```
-
-## 5. 路径引用同步修改清单
-
-> 关键前提:docker-compose.yml 在 `deploy/` 下,build context 是 `..`(即仓库根)。所有 Dockerfile 的 COPY 路径都相对仓库根。
-
-| 文件 | 改动 |
+| 文件 | 修改 |
 |------|------|
-| `deploy/docker-compose*.yml` | `dockerfile: deploy/Dockerfile.api` → `deploy/backend/Dockerfile.api`;`deploy/Dockerfile.web` → `deploy/frontend/Dockerfile.web`;`deploy/Dockerfile.mcp/worker/llm-mock` → `deploy/backend/...`。context 保持 `..` 不变 |
-| `deploy/backend/Dockerfile.api/mcp/worker` | `COPY go.mod go.sum ./` 不变;`COPY . .` 改为 `COPY backend/ ./backend/` + `COPY migrations/ ./migrations/`(避免拷 frontend);`go build ./cmd/memory-api` 改为 `go build ./backend/cmd/memory-api` |
-| `deploy/backend/Dockerfile.llm-mock` | 确认 `COPY` 的 `memory-llm-mock.py` 路径(同目录,改 `COPY deploy/backend/memory-llm-mock.py`) |
-| `deploy/frontend/Dockerfile.web` | `COPY web/package*.json` → `COPY frontend/package*.json`;`COPY web/` → `COPY frontend/`;`COPY --from=build /src/web/.output` → `/src/frontend/.output`(WORKDIR 同步改 `/src/frontend`);`COPY deploy/nginx.conf` → `COPY deploy/frontend/nginx.conf` |
-| `Makefile`(根+子) | 全部 `web/` → `frontend/`,`cd web` → `cd frontend` |
-| `backend/internal/webdeploy/*_test.go` | 目录层级从 `internal/webdeploy/` 变 `backend/internal/webdeploy/`(深一级)。原 `../../web/`(到根进 web)→ `../../../frontend/`(到根进 frontend)。字符串断言里的 `web/` → `frontend/` |
-| `.dockerignore` | `web/node_modules` 等 → `frontend/node_modules` 等;确认 `backend/` 不需额外排除 |
-| `.gitignore` | `web/dist` 等 → `frontend/dist` 等 |
-| `frontend/package.json` | name `memory-os-web` → `memory-os-frontend` |
-| `scripts/*` 内路径引用 | `$REPO_ROOT/web` → `$REPO_ROOT/frontend`;`scripts/backup.sh` → `scripts/backend/backup.sh`;脚本自身位置变了,内部 `$REPO_ROOT` 计算逻辑需同步(`$(dirname $0)/..` 的层级可能变) |
+| `web/` | 重命名为 `frontend/` |
+| `frontend/package.json` | `name` 从 `memory-os-web` 改为 `memory-os-frontend` |
+| 根 `Makefile` | `cd web`、`$(pwd)/web` 改为 `frontend` |
+| `.gitignore` | `web/dist` 改为 `frontend/dist`;同时保留根级 `node_modules/`、`.nuxt/`、`.output/` 规则 |
+| `.dockerignore` | `web/node_modules`、`web/.nuxt`、`web/.output` 改为 `frontend/...` |
+| 脚本中的前端引用 | `$REPO_ROOT/web` 改为 `$REPO_ROOT/frontend` |
+| Go 测试中的前端路径 | 只修正引用 `web/` 的测试断言和相对路径,不移动测试文件 |
 
-## 6. Go 代码改动范围
+### 6.2 Docker 路径
 
-- **零业务代码改动**。
-- `import "memory-os/internal/xxx"` 全部不变(module 名不变)。
-- 唯一需改的 Go 文件:`backend/internal/webdeploy/*_test.go` 里的字符串断言和相对路径(因为目录名 `web` → `frontend`)。
+| 文件 | 修改 |
+|------|------|
+| `deploy/Dockerfile.api` | 移到 `deploy/backend/Dockerfile.api` |
+| `deploy/Dockerfile.worker` | 移到 `deploy/backend/Dockerfile.worker` |
+| `deploy/Dockerfile.mcp` | 移到 `deploy/backend/Dockerfile.mcp` |
+| `deploy/Dockerfile.llm-mock` | 移到 `deploy/backend/Dockerfile.llm-mock` |
+| `deploy/memory-llm-mock.py` | 移到 `deploy/backend/memory-llm-mock.py` |
+| `deploy/Dockerfile.web` | 移到 `deploy/frontend/Dockerfile.web` |
+| `deploy/nginx.conf` | 移到 `deploy/frontend/nginx.conf` |
+| `deploy/docker-compose*.yml` | 只更新 `dockerfile:` 路径;`context: ..` 保持不变 |
+
+### 6.3 后端 Dockerfile COPY 策略
+
+后端 Dockerfile 的 build context 仍是仓库根。
+
+后端镜像必须复制:
+
+```dockerfile
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+COPY migrations/ ./migrations/
+```
+
+构建命令保持:
+
+```dockerfile
+RUN go build -o /out/memory-api ./cmd/memory-api
+```
+
+不得改成:
+
+```dockerfile
+COPY backend/ ./backend/
+RUN go build ./backend/cmd/memory-api
+```
+
+### 6.4 前端 Dockerfile COPY 策略
+
+前端 Dockerfile 的 build context 仍是仓库根。
+
+```dockerfile
+WORKDIR /src/frontend
+COPY frontend/package*.json ./
+RUN npm install
+COPY frontend/ ./
+RUN npm run generate
+
+COPY deploy/frontend/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /src/frontend/.output/public/ /usr/share/nginx/html/
+```
 
 ## 7. T480 部署规范化
 
-### 7.1 阶段顺序
+### 7.1 安全迁移原则
 
-1. 本地完成分区规范化(第 3-6 节)。
-2. 本地验证通过后 push 到 GitHub。
-3. T480 上把 `/opt/memory-os` 改为 git clone(保留本地状态文件)。
-4. 创建 `.env.production`,注入生产密钥。
-5. 清理散落文件和旧备份。
-6. 验证容器健康。
+T480 迁移不直接覆盖当前 `/opt/memory-os`。
 
-### 7.2 T480 目标目录结构
+使用新目录演练:
 
-```
-/opt/memory-os/                # git clone 的仓库
-├── (仓库内容: backend/ frontend/ deploy/ scripts/ ...)
-├── .env.production            # 生产密钥,权限 600,不进 git
-├── backups/                   # 备份产物,不进 git
-├── artifacts/                 # 审计/报告产物,不进 git
-└── .gocache/                  # Go 构建缓存,不进 git
+```text
+/opt/memory-os          # 当前生产目录,先保留
+/opt/memory-os-next     # git clone 演练目录
 ```
 
-### 7.3 密钥注入
+只有满足以下条件后,才允许切换:
 
-- 创建 `/opt/memory-os/.env.production`(权限 600),内容:`LLM_API_KEY`、`POSTGRES_PASSWORD`、`SECRET_VAULT_KEY_B64`、`SECRET_VAULT_KEY_ID`、`LLM_BASE_URL` 等生产值。
-- `docker-compose.yml` 已用 `${LLM_API_KEY:?required}` 强制校验(保留)。
-- compose 启动时自动加载 `.env.production`(docker-compose 默认读 `.env`,需显式 `--env-file .env.production` 或软链)。
-- `.env.production` 必须在 `.gitignore`(已有 `.env.*` 规则覆盖)。
+- 当前生产目录已完成一次新备份。
+- `/opt/memory-os-next` 已完成 compose config 校验。
+- `/opt/memory-os-next` 已完成镜像构建。
+- `/opt/memory-os-next` 已能读取 `.env.production`。
+- `/opt/memory-os-next` 的 `COMPOSE_PROJECT_NAME=deploy` 已确认。
+- `/opt/memory-os-next` 已确认 Go 1.25 可用;若宿主机只有 Go 1.24.1 或 `go` 不在 SSH PATH,必须走 Docker Go 1.25 fallback。
+- `/opt/memory-os-next` 的服务健康检查通过。
+- 用户再次确认允许切换生产目录。
 
-### 7.4 部署流程标准化
+### 7.2 `.env.production`
 
-根 Makefile 提供 deploy target:
-```makefile
-deploy-pull:    ; git pull
-deploy-up:      ; $(MAKE) build-api && $(MAKE) build-web && docker-compose -f deploy/docker-compose.yml -f deploy/docker-compose.t480.yml up -d --build
-deploy-down:    ; docker-compose -f deploy/docker-compose.yml down
-deploy-restart: ; deploy-down && deploy-up
-deploy-status:  ; docker-compose -f deploy/docker-compose.yml ps
+生产密钥统一存放:
+
+```text
+/opt/memory-os/.env.production
 ```
 
-### 7.5 散落文件清理(T480)
+要求:
 
-- 根目录散落的 `final-delivery-report.sh`、`completion-checklist-audit.md`、`permission-isolation-bundle.md`、`security-evidence-bundle.md` → 移到 `artifacts/` 或删除(这些是本地未跟踪的产物)。
+- 权限为 `600`。
+- 不允许是 symlink。
+- 不进 git。
+- 只通过 `scripts/load-prod-env.sh` 加载。
+- `prod-up`、`backup`、`restore`、`post-deploy-verify` 必须先 source `scripts/load-prod-env.sh`。
+- compose 不使用 `env_file`;密钥通过 `load-prod-env.sh` source 到当前 shell,再由同一个 shell 中的 compose `${VAR}` interpolation 注入。
+- 任何 `docker-compose config/up/ps/exec` 命令如果依赖生产变量,必须写在 `. scripts/load-prod-env.sh && ...` 之后,不能拆成两个 shell。
+- 生产启动必须拒绝 `replace-me`、`example`、`dev-only`、`mock` 这类占位值。
+- 当前 `scripts/preflight.sh` 尚未实现 placeholder secret 检查;阶段 3 必须新增该检查,不能把它当成已有能力。
 
-### 7.6 备份规范化
+禁止:
 
-- 删除旧的 `/root/memory-service/backup.sh` 和对应 cron(6 月旧脚本,和 `memory-service_pgdata` 旧 volume 一起清理)。
-- 保留 `/opt/memory-os/scripts/backend/backup.sh`。
-- cron 统一调 `cd /opt/memory-os && make backup`(已有,保留)。
-- 备份输出到 `/opt/memory-os/backups/`。
+- 用 `.env.example` 启动生产。
+- 把真实密钥写入文档、日志、测试快照、memory、Archive、Qdrant payload 或回复。
+- 用软链绕过 `.env.production` 权限检查。
 
-### 7.7 不动的
+### 7.3 迁移步骤
 
-- volume 名 `deploy_*` 不改(改要重建数据卷)。
-- 无 systemd 托管(容器靠 docker `restart: unless-stopped`,机器重启靠 docker daemon 自启,不额外加 systemd)。
+1. 在当前生产目录执行备份:
 
-## 8. Dockerfile build context 策略(明确)
+```bash
+cd /opt/memory-os
+make backup
+```
 
-所有 Dockerfile 的 build context 统一为仓库根(`context: ..`),Dockerfile 内 COPY 路径相对根:
-- Go 后端 Dockerfile 只 `COPY backend/`、`COPY go.mod go.sum`、`COPY migrations/`,**不 COPY frontend/**(由 `.dockerignore` + 精确 COPY 双重保证)。
-- 前端 Dockerfile 只 `COPY frontend/`、`COPY deploy/frontend/nginx.conf`。
-- `.dockerignore` 补充排除 `frontend/node_modules`、`frontend/.nuxt`、`frontend/.output`、`backend/` 不需额外排除(本就不拷)。
+2. 创建新 git clone 目录:
 
-## 9. 验证计划
+```bash
+cd /opt
+: "${REPO_URL:?REPO_URL must be set to the confirmed Git remote URL}"
+git clone "$REPO_URL" memory-os-next
+```
 
-### 本地(分区规范化后)
+3. 复制生产环境文件:
 
-- `go build ./...` + `go vet ./...`
-- `go test ./backend/...`(尤其 `backend/internal/webdeploy` 测试)
-- `docker-compose -f deploy/docker-compose.yml config` 静态校验
-- 前端 `nuxt build` 在 T480 跑(本地不跑容器)
+```bash
+cp /opt/memory-os/.env.production /opt/memory-os-next/.env.production
+chmod 600 /opt/memory-os-next/.env.production
+```
 
-### T480(部署规范化后)
+4. 在新目录做静态校验:
 
-- `git pull` 成功,目录结构正确
-- `.env.production` 权限 600,密钥值存在
-- `docker-compose -f deploy/docker-compose.yml -f deploy/docker-compose.t480.yml config` 校验通过(密钥解析正常)
-- `make deploy-up` 容器全部 healthy
-- `curl http://127.0.0.1:18081/healthz` 返回 200
-- `curl http://127.0.0.1:18081/openapi.json` 返回 JSON
-- Web 访问 `http://127.0.0.1:18080` 登录页正常
-- `make backup` 手动跑一次确认备份正常
+```bash
+cd /opt/memory-os-next
+export MEMORY_OS_ENV_FILE=.env.production
+. scripts/load-prod-env.sh
+COMPOSE_PROJECT_NAME=deploy docker-compose -f deploy/docker-compose.yml -f deploy/docker-compose.t480.yml config >/tmp/memory-os-compose-config.txt
+```
 
-## 10. 风险与缓解
+5. 确认 Go 1.25 工具链:
 
-| 风险 | 缓解 |
-|------|------|
-| Dockerfile build context 路径改错导致镜像构建失败 | 逐个 Dockerfile 确认 COPY 路径,compose config 静态校验,build 失败立即回滚 |
-| `webdeploy` 测试断言文本改漏导致 go test 挂 | 改完单独跑 `go test ./backend/internal/webdeploy` |
-| T480 git clone 时本地状态文件(backups/artifacts/.env)丢失 | 这些都在 .gitignore,git clone 不会动它们;但迁移前再确认一次 |
-| `.env.production` 密钥值错误导致容器起不来 | 先用 `.env.example` 占位值跑通,再换真实密钥;密钥错误时容器会报明确错误 |
-| 旧备份 cron 删除后备份中断 | 先确认新 cron 正常,再删旧 cron |
+```bash
+cd /opt/memory-os-next
+if command -v go >/dev/null 2>&1 && go version | grep -q 'go1\.25'; then
+  go version
+else
+  docker run --rm -v "$PWD":/src -w /src golang:1.25-bookworm go version
+fi
+```
 
-## 11. 范围检查
+6. 构建并验证:
 
-本规格聚焦「目录结构 + 部署流程」规范化,不涉及业务功能。可用一个实现计划覆盖,分两阶段执行:
-- 阶段一:本地分区规范化(第 3-6 节)。
-- 阶段二:T480 部署规范化(第 7 节)。
+```bash
+cd /opt/memory-os-next
+MEMORY_OS_ENV_FILE=.env.production make test
+MEMORY_OS_ENV_FILE=.env.production make build-web
+MEMORY_OS_ENV_FILE=.env.production make prod-up
+MEMORY_OS_ENV_FILE=.env.production make post-deploy-verify
+```
 
-阶段一完成后 push、阶段二再开始,中间有验证关卡。
+说明:
+
+- `/opt/memory-os-next` 是新 clone,首次 `make test` 和 `make build-web` 会重新下载 Go module 与 npm 依赖,耗时会比当前生产目录更长。
+- `make prod-up` 必须在 Makefile 内部固定 `COMPOSE_PROJECT_NAME=deploy`;调用方不需要额外传入,避免不同执行者漏传。
+- `make backup`、`make restore`、`make post-deploy-verify` 以及脚本内部 compose 调用也必须继承 `COMPOSE_PROJECT_NAME=deploy`。
+
+7. 切换前必须再次确认:
+
+```text
+确认项:
+- 是否允许短暂停止当前生产容器
+- 是否允许把 /opt/memory-os 切换为 git clone 目录
+- 是否保留旧目录为 /opt/memory-os-previous-<timestamp>
+```
+
+### 7.4 清理策略
+
+本轮只移动明显的非运行产物到 `artifacts/`,不删除历史备份和旧 volume。
+
+允许移动:
+
+- `final-delivery-report.sh`
+- `completion-checklist-audit.md`
+- `permission-isolation-bundle.md`
+- `security-evidence-bundle.md`
+
+移动目标:
+
+```text
+/opt/memory-os/artifacts/
+```
+
+旧 cron、旧脚本、旧 volume 清理必须单独生成清单,清单包含:
+
+- 路径或 volume 名。
+- 当前是否仍被进程或 cron 引用。
+- 最近修改时间。
+- 删除后影响。
+- 回滚方式。
+- 用户确认记录。
+
+## 8. 验证计划
+
+### 8.1 本地验证
+
+修改完成后运行:
+
+```bash
+go test ./...
+go vet ./...
+go build ./...
+npm --prefix frontend install
+npm --prefix frontend run build
+POSTGRES_PASSWORD=local-check \
+LLM_API_KEY=local-check \
+SECRET_VAULT_KEY_ID=local-check \
+SECRET_VAULT_KEY_B64=dGVzdC1rZXktMTIzNDU2Nw== \
+COMPOSE_PROJECT_NAME=deploy \
+docker-compose -f deploy/docker-compose.yml -f deploy/docker-compose.t480.yml config >/tmp/memory-os-compose-config.txt
+```
+
+说明:
+
+- 如果本地或服务器宿主机 Go 不是 1.25,`go test`、`go vet`、`go build` 必须改用 Docker `golang:1.25-bookworm` 执行。
+- 本地 compose config 只做静态解析,不启动生产。
+- 本地 `npm --prefix frontend run build` 是轻量前端构建验证,不启动 Memory OS 容器,不违反“本地不运行 Memory OS 容器”的项目规则。
+- 本地 fake 值只允许用于 `config` 静态校验,不得用于 `prod-up`。
+
+### 8.2 T480 验证
+
+在服务器执行:
+
+```bash
+cd /opt/memory-os-next
+if command -v go >/dev/null 2>&1 && go version | grep -q 'go1\.25'; then go version; else docker run --rm -v "$PWD":/src -w /src golang:1.25-bookworm go version; fi
+export MEMORY_OS_ENV_FILE=.env.production
+. scripts/load-prod-env.sh
+COMPOSE_PROJECT_NAME=deploy docker-compose -f deploy/docker-compose.yml -f deploy/docker-compose.t480.yml config >/tmp/memory-os-compose-config.txt
+MEMORY_OS_ENV_FILE=.env.production make test
+MEMORY_OS_ENV_FILE=.env.production make build-web
+MEMORY_OS_ENV_FILE=.env.production make prod-up
+COMPOSE_PROJECT_NAME=deploy docker-compose -f deploy/docker-compose.yml -f deploy/docker-compose.t480.yml ps
+curl -fsS http://127.0.0.1:18081/healthz
+curl -fsS http://127.0.0.1:18081/openapi.json
+curl -fsS http://127.0.0.1:18080/
+MEMORY_OS_ENV_FILE=.env.production make backup
+MEMORY_OS_ENV_FILE=.env.production make post-deploy-verify
+```
+
+验收条件:
+
+- 所有命令成功。
+- `docker-compose ps` 显示核心服务 healthy 或 running。
+- `docker-compose ps` 必须在 `COMPOSE_PROJECT_NAME=deploy` 下执行。
+- Go 1.25 可用,或 Docker `golang:1.25-bookworm` fallback 可用。
+- Web 登录页可访问。
+- OpenAPI JSON 可访问。
+- 备份产物生成。
+- 没有真实 secret 出现在日志、文档、测试快照或命令输出中。
+
+## 9. 风险与缓解
+
+| 风险 | 级别 | 缓解 |
+|------|------|------|
+| 误移动 Go `internal/` 导致 import 失效 | P0 | 本轮明确禁止移动 `cmd/`、`internal/`、`migrations/` |
+| T480 Go 版本低于 1.25 或 SSH PATH 没有 `go` | P0 | Makefile 必须检测 Go 1.25;不满足时使用 Docker `golang:1.25-bookworm` fallback |
+| 换目录后 compose project name 改变,导致 volume 名变化 | P0 | 所有生产 compose 命令和脚本设置 `COMPOSE_PROJECT_NAME=deploy`;验证 `docker-compose ps` 也必须带同一 project name |
+| `.env.production` 没被加载,生产变量缺失 | P1 | 所有生产 Makefile target 先 source `scripts/load-prod-env.sh`;compose 命令必须与 source 在同一个 shell 链路执行 |
+| placeholder secret 被用于生产 | P1 | 阶段 3 新增 `preflight` 检查,拒绝 `replace-me`、`dev-only`、`mock`、`example` |
+| 前端路径改漏导致 build 失败 | P1 | `npm --prefix frontend run build` 必须通过 |
+| Dockerfile COPY 路径改漏导致镜像构建失败 | P1 | `docker-compose config` + `make prod-up` 构建验证 |
+| 旧备份 cron 删除后备份中断 | P1 | 本轮不删除旧 cron;新备份验证后单独清理 |
+| `scripts/` 批量移动导致相对路径失效 | P2 | 本轮不整体移动 scripts,只修正引用 `web/` 的路径 |
+
+## 10. 后端目录拆分的独立方案
+
+如果未来仍要把 Go 后端移动到 `backend/`,必须作为独立重构执行,不得和本轮混做。
+
+可选路线:
+
+### 路线 A: 保持根 Go module,只移动入口文档
+
+- `cmd/`、`internal/`、`migrations/` 继续留根。
+- 新增 `backend/README.md` 解释后端目录由根级 Go module 承载。
+- 风险最低。
+
+### 路线 B: Go 代码整体迁入 `backend/`
+
+必须同步修改:
+
+- 所有 `memory-os/internal/xxx` import 改为 `memory-os/backend/internal/xxx`。
+- 所有 `go build ./cmd/...` 改为 `go build ./backend/cmd/...`。
+- 所有 `go test ./...` 保留为全仓验证。
+- 所有 Dockerfile COPY 策略重写。
+- migrations embed 路径重新验证。
+- OpenAPI、smoke、bootstrap、worker、MCP 全量验证。
+
+路线 B 是真实重构,需要单独测试窗口和回滚计划。
+
+## 11. 执行阶段
+
+### 阶段 1: 前端目录规范化
+
+- 重命名 `web/` 为 `frontend/`。
+- 更新前端路径引用。
+- 更新 `.gitignore` 和 `.dockerignore`。
+- 新增 `frontend/README.md`。
+- 验证 `npm --prefix frontend run build`。
+
+### 阶段 2: Docker 布局规范化
+
+- 移动 Dockerfile 到 `deploy/backend/` 和 `deploy/frontend/`。
+- 更新 compose `dockerfile:` 路径。
+- 后端 Dockerfile 继续复制根目录 `cmd/`、`internal/`、`migrations/`。
+- 验证 `docker-compose config`。
+
+### 阶段 3: Makefile 和生产入口规范化
+
+- 根 Makefile 保留现有 target。
+- `build-web` 改为直接执行 `npm --prefix frontend install` 和 `npm --prefix frontend run build`。
+- `prod-up` 固定通过 `scripts/load-prod-env.sh` 加载生产变量。
+- `prod-up`、`backup`、`restore`、`post-deploy-verify` 和相关脚本内 compose 调用全部设置或继承 `COMPOSE_PROJECT_NAME=deploy`。
+- 所有生产 compose 命令必须与 `. scripts/load-prod-env.sh` 保持同一 shell 链路。
+- `test`、`build-api`、`smoke` 等 Go target 必须检测 Go 1.25;宿主机不满足时用 Docker Go 1.25 fallback。
+- `preflight` 新增 placeholder secret 拒绝规则,覆盖 `POSTGRES_PASSWORD`、`LLM_API_KEY`、`SECRET_VAULT_KEY_ID`、`SECRET_VAULT_KEY_B64` 等生产必填变量。
+
+### 阶段 4: T480 git clone 演练
+
+- 创建 `/opt/memory-os-next`。
+- 复制 `.env.production`。
+- 在新目录完成测试、构建、compose config、prod-up、post-deploy-verify。
+- 通过后等待用户确认是否切换。
+
+### 阶段 5: 清理计划
+
+- 只生成清理清单。
+- 不自动删除。
+- 用户确认后再执行旧 cron、旧脚本、旧 volume 清理。
+
+## 12. 完成定义
+
+本规格完成时必须满足:
+
+- `go test ./...` 通过。
+- `go vet ./...` 通过。
+- `go build ./...` 通过。
+- `npm --prefix frontend run build` 通过。
+- `docker-compose config` 通过。
+- T480 `/opt/memory-os-next` 演练通过。
+- `/healthz` 可访问。
+- `/openapi.json` 可访问。
+- Web 登录页可访问。
+- 备份命令可运行并生成产物。
+- 没有删除线上数据。
+- 没有改变 volume 名。
+- 没有把真实 secret 写入仓库、日志、memory、Archive、Qdrant payload 或交付报告。
