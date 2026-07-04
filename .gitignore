@@ -49,3 +49,6 @@ artifacts/
 # 内部交付记录与截图（不公开）
 docs/production-delivery-log.md
 memory-os-home.png
+
+# 设计文档、规格、phase 计划、审计报告（不公开）
+docs/
