@@ -147,7 +147,7 @@ services:
       context: ..
       dockerfile: deploy/frontend/Dockerfile.web
       args:
-        NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-http://localhost:18081}
+        NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-}
     ports:
       - "18080:18080"
 

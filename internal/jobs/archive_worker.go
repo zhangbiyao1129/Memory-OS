@@ -44,14 +44,15 @@ func (w ArchiveWorker) Handle(job ArchiveJob) (archive.Result, error) {
 		return w.handle(job)
 	}
 	result, err := w.service.Create(archive.CreateRequest{
-		RequestID: job.RequestID,
-		ArchiveID: job.ArchiveID,
-		Title:     job.Title,
-		UserID:    job.UserID,
-		OrgID:     job.OrgID,
-		ProjectID: job.ProjectID,
-		CreatedAt: job.CreatedAt,
-		Events:    job.Events,
+		RequestID:  job.RequestID,
+		ArchiveID:  job.ArchiveID,
+		Title:      job.Title,
+		UserID:     job.UserID,
+		OrgID:      job.OrgID,
+		ProjectID:  job.ProjectID,
+		CreatedAt:  job.CreatedAt,
+		RenderMode: "knowledge",
+		Events:     job.Events,
 	})
 	if err != nil || result.Deduped || w.indexEnqueuer == nil {
 		return result, err

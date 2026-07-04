@@ -38,6 +38,53 @@ func TestServiceCreateArchiveWritesFileAndMetadata(t *testing.T) {
 	}
 }
 
+func TestServiceCreateKnowledgeArchiveWritesSummaryMarkdownAndReindexes(t *testing.T) {
+	root := t.TempDir()
+	service := NewService(NewMemoryRepository(), root)
+
+	result, err := service.Create(CreateRequest{
+		RequestID:  "request_knowledge_1",
+		ArchiveID:  "archive_knowledge_1",
+		Title:      "API 地址修复知识",
+		UserID:     "user_1",
+		OrgID:      "org_1",
+		ProjectID:  "project_1",
+		CreatedAt:  time.Date(2026, 7, 4, 0, 0, 0, 0, time.UTC),
+		RenderMode: "knowledge",
+		Events: []eventlog.TurnEvent{
+			archiveEvent("event_1", "页面请求 your-server 失败"),
+			archiveEvent("event_2", "修复 useApi 默认按当前 hostname 拼接 :18081，并验证 go test ./internal/webdeploy 通过"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	content, err := os.ReadFile(result.Metadata.FilePath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	markdown := string(content)
+	for _, want := range []string{"## 结论", "## 关键事实", "## 来源", "your-server", "useApi", "event_1", "event_2"} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("knowledge archive missing %q:\n%s", want, markdown)
+		}
+	}
+	if strings.Contains(markdown, "## Timeline") {
+		t.Fatalf("knowledge archive should not use timeline renderer:\n%s", markdown)
+	}
+
+	reindexed, err := service.Reindex(ReindexRequest{RequestID: "reindex_knowledge_1", ArchiveID: result.Metadata.ArchiveID, Reason: "test index"})
+	if err != nil {
+		t.Fatalf("Reindex() error = %v", err)
+	}
+	if len(reindexed.Chunks) == 0 {
+		t.Fatal("knowledge archive reindex produced no chunks")
+	}
+	if !strings.Contains(reindexed.Chunks[0].Content, "## 结论") {
+		t.Fatalf("first chunk should contain knowledge summary content: %+v", reindexed.Chunks[0])
+	}
+}
+
 func TestServiceCreateDedupesRequestID(t *testing.T) {
 	service := NewService(NewMemoryRepository(), t.TempDir())
 	request := CreateRequest{

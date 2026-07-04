@@ -19,14 +19,15 @@ type Service struct {
 }
 
 type CreateRequest struct {
-	RequestID string
-	ArchiveID string
-	Title     string
-	UserID    string
-	OrgID     string
-	ProjectID string
-	CreatedAt time.Time
-	Events    []eventlog.TurnEvent
+	RequestID  string
+	ArchiveID  string
+	Title      string
+	UserID     string
+	OrgID      string
+	ProjectID  string
+	CreatedAt  time.Time
+	RenderMode string
+	Events     []eventlog.TurnEvent
 }
 
 type EditRequest struct {
@@ -78,7 +79,7 @@ func (s Service) Create(request CreateRequest) (Result, error) {
 	if request.RequestID == "" || request.ArchiveID == "" || request.UserID == "" || request.OrgID == "" || request.ProjectID == "" {
 		return Result{}, errors.New("archive create ids are required")
 	}
-	content, err := RenderMarkdown(RenderRequest{ArchiveID: request.ArchiveID, Title: request.Title, Events: request.Events})
+	content, err := renderArchiveMarkdown(request)
 	if err != nil {
 		return Result{}, err
 	}
@@ -105,6 +106,14 @@ func (s Service) Create(request CreateRequest) (Result, error) {
 		return Result{}, err
 	}
 	return Result{Metadata: saved, Deduped: deduped}, nil
+}
+
+func renderArchiveMarkdown(request CreateRequest) (string, error) {
+	renderRequest := RenderRequest{ArchiveID: request.ArchiveID, Title: request.Title, Events: request.Events}
+	if request.RenderMode == "knowledge" {
+		return RenderKnowledgeMarkdown(renderRequest)
+	}
+	return RenderMarkdown(renderRequest)
 }
 
 func (s Service) Edit(request EditRequest) (Result, error) {

@@ -1,6 +1,6 @@
 FROM node:22-bookworm AS build
 WORKDIR /src/frontend
-ARG NUXT_PUBLIC_API_BASE=http://localhost:18081
+ARG NUXT_PUBLIC_API_BASE=
 ENV NUXT_PUBLIC_API_BASE=${NUXT_PUBLIC_API_BASE}
 COPY frontend/package*.json ./
 RUN npm install

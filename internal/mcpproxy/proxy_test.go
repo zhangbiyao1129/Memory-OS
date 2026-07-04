@@ -66,6 +66,9 @@ func TestProxyCallToolInjectsWorkspaceAndAgentForMemorySearch(t *testing.T) {
 	if actor["agent_id"] != "codex" {
 		t.Fatalf("actor agent_id = %#v, want codex", actor["agent_id"])
 	}
+	if arguments["scope"] != "project" || arguments["visibility"] != "project" {
+		t.Fatalf("default search scope/visibility = %#v/%#v, want project/project", arguments["scope"], arguments["visibility"])
+	}
 	if !detector.called {
 		t.Fatal("workspace detector was not called")
 	}

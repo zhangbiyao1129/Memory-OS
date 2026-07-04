@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,6 +81,9 @@ func TestArchiveWorkerEnqueuesRAGIndexJobAfterCreate(t *testing.T) {
 	}
 	if len(indexJob.Chunks) == 0 || indexJob.Chunks[0].ArchiveID != "archive_1" || indexJob.Chunks[0].IndexGeneration != 1 {
 		t.Fatalf("rag index chunks mismatch: %#v", indexJob.Chunks)
+	}
+	if indexJob.Chunks[0].Content == "" || !strings.Contains(indexJob.Chunks[0].Content, "## 结论") {
+		t.Fatalf("rag index chunk should contain knowledge markdown: %#v", indexJob.Chunks[0])
 	}
 
 	if _, err := worker.Handle(job); err != nil {

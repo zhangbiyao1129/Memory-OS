@@ -115,6 +115,12 @@ func (p Proxy) ensureSearchContext(ctx context.Context, args map[string]any) err
 	if strings.TrimSpace(stringArg(actor["agent_id"])) == "" {
 		actor["agent_id"] = p.agentID
 	}
+	if strings.TrimSpace(stringArg(args["scope"])) == "" {
+		args["scope"] = "project"
+	}
+	if strings.TrimSpace(stringArg(args["visibility"])) == "" {
+		args["visibility"] = "project"
+	}
 	if strings.TrimSpace(stringArg(actor["project_id"])) != "" {
 		return nil
 	}

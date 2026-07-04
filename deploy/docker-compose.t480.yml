@@ -28,4 +28,4 @@ services:
   memory-web:
     build:
       args:
-        NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-http://your-server:18081}
+        NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-}

@@ -7,7 +7,14 @@ type ApiOptions = {
 export function useApi() {
   const config = useRuntimeConfig()
   const auth = useAuthStore()
-  const baseURL = computed(() => String(config.public.apiBase || 'http://localhost:18081').replace(/\/$/, ''))
+  const baseURL = computed(() => {
+    const configured = String(config.public.apiBase || '').trim()
+    if (configured) return configured.replace(/\/$/, '')
+    if (typeof window !== 'undefined') {
+      return `${window.location.protocol}//${window.location.hostname}:18081`
+    }
+    return 'http://localhost:18081'
+  })
 
   async function request<T>(path: string, options: ApiOptions = {}): Promise<T> {
     const headers: Record<string, string> = { Accept: 'application/json' }

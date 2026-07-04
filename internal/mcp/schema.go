@@ -90,12 +90,20 @@ func memorySearchRequest(args map[string]any) (retrieval.SearchRequest, error) {
 	if err != nil {
 		return retrieval.SearchRequest{}, fmt.Errorf("permission_labels must be an array of strings")
 	}
+	scope := hotmemory.Scope(stringValue(args["scope"]))
+	if scope == "" {
+		scope = hotmemory.ScopeProject
+	}
+	visibility := stringValue(args["visibility"])
+	if visibility == "" {
+		visibility = "project"
+	}
 	return retrieval.SearchRequest{
 		RequestID:              stringValue(args["request_id"]),
 		Query:                  query,
 		Actor:                  actor,
-		Scope:                  hotmemory.Scope(stringValue(args["scope"])),
-		Visibility:             stringValue(args["visibility"]),
+		Scope:                  scope,
+		Visibility:             visibility,
 		PermissionLabels:       labels,
 		ArchiveIndexGeneration: intValue(args["archive_index_generation"]),
 		MaxContextBytes:        intValue(args["max_context_bytes"]),

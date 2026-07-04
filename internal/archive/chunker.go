@@ -29,7 +29,7 @@ type Chunk struct {
 	ContentHash     string
 }
 
-var sourceRefPattern = regexp.MustCompile("Source ref: `([^`]+)`")
+var sourceRefPattern = regexp.MustCompile("(?:Source ref|event_id): `([^`]+)`")
 
 func ChunkMarkdown(request ChunkRequest) ([]Chunk, error) {
 	if request.ArchiveID == "" {
@@ -82,13 +82,13 @@ func ChunkMarkdown(request ChunkRequest) ([]Chunk, error) {
 				headings = append(headings, heading)
 			}
 		}
+		if current.Len()+len(line)+1 > request.MaxBytes {
+			flush()
+		}
 		for _, match := range sourceRefPattern.FindAllStringSubmatch(line, -1) {
 			if len(match) == 2 {
 				sourceRefs = append(sourceRefs, match[1])
 			}
-		}
-		if current.Len()+len(line)+1 > request.MaxBytes {
-			flush()
 		}
 		current.WriteString(line)
 		current.WriteString("\n")

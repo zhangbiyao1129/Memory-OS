@@ -72,6 +72,28 @@ func TestHandleToolRunsMemorySearch(t *testing.T) {
 	}
 }
 
+func TestHandleToolMemorySearchDefaultsToProjectScopeAndVisibility(t *testing.T) {
+	handler := NewHandler(HandlerOptions{Retrieval: fixtureRetrievalService()})
+	response := handler.HandleTool("memory_search", map[string]any{
+		"request_id":               "mcp_default_scope",
+		"query":                    "deploy API",
+		"actor":                    map[string]any{"user_id": "user_1", "org_id": "org_1", "project_id": "project_1", "agent_id": "claude"},
+		"permission_labels":        []any{"project:project_1:read"},
+		"archive_index_generation": float64(2),
+		"max_context_bytes":        float64(512),
+	})
+
+	if response.Error != "" {
+		t.Fatalf("response error = %q, want default project scope search", response.Error)
+	}
+	if response.Code != "ok" || response.Search == nil {
+		t.Fatalf("response = %#v, want search ok", response)
+	}
+	if response.Search.RequestID != "mcp_default_scope" {
+		t.Fatalf("request id = %q, want mcp_default_scope", response.Search.RequestID)
+	}
+}
+
 func TestHandleToolMemorySearchMatchesHTTPRetrievalSemantics(t *testing.T) {
 	service := fixtureRetrievalService()
 	handler := NewHandler(HandlerOptions{Retrieval: service})

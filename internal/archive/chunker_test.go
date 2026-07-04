@@ -32,6 +32,29 @@ func TestChunkMarkdownKeepsHeadingAndSourceRefs(t *testing.T) {
 	}
 }
 
+func TestChunkMarkdownKeepsKnowledgeEventIDRefs(t *testing.T) {
+	markdown := "# Deploy Notes\n\n## 来源\n\n- event_id: `event_1`\n- event_id: `event_2`\n"
+
+	chunks, err := ChunkMarkdown(ChunkRequest{
+		ArchiveID:       "archive_1",
+		IndexGeneration: 1,
+		Content:         markdown,
+		MaxBytes:        256,
+	})
+
+	if err != nil {
+		t.Fatalf("ChunkMarkdown() error = %v", err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("chunks len = 0")
+	}
+	for _, want := range []string{"event_1", "event_2"} {
+		if !containsString(chunks[0].SourceEventIDs, want) {
+			t.Fatalf("source refs missing %s: %#v", want, chunks[0].SourceEventIDs)
+		}
+	}
+}
+
 func TestChunkMarkdownDoesNotLeakFakeSecret(t *testing.T) {
 	markdown := "# Safe\n\ntext sk-test-redacted-example\n"
 

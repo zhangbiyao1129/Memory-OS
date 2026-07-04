@@ -19,8 +19,8 @@ func TestWebDockerfileServesGeneratedNuxtStaticSite(t *testing.T) {
 	if !strings.Contains(dockerfile, "RUN npm run generate") {
 		t.Fatalf("Dockerfile.web must run nuxt generate so the SPA index.html is emitted")
 	}
-	if !strings.Contains(dockerfile, "ARG NUXT_PUBLIC_API_BASE=http://localhost:18081") {
-		t.Fatalf("Dockerfile.web must accept NUXT_PUBLIC_API_BASE as a build argument")
+	if !strings.Contains(dockerfile, "ARG NUXT_PUBLIC_API_BASE=") {
+		t.Fatalf("Dockerfile.web must accept optional NUXT_PUBLIC_API_BASE as a build argument")
 	}
 	if !strings.Contains(dockerfile, "ENV NUXT_PUBLIC_API_BASE=${NUXT_PUBLIC_API_BASE}") {
 		t.Fatalf("Dockerfile.web must expose NUXT_PUBLIC_API_BASE to nuxt generate")
@@ -43,11 +43,14 @@ func TestComposePassesExternalAPIBaseForT480WebBuild(t *testing.T) {
 		t.Fatalf("read docker-compose.t480.yml: %v", err)
 	}
 
-	if !strings.Contains(string(baseCompose), "NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-http://localhost:18081}") {
-		t.Fatalf("base compose must pass NUXT_PUBLIC_API_BASE to the web image build")
+	if !strings.Contains(string(baseCompose), "NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-}") {
+		t.Fatalf("base compose must pass optional NUXT_PUBLIC_API_BASE to the web image build")
 	}
-	if !strings.Contains(string(t480Compose), "NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-http://your-server:18081}") {
-		t.Fatalf("T480 compose must default the generated web app API base to the external API URL")
+	if strings.Contains(string(t480Compose), "your-server") {
+		t.Fatalf("T480 compose must not bake placeholder API hosts into the generated web app")
+	}
+	if !strings.Contains(string(t480Compose), "NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-}") {
+		t.Fatalf("T480 compose must pass optional NUXT_PUBLIC_API_BASE to the web image build")
 	}
 }
 
@@ -66,7 +69,7 @@ func TestComposeWebServiceDoesNotDependOnAPIContainer(t *testing.T) {
 
 	for _, required := range []string{
 		"dockerfile: deploy/frontend/Dockerfile.web",
-		"NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-http://localhost:18081}",
+		"NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-}",
 		`"18080:18080"`,
 	} {
 		if !strings.Contains(webService, required) {
@@ -80,6 +83,41 @@ func TestComposeWebServiceDoesNotDependOnAPIContainer(t *testing.T) {
 		if strings.Contains(webService, forbidden) {
 			t.Fatalf("memory-web compose service must not depend on API container marker %q", forbidden)
 		}
+	}
+}
+
+func TestFrontendApiBaseFallsBackToBrowserHost(t *testing.T) {
+	useAPIContent, err := os.ReadFile("../../frontend/composables/useApi.ts")
+	if err != nil {
+		t.Fatalf("read useApi composable: %v", err)
+	}
+	nuxtConfigContent, err := os.ReadFile("../../frontend/nuxt.config.ts")
+	if err != nil {
+		t.Fatalf("read nuxt config: %v", err)
+	}
+	useAPI := string(useAPIContent)
+	nuxtConfig := string(nuxtConfigContent)
+
+	for _, forbidden := range []string{
+		"your-server",
+		"http://localhost:18081').replace",
+	} {
+		if strings.Contains(useAPI, forbidden) || strings.Contains(nuxtConfig, forbidden) {
+			t.Fatalf("frontend must not ship fixed placeholder API base marker %q", forbidden)
+		}
+	}
+	for _, required := range []string{
+		"window.location.protocol",
+		"window.location.hostname",
+		":18081",
+		"config.public.apiBase",
+	} {
+		if !strings.Contains(useAPI, required) {
+			t.Fatalf("useApi must derive default API base from browser host, missing %q", required)
+		}
+	}
+	if !strings.Contains(nuxtConfig, "apiBase: process.env.NUXT_PUBLIC_API_BASE || ''") {
+		t.Fatal("nuxt config must leave apiBase empty by default so useApi can derive the browser host")
 	}
 }
 
