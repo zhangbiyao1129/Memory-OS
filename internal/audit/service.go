@@ -15,6 +15,10 @@ func NewService(repo Repository) Service {
 	return Service{repo: repo}
 }
 
+func (s Service) Configured() bool {
+	return s.repo != nil
+}
+
 func (s Service) Record(log Log) error {
 	if log.Action == "" || log.ResourceType == "" || log.ResourceID == "" || log.RequestID == "" {
 		return errors.New("audit action, resource and request id are required")
@@ -25,4 +29,18 @@ func (s Service) Record(log Log) error {
 		}
 	}
 	return s.repo.Save(log)
+}
+
+func (s Service) List(filter ListFilter) ([]Log, error) {
+	if filter.OrgID == "" || filter.ProjectID == "" {
+		return nil, errors.New("audit org id and project id are required")
+	}
+	return s.repo.List(filter)
+}
+
+func (s Service) ListSecurity(filter ListFilter) ([]Log, error) {
+	if filter.ActorUserID == "" {
+		return nil, errors.New("audit actor user id is required")
+	}
+	return s.repo.List(filter)
 }

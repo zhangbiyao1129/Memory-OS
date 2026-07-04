@@ -32,6 +32,10 @@ func NewService(repo Repository) Service {
 	return Service{repo: repo}
 }
 
+func (s Service) Configured() bool {
+	return s.repo != nil
+}
+
 func (s Service) SetPassword(userID, password string) error {
 	hash, err := HashPassword(password)
 	if err != nil {
@@ -94,6 +98,14 @@ func (s Service) ValidatePAT(plain string, now time.Time) (PATRecord, error) {
 	return record, nil
 }
 
+func (s Service) GetPAT(id string) (PATRecord, error) {
+	return s.repo.GetPAT(id)
+}
+
+func (s Service) ListPATs(filter TokenListFilter) ([]PATRecord, error) {
+	return s.repo.ListPATs(filter)
+}
+
 func (s Service) RevokePAT(id string) error {
 	return s.repo.RevokePAT(id, time.Now())
 }
@@ -145,4 +157,16 @@ func (s Service) ValidateAdapterToken(plain string, binding AdapterTokenBinding,
 		return AdapterTokenRecord{}, err
 	}
 	return record, nil
+}
+
+func (s Service) GetAdapterToken(id string) (AdapterTokenRecord, error) {
+	return s.repo.GetAdapterToken(id)
+}
+
+func (s Service) ListAdapterTokens(filter AdapterTokenListFilter) ([]AdapterTokenRecord, error) {
+	return s.repo.ListAdapterTokens(filter)
+}
+
+func (s Service) RevokeAdapterToken(id string) error {
+	return s.repo.RevokeAdapterToken(id, time.Now())
 }

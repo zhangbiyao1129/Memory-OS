@@ -53,6 +53,8 @@ func TestBackupScriptDryRunCreatesAuditableBackup(t *testing.T) {
 
 	runDir := filepath.Join(backupRoot, "test-run")
 	assertFileContains(t, filepath.Join(runDir, "manifest.json"), `"run_id":"test-run"`)
+	assertFileContains(t, filepath.Join(runDir, "manifest.json"), `"sha256"`)
+	assertFileContains(t, filepath.Join(runDir, "manifest.json"), `"file":"qdrant/dry-run.snapshot"`)
 	assertFileContains(t, filepath.Join(runDir, "postgres", "pg_dump.command"), "pg_dump")
 	assertFileContains(t, filepath.Join(runDir, "qdrant", "snapshot.command"), "/collections/memory_os/snapshots")
 

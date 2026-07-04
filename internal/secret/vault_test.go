@@ -70,6 +70,25 @@ func TestVaultDisablePreventsUse(t *testing.T) {
 	}
 }
 
+func TestVaultListReturnsMetadataOnly(t *testing.T) {
+	vault := NewVault(NewMemoryRepository(), testCodec(t))
+	if _, err := vault.Create(CreateRequest{OwnerUserID: "user_1", OrgID: "org_1", ProjectID: "project_1", Name: "api key", Plaintext: "fake-secret-value"}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := vault.Create(CreateRequest{OwnerUserID: "user_2", OrgID: "org_1", ProjectID: "project_1", Name: "other key", Plaintext: "other-fake-secret"}); err != nil {
+		t.Fatalf("Create(other) error = %v", err)
+	}
+
+	items, err := vault.List(ListFilter{OwnerUserID: "user_1", OrgID: "org_1", ProjectID: "project_1", Status: "active"})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+
+	if len(items) != 1 || items[0].OwnerUserID != "user_1" || items[0].Name != "api key" {
+		t.Fatalf("items mismatch: %#v", items)
+	}
+}
+
 func TestVaultRejectsEmptyPlaintext(t *testing.T) {
 	vault := NewVault(NewMemoryRepository(), testCodec(t))
 

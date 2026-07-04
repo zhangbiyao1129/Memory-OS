@@ -5,6 +5,7 @@ docs.zip
 .env
 .env.*
 !.env.example
+.build-info.env
 
 # Logs
 *.log
@@ -13,6 +14,16 @@ logs/
 # Go
 bin/
 coverage.out
+/memory-adapter
+/memory-api
+/memory-bootstrap
+/memory-browser-acceptance
+/memory-importer
+/memory-mcp
+/memory-mcp-local
+/memory-secret-audit
+/memory-smoke
+/memory-worker
 
 # Node / Nuxt
 node_modules/
@@ -24,6 +35,12 @@ web/dist/
 # Local runtime data
 archives/
 tmp/
+
+# Local tool/runtime caches
+.cache/
+.gocache/
+.playwright-mcp/
+.codebase-memory/
 
 backups/
 

@@ -15,6 +15,14 @@ type Metadata struct {
 	CurrentVersion int
 }
 
+type ListFilter struct {
+	OwnerUserID string
+	OrgID       string
+	ProjectID   string
+	Status      string
+	Limit       int
+}
+
 type Version struct {
 	SecretRef string
 	Version   int
@@ -24,6 +32,7 @@ type Version struct {
 type Repository interface {
 	Save(meta Metadata, version Version) error
 	GetMetadata(secretRef string) (Metadata, error)
+	List(filter ListFilter) ([]Metadata, error)
 	GetCurrentVersion(secretRef string) (Version, error)
 	Disable(secretRef string) error
 }
@@ -60,6 +69,28 @@ func (r *MemoryRepository) GetMetadata(secretRef string) (Metadata, error) {
 		return Metadata{}, errors.New("secret not found")
 	}
 	return meta, nil
+}
+
+func (r *MemoryRepository) List(filter ListFilter) ([]Metadata, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	items := []Metadata{}
+	for _, meta := range r.metadata {
+		if filter.OwnerUserID != "" && meta.OwnerUserID != filter.OwnerUserID {
+			continue
+		}
+		if filter.OrgID != "" && meta.OrgID != filter.OrgID {
+			continue
+		}
+		if filter.ProjectID != "" && meta.ProjectID != filter.ProjectID {
+			continue
+		}
+		if filter.Status != "" && meta.Status != filter.Status {
+			continue
+		}
+		items = append(items, meta)
+	}
+	return items, nil
 }
 
 func (r *MemoryRepository) GetCurrentVersion(secretRef string) (Version, error) {

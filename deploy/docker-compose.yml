@@ -4,7 +4,7 @@ services:
     environment:
       POSTGRES_DB: memory_os
       POSTGRES_USER: memory_os
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-replace-me-local-only}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ../migrations:/docker-entrypoint-initdb.d:ro
@@ -34,21 +34,48 @@ services:
     environment:
       QDRANT__SERVICE__MAX_REQUEST_SIZE_MB: 16
 
+  memory-llm-mock:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.llm-mock
+    image: memory-llm-mock:0.4
+    environment:
+      LLM_MOCK_PORT: 11434
+    ports:
+      - "11434:11434"
+
   memory-api:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.api
-    env_file:
-      - ../.env.example
+      args:
+        BUILD_VERSION: ${BUILD_VERSION:-0.4.0-dev}
+        BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+        BUILD_DIRTY: ${BUILD_DIRTY:-unknown}
+        GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-web,memory-mcp,memory-llm-mock}
     environment:
+      APP_ENV: ${APP_ENV:-production}
+      ENABLE_DEV_ENDPOINTS: ${ENABLE_DEV_ENDPOINTS:-false}
       MEMORY_API_ADDR: :18081
-      POSTGRES_DSN: postgres://memory_os:${POSTGRES_PASSWORD:-replace-me-local-only}@postgres:5432/memory_os?sslmode=disable
+      POSTGRES_DSN: postgres://memory_os:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/memory_os?sslmode=disable
       REDIS_ADDR: redis:6379
       QDRANT_URL: http://qdrant:6333
-      NO_PROXY: localhost,127.0.0.1,postgres,redis,qdrant
-      no_proxy: localhost,127.0.0.1,postgres,redis,qdrant
+      ARCHIVE_DIR: /data/memory-os
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://memory-llm-mock:11434}
+      LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY is required}
+      LLM_MODEL: ${LLM_MODEL:-MiniMax-M2.7}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+      RERANK_MODEL: ${RERANK_MODEL:-bge-reranker-v2-m3}
+      SECRET_VAULT_KEY_ID: ${SECRET_VAULT_KEY_ID:?SECRET_VAULT_KEY_ID is required}
+      SECRET_VAULT_KEY_B64: ${SECRET_VAULT_KEY_B64:?SECRET_VAULT_KEY_B64 is required}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-web,memory-mcp,memory-llm-mock}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-web,memory-mcp,memory-llm-mock}
     ports:
       - "18081:18081"
+    volumes:
+      - archive_data:/data/memory-os
     depends_on:
       postgres:
         condition: service_healthy
@@ -61,14 +88,28 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.worker
-    env_file:
-      - ../.env.example
+      args:
+        BUILD_VERSION: ${BUILD_VERSION:-0.4.0-dev}
+        BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+        BUILD_DIRTY: ${BUILD_DIRTY:-unknown}
+        GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-web,memory-mcp,memory-llm-mock}
     environment:
-      POSTGRES_DSN: postgres://memory_os:${POSTGRES_PASSWORD:-replace-me-local-only}@postgres:5432/memory_os?sslmode=disable
+      APP_ENV: ${APP_ENV:-production}
+      POSTGRES_DSN: postgres://memory_os:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/memory_os?sslmode=disable
       REDIS_ADDR: redis:6379
       QDRANT_URL: http://qdrant:6333
-      NO_PROXY: localhost,127.0.0.1,postgres,redis,qdrant
-      no_proxy: localhost,127.0.0.1,postgres,redis,qdrant
+      ARCHIVE_DIR: /data/memory-os
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://memory-llm-mock:11434}
+      LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY is required}
+      LLM_MODEL: ${LLM_MODEL:-MiniMax-M2.7}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+      RERANK_MODEL: ${RERANK_MODEL:-bge-reranker-v2-m3}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-web,memory-mcp,memory-llm-mock}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-web,memory-mcp,memory-llm-mock}
+    volumes:
+      - archive_data:/data/memory-os
     depends_on:
       postgres:
         condition: service_healthy
@@ -81,12 +122,23 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.mcp
-    env_file:
-      - ../.env.example
+      args:
+        BUILD_VERSION: ${BUILD_VERSION:-0.4.0-dev}
+        BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+        BUILD_DIRTY: ${BUILD_DIRTY:-unknown}
+        GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-web,memory-mcp,memory-llm-mock}
     environment:
+      APP_ENV: ${APP_ENV:-production}
       MEMORY_MCP_ADDR: :18082
-      NO_PROXY: localhost,127.0.0.1,postgres,redis,qdrant
-      no_proxy: localhost,127.0.0.1,postgres,redis,qdrant
+      POSTGRES_DSN: postgres://memory_os:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/memory_os?sslmode=disable
+      QDRANT_URL: http://qdrant:6333
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://memory-llm-mock:11434}
+      LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY is required}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-web,memory-mcp,memory-llm-mock}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-web,memory-mcp,memory-llm-mock}
     ports:
       - "18082:18082"
 
@@ -98,10 +150,9 @@ services:
         NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-http://localhost:18081}
     ports:
       - "18080:18080"
-    depends_on:
-      - memory-api
 
 volumes:
   postgres_data:
   redis_data:
   qdrant_data:
+  archive_data:

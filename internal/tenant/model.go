@@ -14,16 +14,20 @@ type User struct {
 }
 
 type Org struct {
-	ID   string
-	Name string
-	Slug string
+	ID     string
+	Name   string
+	Slug   string
+	Status string
 }
 
 type Project struct {
-	ID    string
-	OrgID string
-	Name  string
-	Slug  string
+	ID         string
+	OrgID      string
+	Name       string
+	Slug       string
+	Status     string
+	SourceType string
+	SourceKey  string
 }
 
 type Membership struct {
@@ -32,6 +36,13 @@ type Membership struct {
 	ProjectID string
 	Role      string
 	Status    string
+}
+
+type RoleDefinition struct {
+	Role             string
+	DisplayName      string
+	Description      string
+	PermissionLabels []string
 }
 
 type PermissionContext struct {

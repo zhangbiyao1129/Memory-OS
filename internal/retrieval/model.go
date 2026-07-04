@@ -20,6 +20,12 @@ type SearchRequest struct {
 	MaxContextBytes        int
 }
 
+type ArchiveGenerationContext struct {
+	UserID    string
+	OrgID     string
+	ProjectID string
+}
+
 type SearchResponse struct {
 	RequestID       string         `json:"request_id"`
 	Context         string         `json:"context"`

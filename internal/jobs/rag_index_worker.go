@@ -26,6 +26,7 @@ type RAGIndexWorker struct {
 	mu      sync.Mutex
 	seen    map[string]bool
 	service rag.Service
+	handle  func(RAGIndexJob) (RAGIndexResult, error)
 }
 
 func NewRAGIndexWorker(service rag.Service) *RAGIndexWorker {
@@ -33,6 +34,9 @@ func NewRAGIndexWorker(service rag.Service) *RAGIndexWorker {
 }
 
 func (w *RAGIndexWorker) Handle(job RAGIndexJob) (RAGIndexResult, error) {
+	if w.handle != nil {
+		return w.handle(job)
+	}
 	if job.IdempotencyKey == "" {
 		return RAGIndexResult{}, errors.New("rag index job idempotency key is required")
 	}

@@ -39,6 +39,7 @@ func BuildFilter(ctx FilterContext) (PayloadFilter, error) {
 		"doc_type":   {"hot_memory"},
 		"user_id":    {ctx.UserID},
 		"scope":      {string(ctx.Scope)},
+		"status":     {string(StatusActive), string(StatusPromoted), string(StatusDemoted)},
 		"visibility": {ctx.Visibility},
 	}
 	if ctx.OrgID != "" {
@@ -88,6 +89,8 @@ func memoryPayloadValue(memory Memory, key string) string {
 		return string(memory.Scope)
 	case "visibility":
 		return memory.Visibility
+	case "status":
+		return string(memory.Status)
 	default:
 		return ""
 	}

@@ -12,14 +12,19 @@ type Service struct {
 }
 
 type IngestResult struct {
-	EventID  string   `json:"event_id"`
-	Status   string   `json:"status"`
-	Deduped  bool     `json:"deduped"`
-	Warnings []string `json:"warnings,omitempty"`
+	EventID  string    `json:"event_id"`
+	Status   string    `json:"status"`
+	Deduped  bool      `json:"deduped"`
+	Warnings []string  `json:"warnings,omitempty"`
+	Event    TurnEvent `json:"-"`
 }
 
 func NewService(repo Repository, options SanitizerOptions) Service {
 	return Service{repo: repo, options: options}
+}
+
+func (s Service) Configured() bool {
+	return s.repo != nil
 }
 
 func (s Service) Ingest(event TurnEvent, requestID string, permissions tenant.PermissionContext) (IngestResult, error) {
@@ -37,9 +42,9 @@ func (s Service) Ingest(event TurnEvent, requestID string, permissions tenant.Pe
 	if err != nil {
 		return IngestResult{}, err
 	}
-	saveResult, err := s.repo.Save(sanitized.Event, sanitized.SafePayload, requestID)
+	saveResult, err := s.repo.Save(sanitized, requestID)
 	if err != nil {
 		return IngestResult{}, err
 	}
-	return IngestResult{EventID: saveResult.EventID, Status: "accepted", Deduped: saveResult.Deduped, Warnings: sanitized.Warnings}, nil
+	return IngestResult{EventID: saveResult.EventID, Status: "accepted", Deduped: saveResult.Deduped, Warnings: sanitized.Warnings, Event: sanitized.Event}, nil
 }

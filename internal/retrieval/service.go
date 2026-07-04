@@ -20,22 +20,32 @@ type ArchiveRAG interface {
 	Search(rag.SearchRequest) ([]rag.SearchResult, error)
 }
 
+type ArchiveGenerationResolver interface {
+	CurrentGeneration(ArchiveGenerationContext) (int, error)
+}
+
 type Options struct {
-	HotMemory  HotMemory
-	ArchiveRAG ArchiveRAG
-	Reranker   Reranker
-	AccessLog  AccessLog
+	HotMemory                 HotMemory
+	ArchiveRAG                ArchiveRAG
+	ArchiveGenerationResolver ArchiveGenerationResolver
+	Reranker                  Reranker
+	AccessLog                 AccessLog
 }
 
 type Service struct {
-	hotMemory  HotMemory
-	archiveRAG ArchiveRAG
-	reranker   Reranker
-	accessLog  AccessLog
+	hotMemory                 HotMemory
+	archiveRAG                ArchiveRAG
+	archiveGenerationResolver ArchiveGenerationResolver
+	reranker                  Reranker
+	accessLog                 AccessLog
 }
 
 func NewService(options Options) Service {
-	return Service{hotMemory: options.HotMemory, archiveRAG: options.ArchiveRAG, reranker: options.Reranker, accessLog: options.AccessLog}
+	return Service{hotMemory: options.HotMemory, archiveRAG: options.ArchiveRAG, archiveGenerationResolver: options.ArchiveGenerationResolver, reranker: options.Reranker, accessLog: options.AccessLog}
+}
+
+func (s Service) Configured() bool {
+	return s.hotMemory != nil || s.archiveRAG != nil
 }
 
 func (s Service) Search(request SearchRequest) (SearchResponse, error) {
@@ -108,7 +118,14 @@ func (s Service) collect(request SearchRequest) ([]candidate, int, error) {
 		}
 	}
 	if s.archiveRAG != nil {
-		filter, err := qdrant.BuildPayloadFilter(qdrant.FilterContext{OrgID: request.Actor.OrgID, ProjectID: request.Actor.ProjectID, UserID: request.Actor.UserID, Visibility: request.Visibility, PermissionLabels: request.PermissionLabels, DocType: "archive_chunk", IndexGeneration: request.ArchiveIndexGeneration})
+		generation, err := s.archiveIndexGeneration(request)
+		if err != nil {
+			return nil, 0, err
+		}
+		if generation <= 0 {
+			return dedupeCandidates(candidates), markedUsed, nil
+		}
+		filter, err := qdrant.BuildPayloadFilter(qdrant.FilterContext{OrgID: request.Actor.OrgID, ProjectID: request.Actor.ProjectID, UserID: request.Actor.UserID, Visibility: request.Visibility, PermissionLabels: request.PermissionLabels, DocType: "archive_chunk", IndexGeneration: generation})
 		if err != nil {
 			return nil, 0, err
 		}
@@ -121,6 +138,20 @@ func (s Service) collect(request SearchRequest) ([]candidate, int, error) {
 		}
 	}
 	return dedupeCandidates(candidates), markedUsed, nil
+}
+
+func (s Service) archiveIndexGeneration(request SearchRequest) (int, error) {
+	if request.ArchiveIndexGeneration > 0 {
+		return request.ArchiveIndexGeneration, nil
+	}
+	if s.archiveGenerationResolver == nil {
+		return 0, errors.New("archive index generation is required")
+	}
+	generation, err := s.archiveGenerationResolver.CurrentGeneration(ArchiveGenerationContext{UserID: request.Actor.UserID, OrgID: request.Actor.OrgID, ProjectID: request.Actor.ProjectID})
+	if err != nil {
+		return 0, err
+	}
+	return generation, nil
 }
 
 func primaryRecallQuery(query string) string {

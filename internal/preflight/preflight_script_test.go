@@ -78,6 +78,49 @@ func TestPreflightScriptAllowsExistingComposeDeployment(t *testing.T) {
 	}
 }
 
+func TestPreflightScriptLoadsProductionEnvForDefaultComposePS(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	content, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "preflight.sh"))
+	if err != nil {
+		t.Fatalf("read preflight script: %v", err)
+	}
+	script := string(content)
+
+	for _, required := range []string{
+		"load_compose_env_for_ps()",
+		". scripts/load-prod-env.sh >/dev/null 2>&1 || true",
+		"load_compose_env_for_ps",
+		`COMPOSE_PS_CMD="${COMPOSE_PS_CMD:-docker-compose -f deploy/docker-compose.yml -f deploy/docker-compose.t480.yml ps}"`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("preflight script missing production compose env marker %q", required)
+		}
+	}
+}
+
+func TestMakefileProdUpMockExportsDefaultEnvForCompose(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	content, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	makefile := string(content)
+
+	for _, required := range []string{
+		"if [[ -f .env.production || -f .env ]] || docker inspect deploy-memory-api-1 >/dev/null 2>&1; then",
+		". scripts/load-prod-env.sh;",
+		"export POSTGRES_PASSWORD=$${POSTGRES_PASSWORD:-replace-me-mock-password};",
+		"export LLM_BASE_URL=$${LLM_BASE_URL:-http://memory-llm-mock:11434};",
+		"export LLM_API_KEY=$${LLM_API_KEY:-memory-llm-mock-key};",
+		"export SECRET_VAULT_KEY_ID=$${SECRET_VAULT_KEY_ID:-dev-vault-id};",
+		"export SECRET_VAULT_KEY_B64=$${SECRET_VAULT_KEY_B64:-dGVzdC1rZXktMTIzNDU2Nw==};",
+	} {
+		if !strings.Contains(makefile, required) {
+			t.Fatalf("prod-up-mock must export default env for docker-compose interpolation, missing %q", required)
+		}
+	}
+}
+
 func findRepoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()

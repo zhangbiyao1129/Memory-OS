@@ -1,6 +1,7 @@
 package rag
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -32,6 +33,9 @@ func (s Service) Search(request SearchRequest) ([]SearchResult, error) {
 	}
 	if len(request.Filter.Must) == 0 {
 		return nil, errors.New("query-time qdrant filter is required")
+	}
+	if searcher, ok := s.store.(SearchStore); ok {
+		return searcher.Search(context.Background(), request)
 	}
 	candidates := s.store.Filtered(request.Filter.Must)
 	results := []SearchResult{}

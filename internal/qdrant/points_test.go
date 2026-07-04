@@ -2,10 +2,13 @@ package qdrant
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestUpsertPointsUsesMemoryCollectionAndPayload(t *testing.T) {
@@ -104,5 +107,92 @@ func TestSearchPointsRejectsMissingFilter(t *testing.T) {
 	_, err = client.SearchPoints(t.Context(), SearchPointsRequest{Collection: DefaultCollectionName, Vector: []float64{0.1}, Limit: 1})
 	if err == nil {
 		t.Fatal("SearchPoints() error = nil, want missing filter error")
+	}
+}
+
+func TestSearchPointsRealQdrantAppliesQueryTimeFilter(t *testing.T) {
+	baseURL := os.Getenv("QDRANT_TEST_URL")
+	if baseURL == "" {
+		t.Skip("QDRANT_TEST_URL is not set")
+	}
+	client, err := NewClient(baseURL)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	collection := fmt.Sprintf("memory_os_filter_test_%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodDelete, client.baseURL+"/collections/"+collection, nil)
+		if err == nil {
+			resp, err := client.httpClient.Do(req)
+			if err == nil {
+				_ = resp.Body.Close()
+			}
+		}
+	})
+	if err := client.EnsureCollection(t.Context(), CollectionConfig{Name: collection, VectorSize: 2, Distance: DefaultDistance}); err != nil {
+		t.Fatalf("EnsureCollection() error = %v", err)
+	}
+	points := []Point{
+		{
+			ID:     "11111111-1111-4111-8111-111111111111",
+			Vector: []float64{0.1, 0.2},
+			Payload: map[string]any{
+				"doc_type":          "archive_chunk",
+				"chunk_id":          "chunk_allowed",
+				"user_id":           "user_allowed",
+				"org_id":            "org_allowed",
+				"project_id":        "project_allowed",
+				"visibility":        "project",
+				"permission_labels": []string{"project:project_allowed:read"},
+				"index_generation":  "2",
+			},
+		},
+		{
+			ID:     "22222222-2222-4222-8222-222222222222",
+			Vector: []float64{0.1, 0.2},
+			Payload: map[string]any{
+				"doc_type":          "archive_chunk",
+				"chunk_id":          "chunk_denied",
+				"user_id":           "user_denied",
+				"org_id":            "org_allowed",
+				"project_id":        "project_allowed",
+				"visibility":        "project",
+				"permission_labels": []string{"project:project_allowed:read"},
+				"index_generation":  "2",
+			},
+		},
+		{
+			ID:     "33333333-3333-4333-8333-333333333333",
+			Vector: []float64{0.1, 0.2},
+			Payload: map[string]any{
+				"doc_type":          "archive_chunk",
+				"chunk_id":          "chunk_old_generation",
+				"user_id":           "user_allowed",
+				"org_id":            "org_allowed",
+				"project_id":        "project_allowed",
+				"visibility":        "project",
+				"permission_labels": []string{"project:project_allowed:read"},
+				"index_generation":  "1",
+			},
+		},
+	}
+	if err := client.UpsertPoints(t.Context(), collection, points); err != nil {
+		t.Fatalf("UpsertPoints() error = %v", err)
+	}
+	filter, err := BuildPayloadFilter(FilterContext{UserID: "user_allowed", OrgID: "org_allowed", ProjectID: "project_allowed", Visibility: "project", PermissionLabels: []string{"project:project_allowed:read"}, DocType: "archive_chunk", IndexGeneration: 2})
+	if err != nil {
+		t.Fatalf("BuildPayloadFilter() error = %v", err)
+	}
+
+	results, err := client.SearchPoints(t.Context(), SearchPointsRequest{Collection: collection, Vector: []float64{0.1, 0.2}, Filter: filter, Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchPoints() error = %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("results len = %d, want 1: %#v", len(results), results)
+	}
+	if results[0].Payload["chunk_id"] != "chunk_allowed" {
+		t.Fatalf("result chunk_id = %#v, want chunk_allowed", results[0].Payload["chunk_id"])
 	}
 }

@@ -1,0 +1,118 @@
+name: memory-os-restore-rehearsal
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: memory_os
+      POSTGRES_USER: memory_os
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - restore_rehearsal_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memory_os -d memory_os"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - restore_rehearsal_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:v1.14.1
+    volumes:
+      - restore_rehearsal_qdrant:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__MAX_REQUEST_SIZE_MB: 16
+      QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS: 2
+
+  memory-api:
+    image: ${RESTORE_REHEARSAL_API_IMAGE:-deploy-memory-api}
+    environment:
+      APP_ENV: production
+      ENABLE_DEV_ENDPOINTS: "false"
+      MEMORY_API_ADDR: :18081
+      POSTGRES_DSN: postgres://memory_os:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/memory_os?sslmode=disable
+      REDIS_ADDR: redis:6379
+      QDRANT_URL: http://qdrant:6333
+      ARCHIVE_DIR: /data/memory-os
+      LLM_BASE_URL: ${LLM_BASE_URL:?LLM_BASE_URL is required}
+      LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY is required}
+      LLM_MODEL: ${LLM_MODEL:-MiniMax-M2.7}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+      RERANK_MODEL: ${RERANK_MODEL:-bge-reranker-v2-m3}
+      SECRET_VAULT_KEY_ID: ${SECRET_VAULT_KEY_ID:?SECRET_VAULT_KEY_ID is required}
+      SECRET_VAULT_KEY_B64: ${SECRET_VAULT_KEY_B64:?SECRET_VAULT_KEY_B64 is required}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-worker,memory-mcp,memory-web,memory-llm-mock}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-worker,memory-mcp,memory-web,memory-llm-mock}
+    volumes:
+      - restore_rehearsal_archive:/data/memory-os
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+
+  memory-worker:
+    image: ${RESTORE_REHEARSAL_WORKER_IMAGE:-deploy-memory-worker}
+    environment:
+      APP_ENV: production
+      POSTGRES_DSN: postgres://memory_os:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/memory_os?sslmode=disable
+      REDIS_ADDR: redis:6379
+      QDRANT_URL: http://qdrant:6333
+      ARCHIVE_DIR: /data/memory-os
+      LLM_BASE_URL: ${LLM_BASE_URL:?LLM_BASE_URL is required}
+      LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY is required}
+      LLM_MODEL: ${LLM_MODEL:-MiniMax-M2.7}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+      RERANK_MODEL: ${RERANK_MODEL:-bge-reranker-v2-m3}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-worker,memory-mcp,memory-web,memory-llm-mock}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-worker,memory-mcp,memory-web,memory-llm-mock}
+    volumes:
+      - restore_rehearsal_archive:/data/memory-os
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+
+  memory-mcp:
+    image: ${RESTORE_REHEARSAL_MCP_IMAGE:-deploy-memory-mcp}
+    environment:
+      APP_ENV: production
+      MEMORY_MCP_ADDR: :18082
+      POSTGRES_DSN: postgres://memory_os:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/memory_os?sslmode=disable
+      QDRANT_URL: http://qdrant:6333
+      LLM_BASE_URL: ${LLM_BASE_URL:?LLM_BASE_URL is required}
+      LLM_API_KEY: ${LLM_API_KEY:?LLM_API_KEY is required}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-worker,memory-mcp,memory-web,memory-llm-mock}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-worker,memory-mcp,memory-web,memory-llm-mock}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+
+  memory-web:
+    image: ${RESTORE_REHEARSAL_WEB_IMAGE:-deploy-memory-web}
+    depends_on:
+      - memory-api
+
+volumes:
+  restore_rehearsal_pg:
+  restore_rehearsal_redis:
+  restore_rehearsal_qdrant:
+  restore_rehearsal_archive:

@@ -69,6 +69,12 @@ type UpsertRequest struct {
 	Confidence       float64
 }
 
+type EditRequest struct {
+	MemoryID   string
+	Fact       string
+	Confidence float64
+}
+
 type SearchRequest struct {
 	Query  string
 	Filter PayloadFilter
@@ -77,6 +83,12 @@ type SearchRequest struct {
 type SearchResult struct {
 	Memory Memory
 	Score  float64
+}
+
+type VectorIndex interface {
+	Index(memory Memory) error
+	Delete(memory Memory) error
+	Search(request SearchRequest) ([]SearchResult, error)
 }
 
 type Candidate struct {

@@ -31,14 +31,34 @@ type AdapterTokenRecord struct {
 	RevokedAt   *time.Time
 }
 
+type TokenListFilter struct {
+	UserID string
+	Status string
+	Limit  int
+}
+
+type AdapterTokenListFilter struct {
+	UserID    string
+	OrgID     string
+	ProjectID string
+	AgentID   string
+	Status    string
+	Limit     int
+}
+
 type Repository interface {
 	SetPasswordHash(userID, passwordHash string) error
 	GetPasswordHash(userID string) (string, error)
 	SavePAT(record PATRecord) error
 	FindPATByHash(tokenHash string) (PATRecord, error)
+	GetPAT(id string) (PATRecord, error)
+	ListPATs(filter TokenListFilter) ([]PATRecord, error)
 	RevokePAT(id string, revokedAt time.Time) error
 	SaveAdapterToken(record AdapterTokenRecord) error
 	FindAdapterTokenByHash(tokenHash string) (AdapterTokenRecord, error)
+	GetAdapterToken(id string) (AdapterTokenRecord, error)
+	ListAdapterTokens(filter AdapterTokenListFilter) ([]AdapterTokenRecord, error)
+	RevokeAdapterToken(id string, revokedAt time.Time) error
 }
 
 type MemoryRepository struct {
@@ -106,6 +126,41 @@ func (r *MemoryRepository) FindPATByHash(tokenHash string) (PATRecord, error) {
 	return r.pats[id], nil
 }
 
+func (r *MemoryRepository) GetPAT(id string) (PATRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record, ok := r.pats[id]
+	if !ok {
+		return PATRecord{}, errors.New("pat not found")
+	}
+	return record, nil
+}
+
+func (r *MemoryRepository) ListPATs(filter TokenListFilter) ([]PATRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if filter.Limit <= 0 || filter.Limit > 100 {
+		filter.Limit = 50
+	}
+	records := []PATRecord{}
+	for _, record := range r.pats {
+		if filter.UserID != "" && record.SubjectID != filter.UserID {
+			continue
+		}
+		if filter.Status == "active" && record.RevokedAt != nil {
+			continue
+		}
+		if filter.Status == "revoked" && record.RevokedAt == nil {
+			continue
+		}
+		records = append(records, record)
+		if len(records) >= filter.Limit {
+			break
+		}
+	}
+	return records, nil
+}
+
 func (r *MemoryRepository) RevokePAT(id string, revokedAt time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -141,6 +196,62 @@ func (r *MemoryRepository) FindAdapterTokenByHash(tokenHash string) (AdapterToke
 		return AdapterTokenRecord{}, errors.New("adapter token not found")
 	}
 	return r.adapterTokens[id], nil
+}
+
+func (r *MemoryRepository) GetAdapterToken(id string) (AdapterTokenRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record, ok := r.adapterTokens[id]
+	if !ok {
+		return AdapterTokenRecord{}, errors.New("adapter token not found")
+	}
+	return record, nil
+}
+
+func (r *MemoryRepository) ListAdapterTokens(filter AdapterTokenListFilter) ([]AdapterTokenRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if filter.Limit <= 0 || filter.Limit > 100 {
+		filter.Limit = 50
+	}
+	records := []AdapterTokenRecord{}
+	for _, record := range r.adapterTokens {
+		if filter.UserID != "" && record.UserID != filter.UserID {
+			continue
+		}
+		if filter.OrgID != "" && record.OrgID != filter.OrgID {
+			continue
+		}
+		if filter.ProjectID != "" && record.ProjectID != filter.ProjectID {
+			continue
+		}
+		if filter.AgentID != "" && record.AgentID != filter.AgentID {
+			continue
+		}
+		if filter.Status == "active" && record.RevokedAt != nil {
+			continue
+		}
+		if filter.Status == "revoked" && record.RevokedAt == nil {
+			continue
+		}
+		records = append(records, record)
+		if len(records) >= filter.Limit {
+			break
+		}
+	}
+	return records, nil
+}
+
+func (r *MemoryRepository) RevokeAdapterToken(id string, revokedAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	record, ok := r.adapterTokens[id]
+	if !ok {
+		return errors.New("adapter token not found")
+	}
+	record.RevokedAt = &revokedAt
+	r.adapterTokens[id] = record
+	return nil
 }
 
 func (r *MemoryRepository) newID(prefix string) string {

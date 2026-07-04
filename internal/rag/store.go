@@ -1,6 +1,7 @@
 package rag
 
 import (
+	"context"
 	"errors"
 	"sync"
 
@@ -10,6 +11,10 @@ import (
 type Store interface {
 	Upsert(payload ChunkPayload) error
 	Filtered(filter map[string][]string) []ChunkPayload
+}
+
+type SearchStore interface {
+	Search(ctx context.Context, request SearchRequest) ([]SearchResult, error)
 }
 
 type MemoryStore struct {

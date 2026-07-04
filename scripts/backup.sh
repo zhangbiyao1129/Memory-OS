@@ -31,6 +31,15 @@ write_file() {
   printf '%s\n' "$*" > "$path"
 }
 
+sha256_file() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+    return
+  fi
+  shasum -a 256 "$path" | awk '{print $1}'
+}
+
 backup_postgres() {
   local command_text="$COMPOSE -f $COMPOSE_FILE -f $COMPOSE_T480_FILE exec -T $POSTGRES_SERVICE pg_dump -U $POSTGRES_USER -d $POSTGRES_DB"
   write_file "$POSTGRES_DIR/pg_dump.command" "$command_text > $POSTGRES_DIR/$POSTGRES_DB.sql"
@@ -75,10 +84,18 @@ backup_qdrant() {
 }
 
 write_manifest() {
-  local completed_at
+  local completed_at postgres_sha archives_sha qdrant_file qdrant_sha
   completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  postgres_sha="$(sha256_file "$POSTGRES_DIR/$POSTGRES_DB.sql")"
+  archives_sha="$(sha256_file "$ARCHIVES_DIR/markdown-archive.tar.gz")"
+  qdrant_file="$(find "$QDRANT_DIR" -maxdepth 1 -type f ! -name '*.command' ! -name 'snapshot-response.json' | head -n 1)"
+  if [[ -z "$qdrant_file" ]]; then
+    echo "missing Qdrant snapshot artifact" >&2
+    exit 1
+  fi
+  qdrant_sha="$(sha256_file "$qdrant_file")"
   cat > "$DEST/manifest.json" <<JSON
-{"run_id":"$RUN_ID","completed_at":"$completed_at","retention_days":$RETENTION_DAYS,"postgres":{"database":"$POSTGRES_DB","file":"postgres/$POSTGRES_DB.sql"},"archives":{"source":"$ARCHIVE_DIR","file":"archives/markdown-archive.tar.gz"},"qdrant":{"collection":"$QDRANT_COLLECTION","source":"$QDRANT_URL"}}
+{"run_id":"$RUN_ID","completed_at":"$completed_at","retention_days":$RETENTION_DAYS,"postgres":{"database":"$POSTGRES_DB","file":"postgres/$POSTGRES_DB.sql","sha256":"$postgres_sha"},"archives":{"source":"$ARCHIVE_DIR","file":"archives/markdown-archive.tar.gz","sha256":"$archives_sha"},"qdrant":{"collection":"$QDRANT_COLLECTION","source":"$QDRANT_URL","file":"qdrant/$(basename "$qdrant_file")","sha256":"$qdrant_sha"}}
 JSON
 }
 

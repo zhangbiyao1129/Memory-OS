@@ -17,6 +17,14 @@ type Metadata struct {
 	UpdatedAt       time.Time
 }
 
+type ListFilter struct {
+	UserID    string
+	OrgID     string
+	ProjectID string
+	Status    string
+	Limit     int
+}
+
 type Version struct {
 	ArchiveID    string
 	Version      int

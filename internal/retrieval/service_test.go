@@ -86,6 +86,110 @@ func TestSearchDoesNotReturnDifferentUserMemory(t *testing.T) {
 	}
 }
 
+func TestSearchRejectsArchiveRAGWithoutIndexGeneration(t *testing.T) {
+	service := NewService(Options{ArchiveRAG: &capturingArchiveRAG{}})
+
+	_, err := service.Search(SearchRequest{
+		RequestID:              "req_missing_generation",
+		Query:                  "deploy",
+		Actor:                  Actor{UserID: "user_1", OrgID: "org_1", ProjectID: "project_1", AgentID: "codex"},
+		Visibility:             "project",
+		Scope:                  hotmemory.ScopeProject,
+		PermissionLabels:       []string{"project:project_1:read"},
+		ArchiveIndexGeneration: 0,
+	})
+
+	if err == nil {
+		t.Fatal("Search() error = nil, want missing archive index generation rejection")
+	}
+}
+
+func TestSearchResolvesArchiveIndexGenerationWhenMissing(t *testing.T) {
+	archiveRAG := &capturingArchiveRAG{results: []rag.SearchResult{{Text: "deploy archive", Score: 0.9, Source: rag.SourceRef{ArchiveID: "archive_1", ChunkID: "chunk_1"}}}}
+	resolver := &fakeArchiveGenerationResolver{generation: 7}
+	service := NewService(Options{ArchiveRAG: archiveRAG, ArchiveGenerationResolver: resolver})
+
+	_, err := service.Search(SearchRequest{
+		RequestID:              "req_resolve_generation",
+		Query:                  "deploy",
+		Actor:                  Actor{UserID: "user_1", OrgID: "org_1", ProjectID: "project_1", AgentID: "codex"},
+		Visibility:             "project",
+		Scope:                  hotmemory.ScopeProject,
+		PermissionLabels:       []string{"project:project_1:read"},
+		ArchiveIndexGeneration: 0,
+	})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+
+	if resolver.context != (ArchiveGenerationContext{UserID: "user_1", OrgID: "org_1", ProjectID: "project_1"}) {
+		t.Fatalf("resolver context = %#v", resolver.context)
+	}
+	if got := archiveRAG.request.Filter.Must["index_generation"]; len(got) != 1 || got[0] != "7" {
+		t.Fatalf("index_generation filter = %#v, want 7", got)
+	}
+}
+
+func TestSearchSkipsArchiveRAGWhenNoArchiveGenerationExists(t *testing.T) {
+	archiveRAG := &capturingArchiveRAG{}
+	service := NewService(Options{ArchiveRAG: archiveRAG, ArchiveGenerationResolver: &fakeArchiveGenerationResolver{generation: 0}})
+
+	response, err := service.Search(SearchRequest{
+		RequestID:              "req_no_generation",
+		Query:                  "deploy",
+		Actor:                  Actor{UserID: "user_1", OrgID: "org_1", ProjectID: "project_1", AgentID: "codex"},
+		Visibility:             "project",
+		Scope:                  hotmemory.ScopeProject,
+		PermissionLabels:       []string{"project:project_1:read"},
+		ArchiveIndexGeneration: 0,
+	})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+
+	if archiveRAG.called {
+		t.Fatal("ArchiveRAG was called without an available archive generation")
+	}
+	if len(response.Results) != 0 {
+		t.Fatalf("results len = %d, want 0", len(response.Results))
+	}
+}
+
+func TestSearchPassesFullArchiveRAGFilter(t *testing.T) {
+	archiveRAG := &capturingArchiveRAG{results: []rag.SearchResult{{Text: "deploy archive", Score: 0.9, Source: rag.SourceRef{ArchiveID: "archive_1", ChunkID: "chunk_1"}}}}
+	service := NewService(Options{ArchiveRAG: archiveRAG})
+
+	_, err := service.Search(SearchRequest{
+		RequestID:              "req_filter",
+		Query:                  "deploy",
+		Actor:                  Actor{UserID: "user_1", OrgID: "org_1", ProjectID: "project_1", AgentID: "codex"},
+		Visibility:             "project",
+		Scope:                  hotmemory.ScopeProject,
+		PermissionLabels:       []string{"project:project_1:read"},
+		ArchiveIndexGeneration: 2,
+	})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+
+	want := map[string]string{
+		"doc_type":         "archive_chunk",
+		"user_id":          "user_1",
+		"org_id":           "org_1",
+		"project_id":       "project_1",
+		"visibility":       "project",
+		"index_generation": "2",
+	}
+	for key, value := range want {
+		if got := archiveRAG.request.Filter.Must[key]; len(got) != 1 || got[0] != value {
+			t.Fatalf("filter[%s] = %#v, want %q", key, got, value)
+		}
+	}
+	if got := archiveRAG.request.Filter.Must["permission_labels"]; len(got) != 1 || got[0] != "project:project_1:read" {
+		t.Fatalf("permission filter = %#v", got)
+	}
+}
+
 func TestRerankFailureDegradesAndCompressionSanitizesSecrets(t *testing.T) {
 	hot := hotmemory.NewService(hotmemory.NewMemoryRepository())
 	if _, err := hot.Upsert(hotmemory.UpsertRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: hotmemory.ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "Deploy note with sk-test-redacted-example should be sanitized", SourceType: hotmemory.SourceTurnEvent, SourceRef: "event_1", Confidence: 0.8}); err != nil {
@@ -109,4 +213,36 @@ func TestRerankFailureDegradesAndCompressionSanitizesSecrets(t *testing.T) {
 	if len(response.Results) != 1 || response.Results[0].Source.Kind != SourceHotMemory {
 		t.Fatalf("results = %#v, want one hot memory result", response.Results)
 	}
+}
+
+type capturingArchiveRAG struct {
+	request rag.SearchRequest
+	results []rag.SearchResult
+	called  bool
+}
+
+func (r *capturingArchiveRAG) Search(request rag.SearchRequest) ([]rag.SearchResult, error) {
+	r.called = true
+	r.request = request
+	if len(request.Filter.Must) == 0 {
+		return nil, qdrantFilterMissingError{}
+	}
+	return append([]rag.SearchResult(nil), r.results...), nil
+}
+
+type qdrantFilterMissingError struct{}
+
+func (qdrantFilterMissingError) Error() string {
+	return "qdrant filter missing"
+}
+
+type fakeArchiveGenerationResolver struct {
+	context    ArchiveGenerationContext
+	generation int
+	err        error
+}
+
+func (r *fakeArchiveGenerationResolver) CurrentGeneration(context ArchiveGenerationContext) (int, error) {
+	r.context = context
+	return r.generation, r.err
 }

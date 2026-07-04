@@ -1,0 +1,6 @@
+FROM python:3.12-alpine
+
+WORKDIR /app
+COPY deploy/memory-llm-mock.py /app/memory-llm-mock.py
+ENV PYTHONUNBUFFERED=1
+ENTRYPOINT ["python3", "/app/memory-llm-mock.py"]

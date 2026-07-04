@@ -62,5 +62,8 @@ CREATE INDEX IF NOT EXISTS hot_memories_status_score_idx
 CREATE INDEX IF NOT EXISTS hot_memory_sources_memory_idx
     ON hot_memory_sources (memory_id);
 
+CREATE UNIQUE INDEX IF NOT EXISTS hot_memory_sources_memory_source_unique
+    ON hot_memory_sources (memory_id, source_type, source_ref);
+
 CREATE UNIQUE INDEX IF NOT EXISTS hot_memory_index_jobs_idempotency_unique
     ON hot_memory_index_jobs (idempotency_key);

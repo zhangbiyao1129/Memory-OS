@@ -3,32 +3,86 @@ COMPOSE := docker-compose
 COMPOSE_FILE := deploy/docker-compose.yml
 COMPOSE_T480_FILE := deploy/docker-compose.t480.yml
 GOPROXY ?= https://goproxy.cn,direct
+NO_PROXY ?= localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-web,memory-mcp,memory-llm-mock
 
-.PHONY: test build-web smoke dev-up dev-down preflight secret-scan backup restore install-backup-cron verify audit-report lint seed-dev
+.PHONY: test build-web smoke dev-up prod-up post-deploy-verify dev-down preflight secret-scan secret-injection-audit backup restore backup-restore-dry-run restore-rehearsal-preflight restore-rehearsal-dry-run docker-cleanup-plan docker-cleanup-images install-docker-cleanup-cron install-backup-cron verify audit-report final-delivery-report lint seed-dev
 
 test:
 	@if command -v go >/dev/null 2>&1; then \
 		GOPROXY=$(GOPROXY) go test ./...; \
 	else \
-		docker run --rm -e GOPROXY=$(GOPROXY) -v "$$(pwd)":/src -w /src golang:1.25-bookworm go test ./...; \
+		docker run --rm -e GOPROXY=$(GOPROXY) -e NO_PROXY=$(NO_PROXY) -e no_proxy=$(NO_PROXY) -v "$$(pwd)":/src -w /src golang:1.25-bookworm go test ./...; \
 	fi
 
 build-web:
 	@if command -v npm >/dev/null 2>&1; then \
 		cd web && npm install && npm run build; \
 	else \
-		docker run --rm -v "$$(pwd)/web":/src -w /src node:22-bookworm bash -lc 'npm install && npm run build'; \
+		docker run --rm -e NO_PROXY=$(NO_PROXY) -e no_proxy=$(NO_PROXY) -v "$$(pwd)/web":/src -w /src node:22-bookworm bash -lc 'npm install && npm run build'; \
 	fi
 
 smoke:
 	@if command -v go >/dev/null 2>&1; then \
-		GOPROXY=$(GOPROXY) go run ./cmd/memory-smoke; \
+		SMOKE_ENABLE_DEV_ENDPOINTS=$${SMOKE_ENABLE_DEV_ENDPOINTS:-false} GOPROXY=$(GOPROXY) go run ./cmd/memory-smoke; \
 	else \
-		docker run --rm --network host -e GOPROXY=$(GOPROXY) -v "$$(pwd)":/src -w /src golang:1.25-bookworm go run ./cmd/memory-smoke; \
+		docker run --rm --network $${SMOKE_DOCKER_NETWORK:-host} \
+			-e SMOKE_API_URL=$${SMOKE_API_URL:-} \
+			-e SMOKE_QDRANT_URL=$${SMOKE_QDRANT_URL:-} \
+			-e SMOKE_WEB_URL=$${SMOKE_WEB_URL:-} \
+			-e SMOKE_MCP_URL=$${SMOKE_MCP_URL:-} \
+			-e SMOKE_LLM_BASE_URL=$${SMOKE_LLM_BASE_URL:-} \
+			-e SMOKE_LLM_API_KEY=$${SMOKE_LLM_API_KEY:-} \
+			-e SMOKE_TIMEOUT=$${SMOKE_TIMEOUT:-} \
+			-e SMOKE_ENABLE_DEV_ENDPOINTS=$${SMOKE_ENABLE_DEV_ENDPOINTS:-false} \
+			-e SMOKE_ENABLE_TENANT_GOVERNANCE=$${SMOKE_ENABLE_TENANT_GOVERNANCE:-} \
+			-e SMOKE_REQUIRE_CONFIGURED_RETRIEVAL=$${SMOKE_REQUIRE_CONFIGURED_RETRIEVAL:-false} \
+			-e SMOKE_ENABLE_PIPELINE_E2E=$${SMOKE_ENABLE_PIPELINE_E2E:-false} \
+			-e SMOKE_ADAPTER_TOKEN=$${SMOKE_ADAPTER_TOKEN:-} \
+			-e SMOKE_SEARCH_PAT=$${SMOKE_SEARCH_PAT:-} \
+			-e SMOKE_PIPELINE_E2E_MARKER=$${SMOKE_PIPELINE_E2E_MARKER:-} \
+			-e SMOKE_PIPELINE_E2E_TIMEOUT=$${SMOKE_PIPELINE_E2E_TIMEOUT:-} \
+			-e SMOKE_POSTGRES_DSN=$${SMOKE_POSTGRES_DSN:-} \
+			-e SMOKE_SEARCH_USER_ID=$${SMOKE_SEARCH_USER_ID:-} \
+			-e SMOKE_SEARCH_ORG_ID=$${SMOKE_SEARCH_ORG_ID:-} \
+			-e SMOKE_SEARCH_PROJECT_ID=$${SMOKE_SEARCH_PROJECT_ID:-} \
+			-e SMOKE_SEARCH_AGENT_ID=$${SMOKE_SEARCH_AGENT_ID:-} \
+			-e SMOKE_SEARCH_PERMISSION_LABEL=$${SMOKE_SEARCH_PERMISSION_LABEL:-} \
+			-e GOPROXY=$(GOPROXY) -e NO_PROXY=$(NO_PROXY) -e no_proxy=$(NO_PROXY) \
+			-v "$$(pwd)":/src -w /src golang:1.25-bookworm go run ./cmd/memory-smoke; \
 	fi
 
 dev-up:
-	$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) up -d --build
+	POSTGRES_PASSWORD=$${POSTGRES_PASSWORD:-replace-me-local-only} \
+	LLM_BASE_URL=$${LLM_BASE_URL:-http://example.local:8000} \
+	LLM_API_KEY=$${LLM_API_KEY:-replace-me-dev-only} \
+	SECRET_VAULT_KEY_ID=$${SECRET_VAULT_KEY_ID:-dev-vault-id} \
+	SECRET_VAULT_KEY_B64=$${SECRET_VAULT_KEY_B64:-dGVzdC1rZXktMTIzNDU2Nw==} \
+	APP_ENV=development ENABLE_DEV_ENDPOINTS=true $(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) up -d --build
+
+prod-up-mock:
+	if [[ -f .env.production || -f .env ]] || docker inspect deploy-memory-api-1 >/dev/null 2>&1; then \
+		. scripts/load-prod-env.sh; \
+	fi; \
+	export POSTGRES_PASSWORD=$${POSTGRES_PASSWORD:-replace-me-mock-password}; \
+	export LLM_BASE_URL=$${LLM_BASE_URL:-http://memory-llm-mock:11434}; \
+	export LLM_API_KEY=$${LLM_API_KEY:-memory-llm-mock-key}; \
+	export SECRET_VAULT_KEY_ID=$${SECRET_VAULT_KEY_ID:-dev-vault-id}; \
+	export SECRET_VAULT_KEY_B64=$${SECRET_VAULT_KEY_B64:-dGVzdC1rZXktMTIzNDU2Nw==}; \
+	. scripts/load-build-info.sh && \
+	ALLOW_EXISTING_DEPLOYMENT=1 scripts/preflight.sh && \
+	APP_ENV=production ENABLE_DEV_ENDPOINTS=false \
+	$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) up -d --build memory-api memory-worker memory-mcp memory-web memory-llm-mock
+
+prod-up:
+	. scripts/load-prod-env.sh && \
+	. scripts/load-build-info.sh && \
+	ALLOW_EXISTING_DEPLOYMENT=1 scripts/preflight.sh && \
+	APP_ENV=production ENABLE_DEV_ENDPOINTS=false \
+	$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) up -d --build memory-api memory-worker memory-mcp memory-web && \
+	DRY_RUN=0 DOCKER_IMAGE_CLEANUP_MODE=dangling CONFIRM_DOCKER_IMAGE_CLEANUP=I_UNDERSTAND_IMAGE_DELETE bash scripts/docker-cleanup-images.sh
+
+post-deploy-verify:
+	scripts/post-deploy-verify.sh
 
 dev-down:
 	$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) down
@@ -39,11 +93,42 @@ preflight:
 secret-scan:
 	scripts/secret-scan.sh
 
+secret-injection-audit:
+	scripts/secret-injection-audit.sh
+
 backup:
-	scripts/backup.sh
+	. scripts/load-prod-env.sh && scripts/backup.sh
 
 restore:
-	scripts/restore.sh
+	. scripts/load-prod-env.sh && scripts/restore.sh
+
+backup-restore-dry-run:
+	@set -euo pipefail; \
+	run_id="$${RUN_ID:-dry-run-$$(date -u +%Y%m%dT%H%M%SZ)}"; \
+	backup_root="$${BACKUP_ROOT:-$$(mktemp -d)}"; \
+	RUN_ID="$$run_id" BACKUP_ROOT="$$backup_root" DRY_RUN=1 scripts/backup.sh; \
+	backup_dir="$$backup_root/$$run_id"; \
+	BACKUP_DIR=$$backup_dir DRY_RUN=1 scripts/restore.sh; \
+	echo "backup-restore dry-run completed: $$backup_dir"
+
+restore-rehearsal-dry-run:
+	@set -euo pipefail; \
+	if [[ -z "$${BACKUP_DIR:-}" ]]; then echo "BACKUP_DIR is required" >&2; exit 1; fi; \
+	RESTORE_REHEARSAL_MODE=dry-run bash scripts/restore-rehearsal.sh
+
+restore-rehearsal-preflight:
+	@set -euo pipefail; \
+	if [[ -z "$${BACKUP_DIR:-}" ]]; then echo "BACKUP_DIR is required" >&2; exit 1; fi; \
+	bash scripts/restore-rehearsal-preflight.sh
+
+docker-cleanup-plan:
+	bash scripts/docker-cleanup-plan.sh
+
+docker-cleanup-images:
+	bash scripts/docker-cleanup-images.sh
+
+install-docker-cleanup-cron:
+	bash scripts/install-docker-cleanup-cron.sh
 
 install-backup-cron:
 	scripts/install-backup-cron.sh
@@ -53,6 +138,9 @@ verify:
 
 audit-report:
 	scripts/audit-report.sh
+
+final-delivery-report:
+	scripts/final-delivery-report.sh
 
 lint:
 	gofmt -w cmd internal

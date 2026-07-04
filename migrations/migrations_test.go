@@ -123,6 +123,45 @@ func TestArchiveMigrationContainsRequiredTablesAndIndexes(t *testing.T) {
 	}
 }
 
+func TestArchiveIdempotencyMigrationContainsRequiredTableAndIndex(t *testing.T) {
+	sql := readMigration(t, "000011_archive_idempotency.sql")
+
+	required := []string{
+		"CREATE TABLE IF NOT EXISTS archive_request_idempotency",
+		"request_id TEXT NOT NULL",
+		"operation TEXT NOT NULL",
+		"archive_id TEXT NOT NULL REFERENCES archives(archive_id) ON DELETE CASCADE",
+		"CREATE UNIQUE INDEX IF NOT EXISTS archive_request_idempotency_request_unique",
+	}
+	for _, item := range required {
+		if !strings.Contains(sql, item) {
+			t.Fatalf("archive idempotency migration missing %q", item)
+		}
+	}
+}
+
+func TestArchiveJobsMigrationContainsRequiredTableAndIndexes(t *testing.T) {
+	sql := readMigration(t, "000013_archive_jobs.sql")
+
+	required := []string{
+		"CREATE TABLE IF NOT EXISTS archive_jobs",
+		"request_id TEXT NOT NULL UNIQUE",
+		"archive_id TEXT NOT NULL",
+		"event_ids TEXT[] NOT NULL",
+		"status TEXT NOT NULL DEFAULT 'pending'",
+		"attempts INTEGER NOT NULL DEFAULT 0",
+		"max_attempts INTEGER NOT NULL DEFAULT 3",
+		"locked_until TIMESTAMPTZ",
+		"CREATE INDEX IF NOT EXISTS archive_jobs_ready_idx",
+		"CREATE INDEX IF NOT EXISTS archive_jobs_scope_idx",
+	}
+	for _, item := range required {
+		if !strings.Contains(sql, item) {
+			t.Fatalf("archive jobs migration missing %q", item)
+		}
+	}
+}
+
 func TestArchiveRAGMigrationContainsRequiredTablesAndIndexes(t *testing.T) {
 	sql := readMigration(t, "000005_archive_rag.sql")
 
@@ -172,10 +211,31 @@ func TestHotMemoryMigrationContainsRequiredTablesAndIndexes(t *testing.T) {
 		"CREATE INDEX IF NOT EXISTS hot_memories_scope_idx",
 		"CREATE INDEX IF NOT EXISTS hot_memories_status_score_idx",
 		"CREATE INDEX IF NOT EXISTS hot_memory_sources_memory_idx",
+		"CREATE UNIQUE INDEX IF NOT EXISTS hot_memory_sources_memory_source_unique",
 	}
 	for _, item := range required {
 		if !strings.Contains(sql, item) {
 			t.Fatalf("hot memory migration missing %q", item)
+		}
+	}
+}
+
+func TestHotMemoryQdrantMigrationContainsRequiredPointTracking(t *testing.T) {
+	sql := readMigration(t, "000017_hot_memory_qdrant_points.sql")
+
+	required := []string{
+		"CREATE TABLE IF NOT EXISTS hot_memory_qdrant_points",
+		"point_id TEXT NOT NULL UNIQUE",
+		"memory_id TEXT NOT NULL REFERENCES hot_memories(memory_id) ON DELETE CASCADE",
+		"collection_name TEXT NOT NULL",
+		"payload JSONB NOT NULL",
+		"vector_status TEXT NOT NULL DEFAULT 'pending'",
+		"CREATE INDEX IF NOT EXISTS hot_memory_qdrant_points_memory_idx",
+		"CREATE INDEX IF NOT EXISTS hot_memory_qdrant_points_status_idx",
+	}
+	for _, item := range required {
+		if !strings.Contains(sql, item) {
+			t.Fatalf("hot memory qdrant migration missing %q", item)
 		}
 	}
 }
@@ -196,6 +256,98 @@ func TestRetrievalMigrationContainsRequiredTablesAndIndexes(t *testing.T) {
 	for _, item := range required {
 		if !strings.Contains(sql, item) {
 			t.Fatalf("retrieval migration missing %q", item)
+		}
+	}
+}
+
+func TestRetrievalIdempotencyMigrationContainsRequiredIndex(t *testing.T) {
+	sql := readMigration(t, "000012_retrieval_result_idempotency.sql")
+
+	required := []string{
+		"CREATE UNIQUE INDEX IF NOT EXISTS retrieval_results_request_rank_unique",
+		"ON retrieval_results (request_id, rank)",
+	}
+	for _, item := range required {
+		if !strings.Contains(sql, item) {
+			t.Fatalf("retrieval idempotency migration missing %q", item)
+		}
+	}
+}
+
+func TestArchiveIndexJobLeaseMigrationContainsRequiredColumnsAndIndexes(t *testing.T) {
+	sql := readMigration(t, "000014_archive_index_job_lease.sql")
+
+	required := []string{
+		"ALTER TABLE archive_index_jobs ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE archive_index_jobs ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 3",
+		"ALTER TABLE archive_index_jobs ADD COLUMN IF NOT EXISTS locked_by TEXT",
+		"ALTER TABLE archive_index_jobs ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ",
+		"ALTER TABLE archive_index_jobs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ",
+		"CREATE INDEX IF NOT EXISTS archive_index_jobs_ready_idx",
+	}
+	for _, item := range required {
+		if !strings.Contains(sql, item) {
+			t.Fatalf("archive index job lease migration missing %q", item)
+		}
+	}
+}
+
+func TestTenantSoftDeleteMigrationContainsRequiredColumnsAndIndexes(t *testing.T) {
+	sql := readMigration(t, "000015_tenant_soft_delete.sql")
+
+	required := []string{
+		"ALTER TABLE orgs ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'",
+		"ALTER TABLE projects ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'",
+		"CREATE INDEX IF NOT EXISTS orgs_status_idx",
+		"CREATE INDEX IF NOT EXISTS projects_org_status_idx",
+	}
+	for _, item := range required {
+		if !strings.Contains(sql, item) {
+			t.Fatalf("tenant soft delete migration missing %q", item)
+		}
+	}
+	for _, forbidden := range []string{"DROP TABLE", "DROP COLUMN", "DELETE FROM orgs", "DELETE FROM projects"} {
+		if strings.Contains(strings.ToUpper(sql), forbidden) {
+			t.Fatalf("tenant soft delete migration contains destructive statement %q", forbidden)
+		}
+	}
+}
+
+func TestTenantMembershipUpdatedAtMigrationContainsRequiredColumn(t *testing.T) {
+	sql := readMigration(t, "000016_membership_updated_at.sql")
+
+	required := []string{
+		"ALTER TABLE memberships ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now()",
+	}
+	for _, item := range required {
+		if !strings.Contains(sql, item) {
+			t.Fatalf("tenant membership updated_at migration missing %q", item)
+		}
+	}
+	for _, forbidden := range []string{"DROP TABLE", "DROP COLUMN", "DELETE FROM memberships"} {
+		if strings.Contains(strings.ToUpper(sql), forbidden) {
+			t.Fatalf("tenant membership updated_at migration contains destructive statement %q", forbidden)
+		}
+	}
+}
+
+func TestWorkspaceIdentityMigrationContainsRequiredProjectSourceFields(t *testing.T) {
+	sql := readMigration(t, "000018_workspace_identity.sql")
+
+	required := []string{
+		"ALTER TABLE projects ADD COLUMN IF NOT EXISTS source_type TEXT",
+		"ALTER TABLE projects ADD COLUMN IF NOT EXISTS source_key TEXT",
+		"CREATE UNIQUE INDEX IF NOT EXISTS projects_source_unique",
+		"CREATE INDEX IF NOT EXISTS projects_source_idx",
+	}
+	for _, item := range required {
+		if !strings.Contains(sql, item) {
+			t.Fatalf("workspace identity migration missing %q", item)
+		}
+	}
+	for _, forbidden := range []string{"DROP TABLE", "DROP COLUMN", "DELETE FROM projects"} {
+		if strings.Contains(strings.ToUpper(sql), forbidden) {
+			t.Fatalf("workspace identity migration contains destructive statement %q", forbidden)
 		}
 	}
 }

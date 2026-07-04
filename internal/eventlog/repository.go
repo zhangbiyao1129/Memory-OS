@@ -11,7 +11,7 @@ type SaveResult struct {
 }
 
 type Repository interface {
-	Save(event TurnEvent, safePayload []byte, requestID string) (SaveResult, error)
+	Save(event SanitizedEvent, requestID string) (SaveResult, error)
 	Count() int
 }
 
@@ -26,9 +26,10 @@ func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{events: map[string]TurnEvent{}, payloads: map[string][]byte{}, requestIDs: map[string]string{}}
 }
 
-func (r *MemoryRepository) Save(event TurnEvent, safePayload []byte, requestID string) (SaveResult, error) {
+func (r *MemoryRepository) Save(sanitized SanitizedEvent, requestID string) (SaveResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	event := sanitized.Event
 	if event.EventID == "" || requestID == "" {
 		return SaveResult{}, errors.New("event id and request id are required")
 	}
@@ -40,7 +41,7 @@ func (r *MemoryRepository) Save(event TurnEvent, safePayload []byte, requestID s
 		return SaveResult{EventID: event.EventID, Deduped: true}, nil
 	}
 	r.events[event.EventID] = event
-	r.payloads[event.EventID] = append([]byte(nil), safePayload...)
+	r.payloads[event.EventID] = append([]byte(nil), sanitized.SafePayload...)
 	r.requestIDs[requestID] = event.EventID
 	return SaveResult{EventID: event.EventID, Deduped: false}, nil
 }

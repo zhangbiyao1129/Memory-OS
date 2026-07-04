@@ -31,6 +31,7 @@ type IndexRequest struct {
 type SearchRequest struct {
 	Query  string
 	Filter qdrant.PayloadFilter
+	Limit  int
 }
 
 type SearchResult struct {

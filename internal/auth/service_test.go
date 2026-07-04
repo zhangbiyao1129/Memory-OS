@@ -79,3 +79,26 @@ func TestAdapterTokenBinding(t *testing.T) {
 		t.Fatal("ValidateAdapterToken() error = nil, want project mismatch rejection")
 	}
 }
+
+func TestAdapterTokenRevoke(t *testing.T) {
+	service := NewService(NewMemoryRepository())
+	plain, record, err := service.CreateAdapterToken(AdapterTokenRequest{
+		UserID:    "user_1",
+		OrgID:     "org_1",
+		ProjectID: "project_1",
+		AgentID:   "codex",
+		Scopes:    []string{"turn_event:write"},
+		TTL:       time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("CreateAdapterToken() error = %v", err)
+	}
+
+	if err := service.RevokeAdapterToken(record.ID); err != nil {
+		t.Fatalf("RevokeAdapterToken() error = %v", err)
+	}
+
+	if _, err := service.ValidateAdapterToken(plain, AdapterTokenBinding{OrgID: "org_1", ProjectID: "project_1", AgentID: "codex"}, time.Now()); err == nil {
+		t.Fatal("ValidateAdapterToken() error = nil, want revoked rejection")
+	}
+}

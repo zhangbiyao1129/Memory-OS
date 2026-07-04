@@ -100,11 +100,192 @@ func TestServiceEditArchiveIncrementsVersionAndIndexGeneration(t *testing.T) {
 	if edited.Metadata.IndexGeneration != 2 {
 		t.Fatalf("index_generation = %d, want 2", edited.Metadata.IndexGeneration)
 	}
-	if len(repo.Versions(created.Metadata.ArchiveID)) != 2 {
-		t.Fatalf("versions len = %d, want 2", len(repo.Versions(created.Metadata.ArchiveID)))
+	versions, err := repo.Versions(created.Metadata.ArchiveID)
+	if err != nil {
+		t.Fatalf("Versions() error = %v", err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("versions len = %d, want 2", len(versions))
 	}
 	if len(repo.AuditLogs(created.Metadata.ArchiveID)) != 1 {
 		t.Fatalf("audit logs len = %d, want 1", len(repo.AuditLogs(created.Metadata.ArchiveID)))
+	}
+}
+
+func TestServiceEditSanitizesSecretBeforeWritingArchive(t *testing.T) {
+	repo := NewMemoryRepository()
+	service := NewService(repo, t.TempDir())
+	created, err := service.Create(CreateRequest{
+		RequestID: "request_1",
+		ArchiveID: "archive_1",
+		Title:     "Deploy Notes",
+		UserID:    "user_1",
+		OrgID:     "org_1",
+		ProjectID: "project_1",
+		CreatedAt: time.Now().UTC(),
+		Events:    []eventlog.TurnEvent{archiveEvent("event_1", "deploy api")},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	edited, err := service.Edit(EditRequest{
+		RequestID:   "edit_1",
+		ArchiveID:   created.Metadata.ArchiveID,
+		ActorUserID: "user_1",
+		Reason:      "manual correction",
+		Content:     "# Edited\n\noperator pasted sk-test-redacted-example",
+	})
+	if err != nil {
+		t.Fatalf("Edit() error = %v", err)
+	}
+
+	content, err := os.ReadFile(edited.Metadata.FilePath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.Contains(string(content), "sk-test-redacted-example") {
+		t.Fatalf("edited archive leaked secret: %s", content)
+	}
+	if !strings.Contains(string(content), "secret_ref:") {
+		t.Fatalf("edited archive missing secret_ref replacement: %s", content)
+	}
+	if edited.Metadata.ContentHash != contentHash(string(content)) {
+		t.Fatal("metadata content hash does not match sanitized file content")
+	}
+}
+
+func TestServiceDetailReadsMarkdownContent(t *testing.T) {
+	service := NewService(NewMemoryRepository(), t.TempDir())
+	created, err := service.Create(CreateRequest{
+		RequestID: "request_1",
+		ArchiveID: "archive_1",
+		Title:     "Deploy Notes",
+		UserID:    "user_1",
+		OrgID:     "org_1",
+		ProjectID: "project_1",
+		CreatedAt: time.Now().UTC(),
+		Events:    []eventlog.TurnEvent{archiveEvent("event_1", "deploy api")},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	detail, err := service.Detail(created.Metadata.ArchiveID)
+	if err != nil {
+		t.Fatalf("Detail() error = %v", err)
+	}
+
+	if detail.Metadata.ArchiveID != created.Metadata.ArchiveID {
+		t.Fatalf("detail archive id = %q", detail.Metadata.ArchiveID)
+	}
+	if !strings.Contains(detail.Content, "Deploy Notes") || !strings.Contains(detail.Content, "deploy api") {
+		t.Fatalf("detail content mismatch: %s", detail.Content)
+	}
+}
+
+func TestServiceVersionsReturnsStoredVersions(t *testing.T) {
+	repo := NewMemoryRepository()
+	service := NewService(repo, t.TempDir())
+	created, err := service.Create(CreateRequest{
+		RequestID: "request_1",
+		ArchiveID: "archive_1",
+		Title:     "Deploy Notes",
+		UserID:    "user_1",
+		OrgID:     "org_1",
+		ProjectID: "project_1",
+		CreatedAt: time.Now().UTC(),
+		Events:    []eventlog.TurnEvent{archiveEvent("event_1", "deploy api")},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := service.Edit(EditRequest{RequestID: "edit_1", ArchiveID: created.Metadata.ArchiveID, ActorUserID: "user_1", Reason: "manual correction", Content: "# Edited\n\nnew content"}); err != nil {
+		t.Fatalf("Edit() error = %v", err)
+	}
+
+	versions, err := service.Versions(created.Metadata.ArchiveID)
+	if err != nil {
+		t.Fatalf("Versions() error = %v", err)
+	}
+
+	if len(versions) != 2 || versions[0].Version != 1 || versions[1].Version != 2 {
+		t.Fatalf("versions mismatch: %#v", versions)
+	}
+}
+
+func TestServiceListFiltersArchives(t *testing.T) {
+	repo := NewMemoryRepository()
+	service := NewService(repo, t.TempDir())
+	if _, err := service.Create(CreateRequest{RequestID: "request_1", ArchiveID: "archive_1", Title: "One", UserID: "user_1", OrgID: "org_1", ProjectID: "project_1", CreatedAt: time.Now().UTC(), Events: []eventlog.TurnEvent{archiveEvent("event_1", "deploy api")}}); err != nil {
+		t.Fatalf("Create(archive_1) error = %v", err)
+	}
+	if _, err := service.Create(CreateRequest{RequestID: "request_2", ArchiveID: "archive_2", Title: "Two", UserID: "user_2", OrgID: "org_1", ProjectID: "project_1", CreatedAt: time.Now().UTC(), Events: []eventlog.TurnEvent{archiveEvent("event_2", "other api")}}); err != nil {
+		t.Fatalf("Create(archive_2) error = %v", err)
+	}
+
+	archives, err := service.List(ListFilter{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", Status: "active"})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+
+	if len(archives) != 1 || archives[0].ArchiveID != "archive_1" {
+		t.Fatalf("archives mismatch: %#v", archives)
+	}
+}
+
+func TestServiceDeleteSoftDeletesAndKeepsVersions(t *testing.T) {
+	repo := NewMemoryRepository()
+	service := NewService(repo, t.TempDir())
+	created, err := service.Create(CreateRequest{RequestID: "request_1", ArchiveID: "archive_1", Title: "One", UserID: "user_1", OrgID: "org_1", ProjectID: "project_1", CreatedAt: time.Now().UTC(), Events: []eventlog.TurnEvent{archiveEvent("event_1", "deploy api")}})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	deleted, err := service.Delete(DeleteRequest{RequestID: "delete_1", ArchiveID: created.Metadata.ArchiveID, ActorUserID: "user_1", Reason: "cleanup"})
+	if err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+
+	if deleted.Metadata.Status != "deleted" {
+		t.Fatalf("status = %q, want deleted", deleted.Metadata.Status)
+	}
+	versions, err := service.Versions(created.Metadata.ArchiveID)
+	if err != nil {
+		t.Fatalf("Versions() error = %v", err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("versions len = %d, want 1", len(versions))
+	}
+	if len(repo.AuditLogs(created.Metadata.ArchiveID)) != 1 {
+		t.Fatalf("audit logs len = %d, want 1", len(repo.AuditLogs(created.Metadata.ArchiveID)))
+	}
+	active, err := service.List(ListFilter{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", Status: "active"})
+	if err != nil {
+		t.Fatalf("List(active) error = %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("active archives = %#v, want none", active)
+	}
+}
+
+func TestServiceReindexIncrementsGenerationAndChunksMarkdown(t *testing.T) {
+	service := NewService(NewMemoryRepository(), t.TempDir())
+	created, err := service.Create(CreateRequest{RequestID: "request_1", ArchiveID: "archive_1", Title: "One", UserID: "user_1", OrgID: "org_1", ProjectID: "project_1", CreatedAt: time.Now().UTC(), Events: []eventlog.TurnEvent{archiveEvent("event_1", "deploy api")}})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	reindexed, err := service.Reindex(ReindexRequest{RequestID: "reindex_1", ArchiveID: created.Metadata.ArchiveID, Reason: "manual rebuild"})
+	if err != nil {
+		t.Fatalf("Reindex() error = %v", err)
+	}
+
+	if reindexed.Metadata.IndexGeneration != 2 {
+		t.Fatalf("index generation = %d, want 2", reindexed.Metadata.IndexGeneration)
+	}
+	if len(reindexed.Chunks) == 0 || reindexed.Chunks[0].ArchiveID != created.Metadata.ArchiveID || reindexed.Chunks[0].IndexGeneration != 2 {
+		t.Fatalf("chunks mismatch: %#v", reindexed.Chunks)
 	}
 }
 

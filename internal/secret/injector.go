@@ -1,9 +1,18 @@
 package secret
 
 import (
+	"errors"
 	"strings"
 
 	"memory-os/internal/audit"
+)
+
+type InjectionTarget string
+
+const (
+	InjectionTargetEnv       InjectionTarget = "env"
+	InjectionTargetStdin     InjectionTarget = "stdin"
+	InjectionTargetLLMPrompt InjectionTarget = "llm_prompt"
 )
 
 type InjectRequest struct {
@@ -12,6 +21,7 @@ type InjectRequest struct {
 	ProjectID   string
 	Tool        string
 	Purpose     string
+	Target      InjectionTarget
 	RequestID   string
 	Template    string
 }
@@ -26,6 +36,13 @@ func NewInjector(vault Vault, auditService audit.Service) Injector {
 }
 
 func (i Injector) Inject(request InjectRequest) (string, error) {
+	target := request.Target
+	if target == "" {
+		target = InjectionTargetEnv
+	}
+	if target == InjectionTargetLLMPrompt {
+		return "", errors.New("secret injection into llm prompt is forbidden")
+	}
 	output := request.Template
 	for _, ref := range extractRefs(request.Template) {
 		value, err := i.vault.DecryptForUse(ref)
@@ -42,8 +59,9 @@ func (i Injector) Inject(request InjectRequest) (string, error) {
 			RequestID:    request.RequestID,
 			Result:       "ok",
 			Metadata: map[string]string{
-				"tool":    request.Tool,
-				"purpose": request.Purpose,
+				"tool":             request.Tool,
+				"purpose":          request.Purpose,
+				"injection_target": string(target),
 			},
 		}); err != nil {
 			return "", err

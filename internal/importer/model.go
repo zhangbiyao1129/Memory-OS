@@ -8,6 +8,7 @@ const (
 	SourceOpenMemory SourceType = "openmemory"
 	SourceZep        SourceType = "zep"
 	SourceKhoj       SourceType = "khoj"
+	SourceBundle     SourceType = "bundle"
 )
 
 type ItemKind string

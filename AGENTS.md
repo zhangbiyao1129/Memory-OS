@@ -422,6 +422,9 @@ Phase 10：兼容与迁移。
 
 ## Development Workflow
 
+- Memory OS 项目的全部后续开发、构建、测试、部署和容器操作默认都在 `thinkpad` 服务器的 `/opt/memory-os` 完成。
+- 本地工作区只用于查看、编辑和同步代码；除非用户明确要求，不在本地启动、保留或依赖 Memory OS 容器。
+- 需要运行 `make test`、`make build-web`、`make smoke`、`make dev-up`、`make dev-down` 或 Docker Compose 命令时，优先通过 SSH 在 `thinkpad` 服务器执行。
 - 处理代码任务时，优先读取 `README.md`；不存在则跳过并说明一次，不要反复尝试。
 - 改代码前必须先理解相关文件、架构和现有风格。
 - 所有代码改动前必须创建 TodoList。

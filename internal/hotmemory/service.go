@@ -12,11 +12,20 @@ import (
 )
 
 type Service struct {
-	repository Repository
+	repository  Repository
+	vectorIndex VectorIndex
 }
 
 func NewService(repository Repository) Service {
 	return Service{repository: repository}
+}
+
+func NewServiceWithVectorIndex(repository Repository, vectorIndex VectorIndex) Service {
+	return Service{repository: repository, vectorIndex: vectorIndex}
+}
+
+func (s Service) Configured() bool {
+	return s.repository != nil
 }
 
 func (s Service) Upsert(request UpsertRequest) (Memory, error) {
@@ -41,7 +50,34 @@ func (s Service) Upsert(request UpsertRequest) (Memory, error) {
 		Confidence:       request.Confidence,
 		Status:           StatusActive,
 	}
-	return s.repository.Upsert(memory)
+	memory.HotScore = score(memory)
+	saved, err := s.repository.Upsert(memory)
+	if err != nil {
+		return Memory{}, err
+	}
+	if s.vectorIndex != nil {
+		if err := s.vectorIndex.Index(saved); err != nil {
+			return Memory{}, err
+		}
+	}
+	return saved, nil
+}
+
+func (s Service) Get(memoryID string) (Memory, error) {
+	if !s.Configured() {
+		return Memory{}, errors.New("hot memory service is not configured")
+	}
+	return s.repository.Get(memoryID)
+}
+
+func (s Service) List(filter map[string][]string) ([]Memory, error) {
+	if !s.Configured() {
+		return nil, errors.New("hot memory service is not configured")
+	}
+	if len(filter) == 0 {
+		return nil, errors.New("hot memory filter is required")
+	}
+	return s.repository.Search(filter), nil
 }
 
 func (s Service) Search(request SearchRequest) ([]SearchResult, error) {
@@ -50,6 +86,9 @@ func (s Service) Search(request SearchRequest) ([]SearchResult, error) {
 	}
 	if len(request.Filter.Must) == 0 {
 		return nil, errors.New("query-time hot memory filter is required")
+	}
+	if s.vectorIndex != nil {
+		return s.vectorIndex.Search(request)
 	}
 	candidates := s.repository.Search(request.Filter.Must)
 	results := []SearchResult{}
@@ -90,6 +129,42 @@ func (s Service) MarkUsed(memoryID string) (Memory, error) {
 	return s.repository.Update(memory)
 }
 
+func (s Service) Edit(request EditRequest) (Memory, error) {
+	if !s.Configured() {
+		return Memory{}, errors.New("hot memory service is not configured")
+	}
+	if strings.TrimSpace(request.MemoryID) == "" {
+		return Memory{}, errors.New("memory id is required")
+	}
+	sanitized := secret.Sanitize(request.Fact, func(index int, match string) string { return fmt.Sprintf("secret_ref_hot_memory_%d", index) })
+	fact := strings.TrimSpace(sanitized.Text)
+	if fact == "" {
+		return Memory{}, errors.New("fact is required")
+	}
+	memory, err := s.repository.Get(request.MemoryID)
+	if err != nil {
+		return Memory{}, err
+	}
+	if memory.Status == StatusDeleted || memory.DeletedAt != nil {
+		return Memory{}, errors.New("deleted memory cannot be edited")
+	}
+	memory.Fact = fact
+	memory.FactHash = hash(normalizeFact(fact))
+	if request.Confidence > 0 {
+		memory.Confidence = request.Confidence
+	}
+	updated, err := s.repository.Update(memory)
+	if err != nil {
+		return Memory{}, err
+	}
+	if s.vectorIndex != nil {
+		if err := s.vectorIndex.Index(updated); err != nil {
+			return Memory{}, err
+		}
+	}
+	return updated, nil
+}
+
 func (s Service) Delete(memoryID string) error {
 	memory, err := s.repository.Get(memoryID)
 	if err != nil {
@@ -98,8 +173,14 @@ func (s Service) Delete(memoryID string) error {
 	now := time.Now().UTC()
 	memory.Status = StatusDeleted
 	memory.DeletedAt = &now
-	_, err = s.repository.Update(memory)
-	return err
+	updated, err := s.repository.Update(memory)
+	if err != nil {
+		return err
+	}
+	if s.vectorIndex != nil {
+		return s.vectorIndex.Delete(updated)
+	}
+	return nil
 }
 
 func validateUpsert(request UpsertRequest) error {

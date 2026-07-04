@@ -23,6 +23,10 @@ func NewVault(repo Repository, codec AESGCMCodec) Vault {
 	return Vault{repo: repo, codec: codec}
 }
 
+func (v Vault) Configured() bool {
+	return v.repo != nil && v.codec.gcm != nil
+}
+
 func (v Vault) Create(request CreateRequest) (Metadata, error) {
 	if request.OwnerUserID == "" {
 		return Metadata{}, errors.New("owner user id is required")
@@ -74,6 +78,23 @@ func (v Vault) DecryptForUse(secretRef string) (string, error) {
 		return "", err
 	}
 	return string(plaintext), nil
+}
+
+func (v Vault) List(filter ListFilter) ([]Metadata, error) {
+	if filter.OwnerUserID == "" {
+		return nil, errors.New("owner user id is required")
+	}
+	if filter.Status == "" {
+		filter.Status = "active"
+	}
+	return v.repo.List(filter)
+}
+
+func (v Vault) Metadata(secretRef string) (Metadata, error) {
+	if secretRef == "" {
+		return Metadata{}, errors.New("secret ref is required")
+	}
+	return v.repo.GetMetadata(secretRef)
 }
 
 func (v Vault) Disable(secretRef string) error {

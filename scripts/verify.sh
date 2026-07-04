@@ -12,6 +12,7 @@ NPM_AUDIT_CMD="${NPM_AUDIT_CMD:-npm --prefix web audit --omit=dev --audit-level=
 SMOKE_CMD="${SMOKE_CMD:-make smoke}"
 BACKUP_DRY_RUN_CMD="${BACKUP_DRY_RUN_CMD:-DRY_RUN=1 RUN_ID=verify-dry-run BACKUP_ROOT=/tmp/memory-os-verify-backup ARCHIVE_DIR=/tmp/memory-os-verify-archive make backup}"
 RESTORE_DRY_RUN_CMD="${RESTORE_DRY_RUN_CMD:-BACKUP_DIR=/tmp/memory-os-verify-backup/verify-dry-run RESTORE_AUDIT_DIR=/tmp/memory-os-verify-restore make restore}"
+RESTORE_REHEARSAL_PREFLIGHT_CMD="${RESTORE_REHEARSAL_PREFLIGHT_CMD:-BACKUP_DIR=/tmp/memory-os-verify-backup/verify-dry-run RESTORE_REHEARSAL_AUDIT_DIR=/tmp/memory-os-verify-rehearsal-preflight make restore-rehearsal-preflight}"
 CRON_DRY_RUN_CMD="${CRON_DRY_RUN_CMD:-PROJECT_DIR=/opt/memory-os make install-backup-cron}"
 
 run_step() {
@@ -29,6 +30,7 @@ run_step "npm audit" "$NPM_AUDIT_CMD"
 run_step "smoke" "$SMOKE_CMD"
 run_step "backup dry-run" "$BACKUP_DRY_RUN_CMD"
 run_step "restore dry-run" "$RESTORE_DRY_RUN_CMD"
+run_step "restore rehearsal preflight" "$RESTORE_REHEARSAL_PREFLIGHT_CMD"
 run_step "backup cron dry-run" "$CRON_DRY_RUN_CMD"
 
 echo "verify completed"

@@ -81,8 +81,17 @@ func (r *MemoryRepository) Search(filter map[string][]string) []Memory {
 func (r *MemoryRepository) Update(memory Memory) (Memory, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.byID[memory.MemoryID]; !ok {
+	existing, ok := r.byID[memory.MemoryID]
+	if !ok {
 		return Memory{}, errors.New("memory not found")
+	}
+	if memory.FactHash != existing.FactHash {
+		key := dedupeKey(memory)
+		if existingID, ok := r.byDedupe[key]; ok && existingID != memory.MemoryID {
+			return Memory{}, errors.New("memory fact already exists in scope")
+		}
+		delete(r.byDedupe, dedupeKey(existing))
+		r.byDedupe[key] = memory.MemoryID
 	}
 	memory.UpdatedAt = time.Now().UTC()
 	memory.HotScore = score(memory)

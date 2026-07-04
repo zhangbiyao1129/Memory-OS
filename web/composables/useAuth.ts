@@ -3,7 +3,7 @@ export function useAuth() {
   return {
     auth,
     isAuthenticated: computed(() => auth.isAuthenticated),
-    login: auth.login,
+    loginWithPAT: auth.loginWithPAT,
     logout: auth.logout
   }
 }

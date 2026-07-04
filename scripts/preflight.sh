@@ -23,6 +23,18 @@ run_text() {
   bash -lc "$1"
 }
 
+load_compose_env_for_ps() {
+  if [[ -n "${COMPOSE_PS_CMD:-}" && "$COMPOSE_PS_CMD" != "docker-compose -f deploy/docker-compose.yml -f deploy/docker-compose.t480.yml ps" ]]; then
+    return 0
+  fi
+  if [[ ! -f "scripts/load-prod-env.sh" ]]; then
+    return 0
+  fi
+  # 只在需要识别当前部署占用端口时懒加载生产环境，避免普通 preflight 对 prod env 形成硬依赖。
+  # shellcheck disable=SC1091
+  . scripts/load-prod-env.sh >/dev/null 2>&1 || true
+}
+
 if ! run_text "$DOCKER_CMD" >/dev/null; then
   echo "docker is required" >&2
   exit 1
@@ -39,6 +51,7 @@ for port in $PORTS; do
   if printf '%s\n' "$listening" | grep -Eq "[:.]$port([[:space:]]|$)"; then
     if [[ "$ALLOW_EXISTING_DEPLOYMENT" == "1" ]]; then
       if [[ -z "$compose_ps" ]]; then
+        load_compose_env_for_ps
         compose_ps="$(run_text "$COMPOSE_PS_CMD" || true)"
       fi
       if printf '%s\n' "$compose_ps" | grep -q ":$port->"; then
