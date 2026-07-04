@@ -9,7 +9,7 @@ docs.zip
 
 # Logs
 *.log
-logs/
+/logs/
 
 # Go
 bin/
