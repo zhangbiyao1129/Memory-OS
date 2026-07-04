@@ -5,7 +5,7 @@ COMPOSE_T480_FILE := deploy/docker-compose.t480.yml
 GOPROXY ?= https://goproxy.cn,direct
 NO_PROXY ?= localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-web,memory-mcp,memory-llm-mock
 
-.PHONY: test build-web smoke dev-up prod-up post-deploy-verify dev-down preflight secret-scan secret-injection-audit backup restore backup-restore-dry-run restore-rehearsal-preflight restore-rehearsal-dry-run docker-cleanup-plan docker-cleanup-images install-docker-cleanup-cron install-backup-cron verify audit-report final-delivery-report lint seed-dev
+.PHONY: test build-web smoke dev-up prod-up post-deploy-verify dev-down preflight secret-scan secret-injection-audit backup restore backup-restore-dry-run restore-rehearsal-preflight restore-rehearsal-dry-run docker-cleanup-plan docker-cleanup-images install-docker-cleanup-cron install-backup-cron verify audit-report final-delivery-report lint seed-dev t480-sync t480-build-check t480-deploy
 
 test:
 	@if command -v go >/dev/null 2>&1 && go version | grep -q 'go1\.25'; then \
@@ -142,6 +142,15 @@ audit-report:
 
 final-delivery-report:
 	scripts/final-delivery-report.sh
+
+t480-sync:
+	bash scripts/sync-t480.sh
+
+t480-build-check: t480-sync
+	ssh $${TARGET_HOST:-thinkpad} 'cd $${TARGET_DIR:-/opt/memory-os} && make test && make build-web'
+
+t480-deploy: t480-sync
+	ssh $${TARGET_HOST:-thinkpad} 'cd $${TARGET_DIR:-/opt/memory-os} && make prod-up && make post-deploy-verify'
 
 lint:
 	gofmt -w cmd internal

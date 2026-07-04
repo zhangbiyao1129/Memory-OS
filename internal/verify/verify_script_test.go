@@ -799,6 +799,73 @@ func TestProductionCommandsLoadEnvironmentWithoutInliningSecrets(t *testing.T) {
 	}
 }
 
+func TestT480DirectSyncWorkflowIsSafeByDefault(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "sync-t480.sh")
+	content, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read T480 sync script: %v", err)
+	}
+	script := string(content)
+
+	for _, required := range []string{
+		`TARGET_HOST="${TARGET_HOST:-thinkpad}"`,
+		`TARGET_DIR="${TARGET_DIR:-/opt/memory-os}"`,
+		`rsync`,
+		`--no-owner`,
+		`--no-group`,
+		`--exclude=.git/`,
+		`--exclude=.env`,
+		`--exclude=.env.*`,
+		`--include=.env.example`,
+		`--exclude=frontend/node_modules/`,
+		`--exclude=frontend/.nuxt/`,
+		`--exclude=frontend/.output/`,
+		`--exclude=.gocache/`,
+		`--exclude=.playwright-mcp/`,
+		`--exclude=artifacts/`,
+		`--exclude=docs/`,
+		`--exclude=specs/`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("T480 sync script missing safety marker %q", required)
+		}
+	}
+	if strings.Contains(script, "--delete") {
+		t.Fatal("T480 sync script must not delete remote files by default")
+	}
+	includeExample := strings.Index(script, `--include=.env.example`)
+	excludeEnvPattern := strings.Index(script, `--exclude=.env.*`)
+	if includeExample < 0 || excludeEnvPattern < 0 || includeExample > excludeEnvPattern {
+		t.Fatal("T480 sync script must include .env.example before excluding .env.*")
+	}
+}
+
+func TestMakefileExposesT480DirectWorkflowTargets(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	content, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	makefile := string(content)
+
+	for _, required := range []string{
+		"t480-sync:",
+		"bash scripts/sync-t480.sh",
+		"t480-build-check:",
+		"make test && make build-web",
+		"t480-deploy:",
+		"make prod-up && make post-deploy-verify",
+	} {
+		if !strings.Contains(makefile, required) {
+			t.Fatalf("Makefile missing T480 workflow marker %q", required)
+		}
+	}
+	if strings.Contains(makefile, "git pull") {
+		t.Fatal("daily T480 workflow must not require git pull")
+	}
+}
+
 func findRepoRoot(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()

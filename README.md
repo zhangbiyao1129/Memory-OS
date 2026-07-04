@@ -14,7 +14,22 @@ Memory OS 是一个 Native Multi-Agent Memory Platform，用于把 Codex、Claud
 
 ## 默认运行环境
 
-Memory OS 项目的开发、测试、构建、部署默认在服务器执行。本地不运行 Memory OS 容器，本地工作区仅用于受控编辑、补丁审查和同步。
+Memory OS 项目的开发默认在本地编辑源码，测试、构建、部署默认在 T480 的 `/opt/memory-os` 执行。本地不运行 Memory OS 容器。
+
+日常开发流程:
+
+```bash
+# 本地同步到 T480,不经过 GitHub
+make t480-sync
+
+# 同步后在 T480 跑测试和前端构建
+make t480-build-check
+
+# 同步后在 T480 构建镜像、部署并做部署后验证
+make t480-deploy
+```
+
+GitHub 只作为稳定改动的远端仓库使用。日常构建和部署不依赖 `git pull`;只有当你明确决定保存一个稳定节点时,再手动 `git commit` 和 `git push`。
 
 默认端口（部署到自己的服务器时按需替换）：
 
