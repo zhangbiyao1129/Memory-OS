@@ -51,11 +51,25 @@ curl http://127.0.0.1:18081/healthz
 curl http://127.0.0.1:18081/openapi.json
 ```
 
-## 本地 Agent MCP 接入
+## Agent MCP 接入
 
 日常使用只需要一个“通用 MCP Token”，不需要按项目或按 Agent 创建多个 Token。
 
-本地 Agent 侧使用 `memory-mcp-local` 作为 stdio MCP 入口，它会在每次 `memory_search` 时读取当前工作目录的 Git 信息，并把去除凭据后的 `git_remote`、`git_root`、branch、commit 传给服务器。服务器再按同一个 Git 仓库自动创建或复用项目空间。
+正式接入优先使用远程 MCP 服务：Agent 客户端配置 Memory OS 的服务地址和 Token 后，直接调用 MCP 暴露的工具能力。Agent 名称不要求用户手动填写；服务端会优先读取 `X-Memory-Agent-ID`，没有时从 `User-Agent` 自动识别 Claude Code、Codex、Cursor、opencode、Cline、Roo、Hermes 等常见客户端，仍无法识别时使用 `mcp` 作为兜底来源 metadata。
+
+远程 HTTP 入口：
+
+```text
+POST http://your-server:18082/mcp
+Authorization: Bearer <后台 Token 页面创建的一次性明文 Token>
+Accept: application/json, text/event-stream
+```
+
+`/mcp` 是标准 MCP Streamable HTTP JSON-RPC 入口，支持 `initialize`、`tools/list`、`tools/call` 和 `ping`。`/tools`、`/tools/call` 仍保留为旧 bridge 兼容接口。
+
+`agent_id` 只作为来源 metadata，不决定项目归属。项目归属默认由 Git remote / workspace identity 自动判定；同一个 Token 可以配置给 Codex、Claude Code、opencode、Hermes 等 Agent。
+
+对于只支持 stdio MCP 的客户端，可以使用 `memory-mcp-local` 作为兼容入口。它会在每次 `memory_search` 时读取当前工作目录的 Git 信息，并把去除凭据后的 `git_remote`、`git_root`、branch、commit 传给服务器。服务器再按同一个 Git 仓库自动创建或复用项目空间。
 
 构建本地入口：
 
@@ -72,15 +86,12 @@ MCP 配置示例：
       "command": "/Users/你的用户名/bin/memory-mcp-local",
       "env": {
         "MEMORY_OS_MCP_URL": "http://your-server:18082",
-        "MEMORY_OS_TOKEN": "<在后台 Token 页面创建的一次性明文 Token>",
-        "MEMORY_OS_AGENT_ID": "codex"
+        "MEMORY_OS_TOKEN": "<后台 Token 页面创建的一次性明文 Token>"
       }
     }
   }
 }
 ```
-
-同一个 Token 可以配置给 Codex、Claude Code、opencode、Hermes 等 Agent；`MEMORY_OS_AGENT_ID` 只作为来源 metadata，不决定项目归属。项目归属默认由 Git remote 自动判定。
 
 ## 生产级开发原则
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -120,6 +121,75 @@ func TestToolsCallRunsMemorySearch(t *testing.T) {
 	}
 }
 
+func TestMCPStreamableHTTPInitializeAndToolsList(t *testing.T) {
+	authService, tenantService, token := mcpAuthFixture(t)
+	server := &Server{Addr: ":18082", Tools: mcp.Tools(), Handler: mcp.NewHandler(mcp.HandlerOptions{Retrieval: fixtureRetrievalService()}), AuthService: authService, TenantService: tenantService, RequireAuth: true}
+
+	initialize := postMCPRPC(t, server, token, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"acceptance","version":"0"}}}`)
+	if initialize.Code != http.StatusOK {
+		t.Fatalf("initialize status = %d body = %s, want 200", initialize.Code, initialize.Body.String())
+	}
+	for _, want := range []string{`"jsonrpc":"2.0"`, `"protocolVersion":"2025-03-26"`, `"serverInfo"`, `"tools"`} {
+		if !strings.Contains(initialize.Body.String(), want) {
+			t.Fatalf("initialize response missing %s: %s", want, initialize.Body.String())
+		}
+	}
+
+	toolsList := postMCPRPC(t, server, token, `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`)
+	if toolsList.Code != http.StatusOK {
+		t.Fatalf("tools/list status = %d body = %s, want 200", toolsList.Code, toolsList.Body.String())
+	}
+	for _, want := range []string{`"memory_search"`, `"inputSchema"`, `"result"`} {
+		if !strings.Contains(toolsList.Body.String(), want) {
+			t.Fatalf("tools/list response missing %s: %s", want, toolsList.Body.String())
+		}
+	}
+}
+
+func TestMCPStreamableHTTPToolCallRunsMemorySearch(t *testing.T) {
+	authService, tenantService, token := mcpAuthFixture(t)
+	server := &Server{Addr: ":18082", Tools: mcp.Tools(), Handler: mcp.NewHandler(mcp.HandlerOptions{Retrieval: fixtureRetrievalService()}), AuthService: authService, TenantService: tenantService, RequireAuth: true}
+	body := `{"jsonrpc":"2.0","id":"call-1","method":"tools/call","params":{"name":"memory_search","arguments":{"request_id":"mcp_streamable_search","query":"deploy API","actor":{"org_id":"org_1","project_id":"project_1"},"scope":"project","visibility":"project","archive_index_generation":2,"max_context_bytes":512}}}`
+	response := postMCPRPC(t, server, token, body)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("tools/call status = %d body = %s, want 200", response.Code, response.Body.String())
+	}
+	for _, want := range []string{`"jsonrpc":"2.0"`, `"isError":false`, `"content"`, `\"request_id\":\"mcp_streamable_search\"`, `\"kind\":\"archive_chunk\"`} {
+		if !strings.Contains(response.Body.String(), want) {
+			t.Fatalf("tools/call response missing %s: %s", want, response.Body.String())
+		}
+	}
+}
+
+func TestMCPStreamableHTTPRequiresPATWhenAuthConfigured(t *testing.T) {
+	authService, tenantService, _ := mcpAuthFixture(t)
+	server := &Server{Addr: ":18082", Tools: mcp.Tools(), Handler: mcp.NewHandler(mcp.HandlerOptions{Retrieval: fixtureRetrievalService()}), AuthService: authService, TenantService: tenantService, RequireAuth: true}
+	request := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d body = %s, want 401", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "pat_required") {
+		t.Fatalf("response = %s, want pat_required", response.Body.String())
+	}
+}
+
+func TestMCPStreamableHTTPRejectsGET(t *testing.T) {
+	server := &Server{Addr: ":18082", Tools: mcp.Tools(), Handler: mcp.NewHandler(mcp.HandlerOptions{Retrieval: fixtureRetrievalService()})}
+	response := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/mcp", nil))
+
+	if response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d body = %s, want 405", response.Code, response.Body.String())
+	}
+}
+
 func TestToolsCallRejectsInvalidMethod(t *testing.T) {
 	server, err := buildServer(config.Config{MCPAddr: ":18082"})
 	if err != nil {
@@ -206,6 +276,57 @@ func TestToolsCallUsesPATSubjectAndTenantPermissions(t *testing.T) {
 	}
 }
 
+func TestToolsCallInfersAgentIDFromUserAgent(t *testing.T) {
+	authService, tenantService, token := mcpAuthFixture(t)
+	server := &Server{Addr: ":18082", Tools: mcp.Tools(), Handler: mcp.NewHandler(mcp.HandlerOptions{Retrieval: fixtureRetrievalService()}), AuthService: authService, TenantService: tenantService, RequireAuth: true}
+	body := `{"name":"memory_search","arguments":{"request_id":"mcp_infer_agent","query":"deploy API","actor":{"org_id":"org_1","project_id":"project_1"},"scope":"project","visibility":"project","archive_index_generation":2,"max_context_bytes":512}}`
+	request := httptest.NewRequest(http.MethodPost, "/tools/call", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("User-Agent", "Claude-Code/2.1.195")
+	response := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s, want 200", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"code":"ok"`) {
+		t.Fatalf("response = %s, want code ok", response.Body.String())
+	}
+}
+
+func TestInferAgentIDFromRequest(t *testing.T) {
+	tests := []struct {
+		name       string
+		headerName string
+		header     string
+		userAgent  string
+		want       string
+	}{
+		{name: "explicit header wins", headerName: "X-Memory-Agent-ID", header: "team-agent", userAgent: "Claude-Code/2.1", want: "team-agent"},
+		{name: "claude code", userAgent: "Claude-Code/2.1.195", want: "claude-code"},
+		{name: "codex", userAgent: "OpenAI Codex", want: "codex"},
+		{name: "cursor", userAgent: "Cursor/1.0", want: "cursor"},
+		{name: "opencode", userAgent: "opencode", want: "opencode"},
+		{name: "fallback", userAgent: "unknown-client", want: "mcp"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/tools/call", nil)
+			if tt.headerName != "" {
+				request.Header.Set(tt.headerName, tt.header)
+			}
+			request.Header.Set("User-Agent", tt.userAgent)
+
+			if got := inferAgentIDFromRequest(request); got != tt.want {
+				t.Fatalf("inferAgentIDFromRequest() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestToolsCallUsesWorkspaceIdentityWhenActorIsOmitted(t *testing.T) {
 	authService, tenantService, token := mcpAuthFixture(t)
 	server := &Server{Addr: ":18082", Tools: mcp.Tools(), Handler: mcp.NewHandler(mcp.HandlerOptions{Retrieval: fixtureRetrievalService()}), AuthService: authService, TenantService: tenantService, RequireAuth: true}
@@ -289,4 +410,23 @@ func fixtureRetrievalService() retrieval.Service {
 	_ = ragService.Index(rag.IndexRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Chunks: []archive.Chunk{{ChunkID: "chunk_1", ArchiveID: "archive_1", IndexGeneration: 2, Content: "Archive says deploy API through docker compose on T480", ContentHash: "hash_1", SourceEventIDs: []string{"turn_event_2"}}}})
 
 	return retrieval.NewService(retrieval.Options{HotMemory: hot, ArchiveRAG: ragService, Reranker: retrieval.FailingReranker{}, AccessLog: retrieval.NewMemoryAccessLog()})
+}
+
+func postMCPRPC(t *testing.T, server *Server, token string, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("User-Agent", "Claude-Code/2.1.195")
+	response := httptest.NewRecorder()
+	server.routes().ServeHTTP(response, request)
+
+	var decoded map[string]any
+	if response.Code == http.StatusOK {
+		if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+			t.Fatalf("response is not JSON: %v body = %s", err, response.Body.String())
+		}
+	}
+	return response
 }

@@ -45,6 +45,31 @@ type toolCallRequest struct {
 	Arguments map[string]any `json:"arguments"`
 }
 
+type rpcRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+type rpcResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Result  any             `json:"result,omitempty"`
+	Error   *rpcError       `json:"error,omitempty"`
+}
+
+type rpcError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+type mcpHTTPTool struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	InputSchema map[string]any `json:"inputSchema"`
+}
+
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -194,7 +219,117 @@ func (s *Server) routes() http.Handler {
 		}
 		_ = json.NewEncoder(w).Encode(response)
 	})
+	mux.HandleFunc("/mcp", s.handleMCP)
 	return mux
+}
+
+func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Mcp-Protocol-Version", "2025-03-26")
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "method_not_allowed"})
+		return
+	}
+	if !s.authorizePAT(w, r, "memory:read") {
+		return
+	}
+	var request rpcRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(rpcResponse{JSONRPC: "2.0", Error: &rpcError{Code: -32700, Message: "parse error"}})
+		return
+	}
+	if request.JSONRPC != "2.0" || request.Method == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(rpcResponse{JSONRPC: "2.0", ID: request.ID, Error: &rpcError{Code: -32600, Message: "invalid request"}})
+		return
+	}
+	if len(request.ID) == 0 && strings.HasPrefix(request.Method, "notifications/") {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	response := s.handleMCPRPC(r, request)
+	if response.Error != nil {
+		w.WriteHeader(http.StatusBadRequest)
+	}
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) handleMCPRPC(r *http.Request, request rpcRequest) rpcResponse {
+	switch request.Method {
+	case "initialize":
+		return rpcResponse{JSONRPC: "2.0", ID: request.ID, Result: map[string]any{
+			"protocolVersion": "2025-03-26",
+			"capabilities":    map[string]any{"tools": map[string]any{}},
+			"serverInfo":      map[string]any{"name": "memory-os", "version": "0.4.0"},
+		}}
+	case "tools/list":
+		return rpcResponse{JSONRPC: "2.0", ID: request.ID, Result: map[string]any{"tools": convertHTTPTools(s.Tools)}}
+	case "tools/call":
+		result := s.handleMCPToolCall(r, request.Params)
+		return rpcResponse{JSONRPC: "2.0", ID: request.ID, Result: result}
+	case "ping":
+		return rpcResponse{JSONRPC: "2.0", ID: request.ID, Result: map[string]any{}}
+	default:
+		return rpcResponse{JSONRPC: "2.0", ID: request.ID, Error: &rpcError{Code: -32601, Message: "method not found"}}
+	}
+}
+
+func (s *Server) handleMCPToolCall(r *http.Request, params json.RawMessage) map[string]any {
+	var request toolCallRequest
+	if err := json.Unmarshal(params, &request); err != nil {
+		return mcpToolContent(true, "invalid tools/call params")
+	}
+	if request.Arguments == nil {
+		request.Arguments = map[string]any{}
+	}
+	if !s.authorizeToolCallForMCP(r, request.Name, request.Arguments) {
+		return mcpToolContent(true, "mcp_forbidden")
+	}
+	response := s.Handler.HandleTool(request.Name, request.Arguments)
+	if response.Code != "ok" {
+		if response.Error != "" {
+			return mcpToolContent(true, response.Error)
+		}
+		return mcpToolContent(true, response.Code)
+	}
+	body, err := json.Marshal(response.Search)
+	if err != nil {
+		return mcpToolContent(true, "failed to encode tool response")
+	}
+	return mcpToolContent(false, string(body))
+}
+
+func (s *Server) authorizeToolCallForMCP(r *http.Request, name string, args map[string]any) bool {
+	if !s.RequireAuth || name != "memory_search" {
+		return true
+	}
+	record, ok := s.patRecord(r, "memory:read")
+	if !ok {
+		return false
+	}
+	ok, _ = s.applyMemorySearchPermissions(record, r, args)
+	return ok
+}
+
+func mcpToolContent(isError bool, text string) map[string]any {
+	return map[string]any{
+		"isError": isError,
+		"content": []map[string]string{{
+			"type": "text",
+			"text": text,
+		}},
+	}
+}
+
+func convertHTTPTools(tools []mcp.Tool) []mcpHTTPTool {
+	converted := make([]mcpHTTPTool, 0, len(tools))
+	for _, tool := range tools {
+		converted = append(converted, mcpHTTPTool{Name: tool.Name, Description: tool.Description, InputSchema: tool.InputSchema})
+	}
+	return converted
 }
 
 func (s *Server) authorizeToolCall(w http.ResponseWriter, r *http.Request, name string, args map[string]any) bool {
@@ -208,6 +343,21 @@ func (s *Server) authorizeToolCall(w http.ResponseWriter, r *http.Request, name 
 	if name != "memory_search" {
 		return true
 	}
+	ok, err := s.applyMemorySearchPermissions(record, r, args)
+	if ok {
+		return true
+	}
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_mcp_workspace", "message": err.Error()})
+		return false
+	}
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "mcp_forbidden"})
+	return false
+}
+
+func (s *Server) applyMemorySearchPermissions(record auth.PATRecord, r *http.Request, args map[string]any) (bool, error) {
 	actor, ok := args["actor"].(map[string]any)
 	if !ok {
 		actor = map[string]any{}
@@ -216,30 +366,31 @@ func (s *Server) authorizeToolCall(w http.ResponseWriter, r *http.Request, name 
 	orgID, _ := actor["org_id"].(string)
 	projectID, _ := actor["project_id"].(string)
 	agentID, _ := actor["agent_id"].(string)
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		agentID = inferAgentIDFromRequest(r)
+		actor["agent_id"] = agentID
+	}
 	var permissions tenant.PermissionContext
 	var err error
 	if strings.TrimSpace(projectID) == "" {
 		identity, identityErr := workspaceFromToolArgs(args["workspace"])
 		if identityErr != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_mcp_workspace", "message": identityErr.Error()})
-			return false
+			return false, identityErr
 		}
 		permissions, err = s.TenantService.EnsureWorkspaceProject(record.SubjectID, agentID, identity)
 	} else {
 		permissions, err = s.TenantService.PermissionContext(record.SubjectID, orgID, projectID, agentID)
 	}
 	if err != nil {
-		w.WriteHeader(http.StatusForbidden)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "mcp_forbidden"})
-		return false
+		return false, nil
 	}
 	actor["user_id"] = permissions.UserID
 	actor["org_id"] = permissions.OrgID
 	actor["project_id"] = permissions.ProjectID
 	actor["agent_id"] = permissions.AgentID
 	args["permission_labels"] = permissions.PermissionLabels
-	return true
+	return true, nil
 }
 
 func workspaceFromToolArgs(value any) (workspace.Identity, error) {
@@ -259,6 +410,59 @@ func workspaceFromToolArgs(value any) (workspace.Identity, error) {
 func stringToolArg(value any) string {
 	text, _ := value.(string)
 	return text
+}
+
+func inferAgentIDFromRequest(r *http.Request) string {
+	if r == nil {
+		return "mcp"
+	}
+	if explicit := normalizeAgentID(r.Header.Get("X-Memory-Agent-ID")); explicit != "" {
+		return explicit
+	}
+	userAgent := strings.ToLower(r.Header.Get("User-Agent"))
+	switch {
+	case strings.Contains(userAgent, "claude-code") || strings.Contains(userAgent, "claude code") || strings.Contains(userAgent, "anthropic"):
+		return "claude-code"
+	case strings.Contains(userAgent, "codex") || strings.Contains(userAgent, "openai"):
+		return "codex"
+	case strings.Contains(userAgent, "cursor"):
+		return "cursor"
+	case strings.Contains(userAgent, "opencode"):
+		return "opencode"
+	case strings.Contains(userAgent, "cline"):
+		return "cline"
+	case strings.Contains(userAgent, "roo"):
+		return "roo"
+	case strings.Contains(userAgent, "hermes"):
+		return "hermes"
+	default:
+		return "mcp"
+	}
+}
+
+func normalizeAgentID(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range value {
+		valid := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '.' || r == '-'
+		if valid {
+			builder.WriteRune(r)
+			lastDash = r == '-'
+			continue
+		}
+		if !lastDash {
+			builder.WriteByte('-')
+			lastDash = true
+		}
+		if builder.Len() >= 64 {
+			break
+		}
+	}
+	return strings.Trim(builder.String(), "-")
 }
 
 func (s *Server) authorizePAT(w http.ResponseWriter, r *http.Request, requiredScope string) bool {
@@ -290,6 +494,27 @@ func (s *Server) authorizePATRecord(w http.ResponseWriter, r *http.Request, requ
 	if !mcpPATScopeAllows(record.Scopes, requiredScope) {
 		w.WriteHeader(http.StatusForbidden)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "mcp_forbidden"})
+		return auth.PATRecord{}, false
+	}
+	return record, true
+}
+
+func (s *Server) patRecord(r *http.Request, requiredScope string) (auth.PATRecord, bool) {
+	if !s.RequireAuth {
+		return auth.PATRecord{}, true
+	}
+	if !s.AuthService.Configured() || !s.TenantService.Configured() {
+		return auth.PATRecord{}, false
+	}
+	token := bearerToken(r)
+	if token == "" {
+		return auth.PATRecord{}, false
+	}
+	record, err := s.AuthService.ValidatePAT(token, time.Now())
+	if err != nil {
+		return auth.PATRecord{}, false
+	}
+	if !mcpPATScopeAllows(record.Scopes, requiredScope) {
 		return auth.PATRecord{}, false
 	}
 	return record, true
