@@ -147,6 +147,7 @@ func TestDockerignoreExcludesDevelopmentArtifactsFromBuildContext(t *testing.T) 
 		"backups/",
 		"docs.zip",
 		".DS_Store",
+		"**/*_test.go",
 		"memory-os-login-after-dashboard-deploy.png",
 	} {
 		if !hasLine(required) {
@@ -400,10 +401,15 @@ func TestTokensPageUsesRealAPIAndOneTimeTokenFlow(t *testing.T) {
 		"通用 MCP Token",
 		"一键创建通用 MCP Token",
 		"系统会自动使用推荐权限和默认有效期",
-		"配到 Codex、Claude Code、opencode、Hermes",
+		"请将这个命令复制到终端内执行",
+		"复制安装命令",
+		"已复制安装命令",
+		"自动配置 Codex、Claude Code、opencode、Hermes、OpenClaw 等主流 Agent",
 		"项目由工作目录 / Git 自动识别",
-		"明文 token 只在创建响应中显示一次",
-		"我已保存，立即隐藏",
+		"Token: {{ maskedOneTimeToken }}",
+		"copyTextToClipboard",
+		"document.execCommand('copy')",
+		"我已处理，立即隐藏",
 		"token_prefix",
 		"manualPATTokens",
 		"sessionPATTokens",
@@ -1144,6 +1150,62 @@ func TestMakefileProductionDeployTargetSetsBuildInfo(t *testing.T) {
 	} {
 		if !strings.Contains(makefile, marker) {
 			t.Fatalf("Makefile prod-up target missing %q", marker)
+		}
+	}
+}
+
+func TestMakefileProvidesFastT480DeployTargets(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join(findRepoRoot(t), "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	makefile := string(content)
+	for _, marker := range []string{
+		"prod-up-services:",
+		"SERVICES ?= memory-api memory-worker memory-mcp memory-web",
+		"CLEANUP_IMAGES ?= 0",
+		"$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) up -d --build $(SERVICES)",
+		"t480-deploy-api-fast:",
+		"t480-deploy-web-fast:",
+		"t480-deploy-api-web-fast:",
+		"t480-verify-light:",
+		"scripts/verify-light.sh",
+	} {
+		if !strings.Contains(makefile, marker) {
+			t.Fatalf("Makefile missing fast deploy marker %q", marker)
+		}
+	}
+	if !strings.Contains(makefile, "SERVICES=\"memory-api\" make prod-up-services") {
+		t.Fatal("Makefile fast api deploy must rebuild only memory-api")
+	}
+	if !strings.Contains(makefile, "SERVICES=\"memory-web\" make prod-up-services") {
+		t.Fatal("Makefile fast web deploy must rebuild only memory-web")
+	}
+	if !strings.Contains(makefile, "SERVICES=\"memory-api memory-web\" make prod-up-services") {
+		t.Fatal("Makefile fast api-web deploy must rebuild only memory-api and memory-web")
+	}
+}
+
+func TestVerifyLightScriptChecksCoreHTTPWithoutPipeline(t *testing.T) {
+	content, err := os.ReadFile("../../scripts/verify-light.sh")
+	if err != nil {
+		t.Fatalf("read verify-light.sh: %v", err)
+	}
+	script := string(content)
+	for _, marker := range []string{
+		". scripts/load-prod-env.sh",
+		"/healthz",
+		"/version",
+		"/openapi.json",
+		"/memory/setup/install.sh",
+	} {
+		if !strings.Contains(script, marker) {
+			t.Fatalf("verify-light script missing marker %q", marker)
+		}
+	}
+	for _, forbidden := range []string{"pipeline-e2e", "SMOKE_ENABLE_PIPELINE_E2E=true"} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("verify-light script must not run slow pipeline marker %q", forbidden)
 		}
 	}
 }

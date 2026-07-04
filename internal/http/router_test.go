@@ -3,7 +3,11 @@ package http
 import (
 	"context"
 	"encoding/json"
+	stdhttp "net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -1079,6 +1083,326 @@ func TestPATTokenLifecycleUsesPATSubjectAndReturnsPlainOnce(t *testing.T) {
 		if strings.Contains(strings.Join(mapValues(log.Metadata), " "), plain) || strings.Contains(strings.Join(mapValues(log.Metadata), " "), "token_hash") {
 			t.Fatalf("PAT audit log leaked token material: %#v", log)
 		}
+	}
+}
+
+func TestPATCreateReturnsInstallCodeAndBootstrapConsumesOnce(t *testing.T) {
+	h := server.New(server.WithHostPorts("127.0.0.1:0"))
+	authService := auth.NewService(auth.NewMemoryRepository())
+	adminToken, _, err := authService.CreatePAT("user_1", "admin", []string{"memory:write"}, time.Hour)
+	if err != nil {
+		t.Fatalf("CreatePAT(admin) error = %v", err)
+	}
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), AuthService: authService, TenantService: archiveTenantService(t, tenant.RoleOwner)})
+
+	createBody := `{"name":"memory-os-mcp","scopes":["memory:read","memory:write"],"ttl_seconds":3600}`
+	createResponse := ut.PerformRequest(h.Engine, "POST", "/memory/tokens/pat/create", &ut.Body{Body: strings.NewReader(createBody), Len: len(createBody)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + adminToken})
+	assert.DeepEqual(t, 200, createResponse.Code)
+	var created map[string]any
+	if err := json.Unmarshal(createResponse.Body.Bytes(), &created); err != nil {
+		t.Fatalf("pat create response is not JSON: %v", err)
+	}
+	plain, _ := created["token"].(string)
+	installCode, _ := created["install_code"].(string)
+	setupCommand, _ := created["setup_command"].(string)
+	if !strings.HasPrefix(installCode, "mosc_") {
+		t.Fatalf("install_code = %q, want mosc_ prefix", installCode)
+	}
+	if strings.Contains(setupCommand, plain) || !strings.Contains(setupCommand, "curl -fsSL") || !strings.Contains(setupCommand, "--code "+installCode+" --agent auto") {
+		t.Fatalf("setup_command should contain install code but not token: %s", setupCommand)
+	}
+
+	bootstrapBody := `{"code":"` + installCode + `"}`
+	bootstrapResponse := ut.PerformRequest(h.Engine, "POST", "/memory/setup/bootstrap", &ut.Body{Body: strings.NewReader(bootstrapBody), Len: len(bootstrapBody)}, ut.Header{Key: "Content-Type", Value: "application/json"})
+	assert.DeepEqual(t, 200, bootstrapResponse.Code)
+	var bootstrap map[string]any
+	if err := json.Unmarshal(bootstrapResponse.Body.Bytes(), &bootstrap); err != nil {
+		t.Fatalf("bootstrap response is not JSON: %v", err)
+	}
+	if bootstrap["token"] != plain || bootstrap["api_url"] == "" || bootstrap["mcp_url"] == "" {
+		t.Fatalf("bootstrap config mismatch: %#v", bootstrap)
+	}
+	if agents, ok := bootstrap["agents"].([]any); !ok || len(agents) == 0 {
+		t.Fatalf("bootstrap agents missing: %#v", bootstrap)
+	}
+
+	replayResponse := ut.PerformRequest(h.Engine, "POST", "/memory/setup/bootstrap", &ut.Body{Body: strings.NewReader(bootstrapBody), Len: len(bootstrapBody)}, ut.Header{Key: "Content-Type", Value: "application/json"})
+	assert.DeepEqual(t, 404, replayResponse.Code)
+	if strings.Contains(replayResponse.Body.String(), plain) {
+		t.Fatalf("bootstrap replay leaked token: %s", replayResponse.Body.String())
+	}
+}
+
+func TestSetupInstallScriptRegistersMainstreamAgentMCPWithoutPlainToken(t *testing.T) {
+	script := setupInstallScript()
+	for _, required := range []string{
+		".claude.json",
+		".codex",
+		"opencode",
+		".hermes",
+		".openclaw",
+		"mcpServers",
+		"memory-os",
+		"bearer_token_env_var",
+		"{env:MEMORY_OS_TOKEN}",
+		"Bearer ${MEMORY_OS_TOKEN}",
+		"MEMORY_OS_TOKEN",
+		"secrets.env",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("setup install script missing mainstream Agent MCP marker %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		`"Authorization": "Bearer " + config["token"]`,
+		`ANTHROPIC_AUTH_TOKEN`,
+	} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("setup install script must not write plaintext token marker %q", forbidden)
+		}
+	}
+}
+
+func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
+	bootstrapToken := "pat_test_install_token"
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+		if r.Method != stdhttp.MethodPost || r.URL.Path != "/memory/setup/bootstrap" {
+			t.Fatalf("unexpected bootstrap request %s %s", r.Method, r.URL.Path)
+		}
+		baseURL := "http://" + r.Host
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(setupBootstrapConfig{
+			Server: baseURL,
+			APIURL: baseURL,
+			MCPURL: baseURL + "/mcp",
+			Token:  bootstrapToken,
+			Agents: []string{"codex", "claude-code", "opencode", "hermes", "openclaw"},
+		})
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
+		t.Fatalf("create preexisting codex dir: %v", err)
+	}
+	preexistingCodexConfig := strings.Join([]string{
+		`model = "gpt-5"`,
+		``,
+		`[mcp_servers.memory-os]`,
+		`url = "http://192.168.188.20:18082/mcp"`,
+		`bearer_token_env_var = "MEMORY_OS_TOKEN"`,
+		`startup_timeout_sec = 30`,
+		`tool_timeout_sec = 60`,
+		``,
+		`[mcp_servers.other]`,
+		`url = "http://127.0.0.1:9999/mcp"`,
+		``,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte(preexistingCodexConfig), 0o600); err != nil {
+		t.Fatalf("write preexisting codex config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatalf("create preexisting claude dir: %v", err)
+	}
+	preexistingClaudeSettings := `{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /Users/kanyun/.claude/scripts/mem0_save.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /Users/kanyun/.claude/scripts/memory_os_turn_event.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+`
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(preexistingClaudeSettings), 0o600); err != nil {
+		t.Fatalf("write preexisting Claude Code settings: %v", err)
+	}
+	scriptPath := filepath.Join(t.TempDir(), "install.sh")
+	if err := os.WriteFile(scriptPath, []byte(setupInstallScript()), 0o700); err != nil {
+		t.Fatalf("write install script: %v", err)
+	}
+	cmd := exec.Command("sh", scriptPath, "--server", server.URL, "--code", "mosc_test", "--agent", "auto")
+	cmd.Env = append(os.Environ(), "HOME="+home)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install script failed: %v\n%s", err, output)
+	}
+
+	secretPath := filepath.Join(home, ".config", "ai-secrets", "secrets.env")
+	secretBytes, err := os.ReadFile(secretPath)
+	if err != nil {
+		t.Fatalf("read secrets.env: %v", err)
+	}
+	if !strings.Contains(string(secretBytes), "MEMORY_OS_TOKEN='"+bootstrapToken+"'") {
+		t.Fatalf("secrets.env missing token assignment: %s", secretBytes)
+	}
+	if info, err := os.Stat(secretPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("secrets.env mode = %v, %v; want 0600", info, err)
+	}
+
+	claudeBytes, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	if err != nil {
+		t.Fatalf("read .claude.json: %v", err)
+	}
+	if strings.Contains(string(claudeBytes), bootstrapToken) {
+		t.Fatalf(".claude.json leaked plaintext token: %s", claudeBytes)
+	}
+	var claudeConfig map[string]any
+	if err := json.Unmarshal(claudeBytes, &claudeConfig); err != nil {
+		t.Fatalf(".claude.json is not JSON: %v", err)
+	}
+	servers := claudeConfig["mcpServers"].(map[string]any)
+	memoryOS := servers["memory-os"].(map[string]any)
+	headers := memoryOS["headers"].(map[string]any)
+	if memoryOS["type"] != "http" || memoryOS["url"] != server.URL+"/mcp" || headers["Authorization"] != "Bearer ${MEMORY_OS_TOKEN}" {
+		t.Fatalf("unexpected memory-os MCP config: %#v", memoryOS)
+	}
+
+	codexBytes, err := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
+	if err != nil {
+		t.Fatalf("read codex config: %v", err)
+	}
+	codexConfig := string(codexBytes)
+	for _, marker := range []string{
+		`[mcp_servers.memory-os]`,
+		`url = "` + server.URL + `/mcp"`,
+		`bearer_token_env_var = "MEMORY_OS_TOKEN"`,
+		`[mcp_servers.other]`,
+	} {
+		if !strings.Contains(codexConfig, marker) {
+			t.Fatalf("codex config missing marker %q:\n%s", marker, codexConfig)
+		}
+	}
+	if strings.Count(codexConfig, "[mcp_servers.memory-os]") != 1 || strings.Contains(codexConfig, "192.168.188.20:18082") {
+		t.Fatalf("codex config must replace old memory-os section without duplicates:\n%s", codexConfig)
+	}
+
+	opencodeBytes, err := os.ReadFile(filepath.Join(home, ".config", "opencode", "opencode.json"))
+	if err != nil {
+		t.Fatalf("read opencode config: %v", err)
+	}
+	if strings.Contains(string(opencodeBytes), bootstrapToken) {
+		t.Fatalf("opencode config leaked plaintext token: %s", opencodeBytes)
+	}
+	var opencodeConfig map[string]any
+	if err := json.Unmarshal(opencodeBytes, &opencodeConfig); err != nil {
+		t.Fatalf("opencode config is not JSON: %v", err)
+	}
+	opencodeMCP := opencodeConfig["mcp"].(map[string]any)["memory-os"].(map[string]any)
+	opencodeHeaders := opencodeMCP["headers"].(map[string]any)
+	if opencodeMCP["type"] != "remote" || opencodeMCP["url"] != server.URL+"/mcp" || opencodeHeaders["Authorization"] != "Bearer {env:MEMORY_OS_TOKEN}" {
+		t.Fatalf("unexpected opencode MCP config: %#v", opencodeMCP)
+	}
+
+	hermesBytes, err := os.ReadFile(filepath.Join(home, ".hermes", "config.yaml"))
+	if err != nil {
+		t.Fatalf("read hermes config: %v", err)
+	}
+	hermesConfig := string(hermesBytes)
+	for _, marker := range []string{
+		"mcp_servers:",
+		"memory-os:",
+		"url: \"" + server.URL + "/mcp\"",
+		"Authorization: \"Bearer ${MEMORY_OS_TOKEN}\"",
+		"enabled: true",
+	} {
+		if !strings.Contains(hermesConfig, marker) {
+			t.Fatalf("hermes config missing marker %q:\n%s", marker, hermesConfig)
+		}
+	}
+
+	openclawBytes, err := os.ReadFile(filepath.Join(home, ".openclaw", "openclaw.json"))
+	if err != nil {
+		t.Fatalf("read openclaw config: %v", err)
+	}
+	if strings.Contains(string(openclawBytes), bootstrapToken) {
+		t.Fatalf("openclaw config leaked plaintext token: %s", openclawBytes)
+	}
+	var openclawConfig map[string]any
+	if err := json.Unmarshal(openclawBytes, &openclawConfig); err != nil {
+		t.Fatalf("openclaw config is not JSON: %v", err)
+	}
+	openclawMCP := openclawConfig["mcp"].(map[string]any)["servers"].(map[string]any)["memory-os"].(map[string]any)
+	openclawHeaders := openclawMCP["headers"].(map[string]any)
+	if openclawMCP["type"] != "http" || openclawMCP["url"] != server.URL+"/mcp" || openclawHeaders["Authorization"] != "Bearer ${MEMORY_OS_TOKEN}" {
+		t.Fatalf("unexpected openclaw MCP config: %#v", openclawMCP)
+	}
+
+	hookScript := filepath.Join(home, ".memory-os", "hooks", "turn_event.py")
+	hookBytes, err := os.ReadFile(hookScript)
+	if err != nil {
+		t.Fatalf("read common hook script: %v", err)
+	}
+	if strings.Contains(string(hookBytes), bootstrapToken) {
+		t.Fatalf("common hook script leaked plaintext token: %s", hookBytes)
+	}
+	for _, marker := range []string{"/memory/turn-event", "MEMORY_OS_TOKEN", "MEMORY_OS_HOOK_AGENT"} {
+		if !strings.Contains(string(hookBytes), marker) {
+			t.Fatalf("common hook script missing marker %q", marker)
+		}
+	}
+
+	claudeSettingsBytes, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("read Claude Code settings: %v", err)
+	}
+	var claudeSettings map[string]any
+	if err := json.Unmarshal(claudeSettingsBytes, &claudeSettings); err != nil {
+		t.Fatalf("Claude Code settings are not JSON: %v", err)
+	}
+	if !strings.Contains(string(claudeSettingsBytes), "MEMORY_OS_HOOK_AGENT=claude-code") || !strings.Contains(string(claudeSettingsBytes), hookScript) {
+		t.Fatalf("Claude Code settings missing Memory OS Stop hook: %s", claudeSettingsBytes)
+	}
+	if !strings.Contains(string(claudeSettingsBytes), "mem0_save.sh") {
+		t.Fatalf("Claude Code settings must preserve non-Memory OS hooks: %s", claudeSettingsBytes)
+	}
+	if strings.Contains(string(claudeSettingsBytes), "memory_os_turn_event.sh") || strings.Count(string(claudeSettingsBytes), "MEMORY_OS_HOOK_AGENT=claude-code") != 1 {
+		t.Fatalf("Claude Code settings must replace old Memory OS hooks without duplicates: %s", claudeSettingsBytes)
+	}
+
+	codexHooksBytes, err := os.ReadFile(filepath.Join(home, ".codex", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read Codex hooks: %v", err)
+	}
+	if !strings.Contains(string(codexHooksBytes), "MEMORY_OS_HOOK_AGENT=codex") || !strings.Contains(string(codexHooksBytes), hookScript) {
+		t.Fatalf("Codex hooks missing Memory OS Stop hook: %s", codexHooksBytes)
+	}
+
+	opencodePluginBytes, err := os.ReadFile(filepath.Join(home, ".config", "opencode", "plugins", "memory-os.js"))
+	if err != nil {
+		t.Fatalf("read opencode plugin: %v", err)
+	}
+	if !strings.Contains(string(opencodePluginBytes), "session.idle") || !strings.Contains(string(opencodePluginBytes), "MEMORY_OS_HOOK_AGENT") {
+		t.Fatalf("opencode plugin missing Memory OS session hook: %s", opencodePluginBytes)
+	}
+
+	hermesPluginBytes, err := os.ReadFile(filepath.Join(home, ".hermes", "plugins", "memory_os_hook.py"))
+	if err != nil {
+		t.Fatalf("read Hermes plugin: %v", err)
+	}
+	if !strings.Contains(string(hermesPluginBytes), "post_llm_call") || !strings.Contains(string(hermesPluginBytes), "MEMORY_OS_HOOK_AGENT") {
+		t.Fatalf("Hermes plugin missing Memory OS post_llm_call hook: %s", hermesPluginBytes)
+	}
+
+	openclawPluginBytes, err := os.ReadFile(filepath.Join(home, ".openclaw", "plugins", "memory-os.js"))
+	if err != nil {
+		t.Fatalf("read OpenClaw plugin: %v", err)
+	}
+	if !strings.Contains(string(openclawPluginBytes), "message:sent") || !strings.Contains(string(openclawPluginBytes), "MEMORY_OS_HOOK_AGENT") {
+		t.Fatalf("OpenClaw plugin missing Memory OS message hook: %s", openclawPluginBytes)
 	}
 }
 

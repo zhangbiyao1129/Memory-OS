@@ -2,9 +2,12 @@ package http
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -29,6 +32,7 @@ import (
 )
 
 var devEventLogService = eventlog.NewService(eventlog.NewMemoryRepository(), eventlog.SanitizerOptions{MaxTurnEventBytes: 256 * 1024, MaxToolOutputBytes: 64 * 1024})
+var defaultSetupCodes = newMemorySetupCodeStore(10 * time.Minute)
 
 type RouterOptions struct {
 	HealthService       health.Service
@@ -81,6 +85,7 @@ func RegisterRoutes(engine *route.Engine, options RouterOptions) {
 	engine.GET("/healthz", HealthHandler(options.HealthService))
 	engine.GET("/version", VersionHandler())
 	engine.GET("/openapi.json", OpenAPIHandler())
+	engine.GET("/memory/setup/install.sh", SetupInstallScriptHandler())
 	eventLogService := options.EventLogService
 	if !eventLogService.Configured() {
 		eventLogService = devEventLogService
@@ -108,6 +113,7 @@ func RegisterRoutes(engine *route.Engine, options RouterOptions) {
 	engine.POST("/memory/secrets/list", SecretListHandler(options.SecretVault, options.AuthService, options.TenantService))
 	engine.POST("/memory/secrets/disable", SecretDisableHandler(options.SecretVault, options.AuthService, options.TenantService))
 	engine.POST("/memory/tokens/pat/create", PATCreateHandler(options.AuthService, options.AuditService))
+	engine.POST("/memory/setup/bootstrap", SetupBootstrapHandler(defaultSetupCodes))
 	engine.POST("/memory/tokens/pat/list", PATListHandler(options.AuthService))
 	engine.POST("/memory/tokens/pat/revoke", PATRevokeHandler(options.AuthService, options.AuditService))
 	engine.POST("/memory/tokens/adapter/create", AdapterTokenCreateHandler(options.AuthService, options.TenantService, options.AuditService))
@@ -259,6 +265,22 @@ func OpenAPIHandler() app.HandlerFunc {
 						"summary": "Get build metadata",
 						"responses": map[string]any{
 							"200": map[string]any{"description": "Build metadata"},
+						},
+					},
+				},
+				"/memory/setup/install.sh": map[string]any{
+					"get": map[string]any{
+						"summary": "Download the Memory OS setup installer script",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Shell installer script"},
+						},
+					},
+				},
+				"/memory/setup/bootstrap": map[string]any{
+					"post": map[string]any{
+						"summary": "Exchange a one-time setup code for local installer config",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "One-time setup bootstrap config"},
 						},
 					},
 				},
@@ -1515,6 +1537,69 @@ type patRevokeRequest struct {
 	TokenID string `json:"token_id"`
 }
 
+type setupBootstrapRequest struct {
+	Code string `json:"code"`
+}
+
+type setupBootstrapConfig struct {
+	Server string   `json:"server"`
+	APIURL string   `json:"api_url"`
+	MCPURL string   `json:"mcp_url"`
+	Token  string   `json:"token"`
+	Agents []string `json:"agents"`
+}
+
+type setupCodeRecord struct {
+	Config    setupBootstrapConfig
+	ExpiresAt time.Time
+}
+
+type memorySetupCodeStore struct {
+	mu      sync.Mutex
+	ttl     time.Duration
+	records map[string]setupCodeRecord
+}
+
+func newMemorySetupCodeStore(ttl time.Duration) *memorySetupCodeStore {
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+	return &memorySetupCodeStore{ttl: ttl, records: map[string]setupCodeRecord{}}
+}
+
+func (s *memorySetupCodeStore) Create(config setupBootstrapConfig) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	code, err := randomSetupCode()
+	if err != nil {
+		return "", err
+	}
+	s.records[code] = setupCodeRecord{Config: config, ExpiresAt: time.Now().Add(s.ttl)}
+	return code, nil
+}
+
+func (s *memorySetupCodeStore) Consume(code string) (setupBootstrapConfig, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.records[strings.TrimSpace(code)]
+	if !ok {
+		return setupBootstrapConfig{}, false
+	}
+	delete(s.records, strings.TrimSpace(code))
+	if time.Now().After(record.ExpiresAt) {
+		return setupBootstrapConfig{}, false
+	}
+	return record.Config, true
+}
+
+func randomSetupCode() (string, error) {
+	bytes := make([]byte, 18)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return "mosc_" + base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
 type adapterTokenCreateRequest struct {
 	UserID     string   `json:"user_id"`
 	OrgID      string   `json:"org_id"`
@@ -1568,8 +1653,606 @@ func PATCreateHandler(authService auth.Service, auditService audit.Service) app.
 				"ttl_seconds":  fmt.Sprintf("%d", int(ttl/time.Second)),
 			},
 		})
-		c.JSON(consts.StatusOK, map[string]any{"token": plain, "token_metadata": patMetadataResponse(record)})
+		serverURL := publicServerURL(c)
+		installCode, err := defaultSetupCodes.Create(setupBootstrapConfig{
+			Server: serverURL,
+			APIURL: serverURL,
+			MCPURL: serverURLForPort(serverURL, "18082") + "/mcp",
+			Token:  plain,
+			Agents: []string{"codex", "claude-code", "opencode", "hermes", "openclaw"},
+		})
+		if err != nil {
+			c.JSON(consts.StatusInternalServerError, map[string]string{"error": "setup_code_issue_failed"})
+			return
+		}
+		c.JSON(consts.StatusOK, map[string]any{
+			"token":          plain,
+			"token_metadata": patMetadataResponse(record),
+			"install_code":   installCode,
+			"setup_command":  setupCommand(serverURL, installCode),
+		})
 	}
+}
+
+func SetupBootstrapHandler(store *memorySetupCodeStore) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		var request setupBootstrapRequest
+		if err := c.BindAndValidate(&request); err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_setup_bootstrap_request"})
+			return
+		}
+		config, ok := store.Consume(request.Code)
+		if !ok {
+			c.JSON(consts.StatusNotFound, map[string]string{"error": "setup_code_not_found"})
+			return
+		}
+		c.JSON(consts.StatusOK, config)
+	}
+}
+
+func SetupInstallScriptHandler() app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		c.Header("Content-Type", "text/x-shellscript; charset=utf-8")
+		c.String(consts.StatusOK, setupInstallScript())
+	}
+}
+
+func publicServerURL(c *app.RequestContext) string {
+	proto := strings.TrimSpace(string(c.GetHeader("X-Forwarded-Proto")))
+	if proto == "" {
+		proto = "http"
+	}
+	host := strings.TrimSpace(string(c.GetHeader("X-Forwarded-Host")))
+	if host == "" {
+		host = strings.TrimSpace(string(c.Host()))
+	}
+	if host == "" {
+		host = "localhost:18081"
+	}
+	return proto + "://" + host
+}
+
+func setupCommand(serverURL, installCode string) string {
+	return fmt.Sprintf("curl -fsSL %s/memory/setup/install.sh | sh -s -- --server %s --code %s --agent auto", serverURL, serverURL, installCode)
+}
+
+func serverURLForPort(serverURL, port string) string {
+	if strings.HasSuffix(serverURL, ":18081") {
+		return strings.TrimSuffix(serverURL, ":18081") + ":" + port
+	}
+	return serverURL
+}
+
+func setupInstallScript() string {
+	return `#!/usr/bin/env sh
+set -eu
+
+SERVER=""
+CODE=""
+AGENT="auto"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --server) SERVER="$2"; shift 2 ;;
+    --code) CODE="$2"; shift 2 ;;
+    --agent) AGENT="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+if [ -z "$SERVER" ] || [ -z "$CODE" ]; then
+  echo "Usage: install.sh --server <url> --code <install_code> [--agent auto]" >&2
+  exit 1
+fi
+
+export MEMORY_OS_SETUP_SERVER="$SERVER"
+export MEMORY_OS_SETUP_CODE="$CODE"
+export MEMORY_OS_SETUP_AGENT="$AGENT"
+python3 <<'PY'
+import json
+import os
+import pathlib
+import shlex
+import tempfile
+import urllib.request
+
+server = os.environ["MEMORY_OS_SETUP_SERVER"].rstrip("/")
+code = os.environ["MEMORY_OS_SETUP_CODE"]
+agent = os.environ.get("MEMORY_OS_SETUP_AGENT", "auto")
+body = json.dumps({"code": code}).encode("utf-8")
+request = urllib.request.Request(
+    server + "/memory/setup/bootstrap",
+    data=body,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(request, timeout=30) as response:
+    config = json.loads(response.read().decode("utf-8"))
+
+home = pathlib.Path.home()
+secret_dir = home / ".config" / "ai-secrets"
+secret_dir.mkdir(parents=True, exist_ok=True)
+secret_file = secret_dir / "secrets.env"
+existing = ""
+if secret_file.exists():
+    existing = secret_file.read_text()
+lines = [line for line in existing.splitlines() if not line.startswith("MEMORY_OS_TOKEN=")]
+lines.append("MEMORY_OS_TOKEN='" + config["token"].replace("'", "'\"'\"'") + "'")
+secret_file.write_text("\n".join(lines) + "\n")
+secret_dir.chmod(0o700)
+secret_file.chmod(0o600)
+
+source_line = '[ -f "$HOME/.config/ai-secrets/secrets.env" ] && set -a && . "$HOME/.config/ai-secrets/secrets.env" && set +a'
+source_block = "\n# Added by Memory OS installer\n" + source_line + "\n"
+for rc_name in (".zshrc", ".bashrc"):
+    rc_file = home / rc_name
+    try:
+        rc_existing = rc_file.read_text() if rc_file.exists() else ""
+        if source_line not in rc_existing:
+            rc_file.write_text(rc_existing.rstrip() + source_block)
+    except OSError:
+        pass
+
+def atomic_json_write(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+            tmp.write(encoded)
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+def atomic_text_write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+            tmp.write(text)
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+def json_file(path):
+    if path.exists():
+        existing_text = path.read_text()
+        data = json.loads(existing_text) if existing_text.strip() else {}
+        if not isinstance(data, dict):
+            raise ValueError(str(path) + " must contain a JSON object")
+        return data
+    return {}
+
+def managed_text(existing, block, label="Memory OS MCP"):
+    begin = "# BEGIN " + label
+    end = "# END " + label
+    managed = begin + "\n" + block.rstrip() + "\n" + end + "\n"
+    if begin in existing and end in existing:
+        before, rest = existing.split(begin, 1)
+        _, after = rest.split(end, 1)
+        return before.rstrip() + "\n\n" + managed + after.lstrip()
+    prefix = existing.rstrip()
+    return (prefix + "\n\n" if prefix else "") + managed
+
+def remove_managed_text(existing, label="Memory OS MCP"):
+    begin = "# BEGIN " + label
+    end = "# END " + label
+    text = existing
+    while begin in text and end in text:
+        before, rest = text.split(begin, 1)
+        _, after = rest.split(end, 1)
+        text = before.rstrip() + "\n\n" + after.lstrip()
+    return text
+
+def remove_toml_table(existing, table_name):
+    lines = existing.splitlines()
+    output = []
+    skipping = False
+    target = "[" + table_name + "]"
+    for line in lines:
+        stripped = line.strip()
+        if stripped == target:
+            skipping = True
+            continue
+        if skipping and stripped.startswith("[") and stripped.endswith("]"):
+            skipping = False
+        if not skipping:
+            output.append(line)
+    return "\n".join(output).rstrip() + ("\n" if output else "")
+
+def selected(*names):
+    normalized = agent.strip().lower()
+    return normalized == "auto" or normalized in names
+
+def register_claude_code_mcp():
+    claude_config = home / ".claude.json"
+    data = json_file(claude_config)
+    servers = data.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise ValueError("~/.claude.json mcpServers must be a JSON object")
+    servers["memory-os"] = {
+        "type": "http",
+        "url": config["mcp_url"],
+        "headers": {
+            "Authorization": "Bearer ${MEMORY_OS_TOKEN}",
+        },
+    }
+    atomic_json_write(claude_config, data)
+
+def register_codex_mcp():
+    codex_config = home / ".codex" / "config.toml"
+    existing = codex_config.read_text() if codex_config.exists() else ""
+    existing = remove_managed_text(existing)
+    existing = remove_toml_table(existing, "mcp_servers.memory-os")
+    block = "\n".join([
+        "[mcp_servers.memory-os]",
+        "url = " + json.dumps(config["mcp_url"]),
+        'bearer_token_env_var = "MEMORY_OS_TOKEN"',
+    ])
+    atomic_text_write(codex_config, managed_text(existing, block))
+
+def register_opencode_mcp():
+    opencode_config = home / ".config" / "opencode" / "opencode.json"
+    data = json_file(opencode_config)
+    mcp = data.setdefault("mcp", {})
+    if not isinstance(mcp, dict):
+        raise ValueError("opencode mcp must be a JSON object")
+    mcp["memory-os"] = {
+        "type": "remote",
+        "url": config["mcp_url"],
+        "headers": {
+            "Authorization": "Bearer {env:MEMORY_OS_TOKEN}",
+        },
+    }
+    atomic_json_write(opencode_config, data)
+
+def register_hermes_mcp():
+    hermes_config = home / ".hermes" / "config.yaml"
+    existing = hermes_config.read_text() if hermes_config.exists() else ""
+    block = "\n".join([
+        "mcp_servers:",
+        "  memory-os:",
+        "    enabled: true",
+        "    url: " + json.dumps(config["mcp_url"]),
+        "    headers:",
+        "      Authorization: \"Bearer ${MEMORY_OS_TOKEN}\"",
+    ])
+    atomic_text_write(hermes_config, managed_text(existing, block, "Memory OS Hermes Hook"))
+
+def register_openclaw_mcp():
+    openclaw_config = home / ".openclaw" / "openclaw.json"
+    data = json_file(openclaw_config)
+    mcp = data.setdefault("mcp", {})
+    if not isinstance(mcp, dict):
+        raise ValueError("openclaw mcp must be a JSON object")
+    servers = mcp.setdefault("servers", {})
+    if not isinstance(servers, dict):
+        raise ValueError("openclaw mcp.servers must be a JSON object")
+    servers["memory-os"] = {
+        "type": "http",
+        "url": config["mcp_url"],
+        "headers": {
+            "Authorization": "Bearer ${MEMORY_OS_TOKEN}",
+        },
+    }
+    atomic_json_write(openclaw_config, data)
+
+def install_common_hook_script():
+    hook_path = home / ".memory-os" / "hooks" / "turn_event.py"
+    script = r'''#!/usr/bin/env python3
+import hashlib
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+def load_secrets():
+    secrets = Path.home() / ".config" / "ai-secrets" / "secrets.env"
+    if not secrets.exists():
+        return
+    for line in secrets.read_text(errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip().strip("'").strip('"')
+        os.environ.setdefault(key.strip(), value)
+
+def clean_text(text):
+    if not text:
+        return ""
+    text = re.sub(r"sk-[A-Za-z0-9_\-]{16,}", "sk-[REDACTED]", text)
+    text = re.sub(r"pat_[A-Za-z0-9_\-]{16,}", "pat_[REDACTED]", text)
+    text = re.sub(r"m0sk_[A-Za-z0-9_\-]{16,}", "m0sk_[REDACTED]", text)
+    text = re.sub(r"(?i)(authorization\s*[:=]\s*bearer\s+)[A-Za-z0-9._\-]+", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)(https?://)([^:@/\s]+):([^@/\s]+)@", r"\1[REDACTED]:[REDACTED]@", text)
+    text = text.strip()
+    if len(text) > 12000:
+        text = text[:12000] + "\n[TRUNCATED]"
+    return text
+
+def git_value(cwd, *args):
+    try:
+        return subprocess.check_output(["git", "-C", cwd, *args], text=True, stderr=subprocess.DEVNULL, timeout=2).strip()
+    except Exception:
+        return ""
+
+def extract_text(data, raw):
+    if isinstance(data, dict):
+        for key in ("last_assistant_message", "assistant_response", "assistant", "message", "prompt", "input", "text"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        for key in ("messages", "conversation", "conversation_history"):
+            value = data.get(key)
+            if isinstance(value, list):
+                parts = []
+                for item in value[-12:]:
+                    if isinstance(item, dict):
+                        role = item.get("role") or item.get("type") or "message"
+                        content = item.get("content") or item.get("text") or item.get("message")
+                        if isinstance(content, str) and content.strip():
+                            parts.append(f"{role}: {content}")
+                    elif isinstance(item, str):
+                        parts.append(item)
+                if parts:
+                    return "\n".join(parts)
+    return raw
+
+load_secrets()
+token = os.environ.get("MEMORY_OS_TOKEN", "")
+if not token:
+    sys.exit(0)
+
+raw = sys.stdin.read()
+try:
+    data = json.loads(raw) if raw.strip() else {}
+except Exception:
+    data = {}
+
+cwd = data.get("cwd") if isinstance(data, dict) else ""
+cwd = cwd or os.getcwd()
+agent = os.environ.get("MEMORY_OS_HOOK_AGENT", "unknown-agent")
+api = os.environ.get("MEMORY_OS_API_URL", os.environ.get("MEMORY_OS_SETUP_API_URL", "")).rstrip("/")
+if not api:
+    api = os.environ.get("MEMORY_OS_SERVER", "").rstrip("/")
+if not api:
+    api = "http://127.0.0.1:18081"
+
+text = clean_text(extract_text(data, raw))
+if not text:
+    sys.exit(0)
+
+git_root = git_value(cwd, "rev-parse", "--show-toplevel")
+git_remote = git_value(cwd, "remote", "get-url", "origin")
+git_branch = git_value(cwd, "branch", "--show-current")
+git_commit = git_value(cwd, "rev-parse", "HEAD")
+digest = hashlib.sha256((agent + "\n" + cwd + "\n" + text).encode("utf-8")).hexdigest()[:24]
+
+body = {
+    "request_id": f"{agent}_hook_{digest}",
+    "workspace": {
+        "git_remote": git_remote,
+        "git_root": git_root,
+        "cwd": cwd,
+        "git_branch": git_branch,
+        "git_commit": git_commit,
+    },
+    "event": {
+        "version": "v1",
+        "event_id": f"event_{agent}_{digest}",
+        "turn_id": f"turn_{agent}_{digest}",
+        "thread_id": f"thread_{agent}_{hashlib.sha256(cwd.encode()).hexdigest()[:16]}",
+        "session_id": f"session_{agent}_{hashlib.sha256((cwd + socket.gethostname()).encode()).hexdigest()[:16]}",
+        "type": "assistant_final",
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "actor": {"agent_id": agent},
+        "source": {"platform": agent, "host": socket.gethostname()},
+        "payload": {"text": text, "raw_event": clean_text(raw)},
+    },
+}
+
+request = urllib.request.Request(
+    api + "/memory/turn-event",
+    data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+    headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(request, timeout=15) as response:
+        response.read()
+except (urllib.error.URLError, TimeoutError, OSError):
+    sys.exit(0)
+'''
+    atomic_text_write(hook_path, script)
+    hook_path.chmod(0o700)
+    return hook_path
+
+def hook_command(agent_name, hook_path):
+    return "MEMORY_OS_HOOK_AGENT=" + shlex.quote(agent_name) + " python3 " + shlex.quote(str(hook_path))
+
+def append_hook(data, event_name, hook_entry):
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError("hooks must be a JSON object")
+    groups = hooks.setdefault(event_name, [])
+    if not isinstance(groups, list):
+        raise ValueError(event_name + " hooks must be a list")
+    groups[:] = prune_memory_os_hook_groups(groups)
+    command = hook_entry.get("command", "")
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        for existing in group.get("hooks", []) or []:
+            if isinstance(existing, dict) and existing.get("command") == command:
+                return
+    groups.append({"hooks": [hook_entry]})
+
+def is_memory_os_hook_command(command):
+    return (
+        "MEMORY_OS_HOOK_AGENT=" in command
+        or ".memory-os/hooks/turn_event.py" in command
+        or "memory_os_turn_event.sh" in command
+    )
+
+def prune_memory_os_hook_groups(groups):
+    pruned_groups = []
+    for group in groups:
+        if not isinstance(group, dict):
+            pruned_groups.append(group)
+            continue
+        hooks = group.get("hooks", [])
+        if not isinstance(hooks, list):
+            pruned_groups.append(group)
+            continue
+        kept = []
+        for item in hooks:
+            command = item.get("command", "") if isinstance(item, dict) else ""
+            if command and is_memory_os_hook_command(command):
+                continue
+            kept.append(item)
+        if kept:
+            next_group = dict(group)
+            next_group["hooks"] = kept
+            pruned_groups.append(next_group)
+    return pruned_groups
+
+def register_claude_code_hook(hook_path):
+    settings_path = home / ".claude" / "settings.json"
+    data = json_file(settings_path)
+    append_hook(data, "Stop", {
+        "type": "command",
+        "command": hook_command("claude-code", hook_path),
+        "statusMessage": "保存对话到 Memory OS",
+        "timeout": 30,
+        "async": True,
+    })
+    atomic_json_write(settings_path, data)
+
+def register_codex_hook(hook_path):
+    hooks_path = home / ".codex" / "hooks.json"
+    data = json_file(hooks_path)
+    append_hook(data, "Stop", {
+        "type": "command",
+        "command": hook_command("codex", hook_path),
+        "statusMessage": "Saving conversation to Memory OS",
+        "timeout": 30,
+    })
+    atomic_json_write(hooks_path, data)
+
+def add_plugin_path(data, plugin_path):
+    plugins = data.setdefault("plugin", [])
+    if isinstance(plugins, str):
+        plugins = [plugins]
+        data["plugin"] = plugins
+    if not isinstance(plugins, list):
+        raise ValueError("plugin must be a list or string")
+    plugin_text = str(plugin_path)
+    if plugin_text not in plugins:
+        plugins.append(plugin_text)
+
+def register_opencode_hook(hook_path):
+    plugin_path = home / ".config" / "opencode" / "plugins" / "memory-os.js"
+    code = """import { spawnSync } from "node:child_process";
+
+export const MemoryOS = async () => ({
+  event: async ({ event }) => {
+    if (event?.type !== "session.idle") return;
+    spawnSync("python3", [__HOOK_PATH__], {
+      input: JSON.stringify(event),
+      env: { ...process.env, MEMORY_OS_HOOK_AGENT: "opencode" },
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+  },
+});
+""".replace("__HOOK_PATH__", json.dumps(str(hook_path)))
+    atomic_text_write(plugin_path, code)
+    data = json_file(home / ".config" / "opencode" / "opencode.json")
+    add_plugin_path(data, plugin_path)
+    atomic_json_write(home / ".config" / "opencode" / "opencode.json", data)
+
+def register_hermes_hook(hook_path):
+    plugin_path = home / ".hermes" / "plugins" / "memory_os_hook.py"
+    code = """import json
+import os
+import subprocess
+
+def post_llm_call(user_message=None, assistant_response=None, conversation_history=None, **kwargs):
+    payload = {
+        "user_message": user_message,
+        "assistant_response": assistant_response,
+        "conversation_history": conversation_history,
+    }
+    env = os.environ.copy()
+    env["MEMORY_OS_HOOK_AGENT"] = "hermes"
+    subprocess.run(["python3", __HOOK_PATH__], input=json.dumps(payload), text=True, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+""".replace("__HOOK_PATH__", json.dumps(str(hook_path)))
+    atomic_text_write(plugin_path, code)
+    hermes_config = home / ".hermes" / "config.yaml"
+    existing = hermes_config.read_text() if hermes_config.exists() else ""
+    block = "plugins:\n  - " + json.dumps(str(plugin_path))
+    atomic_text_write(hermes_config, managed_text(existing, block))
+
+def register_openclaw_hook(hook_path):
+    plugin_path = home / ".openclaw" / "plugins" / "memory-os.js"
+    code = """const { spawnSync } = require("node:child_process");
+
+module.exports = {
+  hooks: {
+    "message:sent": async (event) => {
+      spawnSync("python3", [__HOOK_PATH__], {
+        input: JSON.stringify(event || {}),
+        env: { ...process.env, MEMORY_OS_HOOK_AGENT: "openclaw" },
+        stdio: ["pipe", "ignore", "ignore"],
+      });
+    },
+  },
+};
+""".replace("__HOOK_PATH__", json.dumps(str(hook_path)))
+    atomic_text_write(plugin_path, code)
+    data = json_file(home / ".openclaw" / "openclaw.json")
+    add_plugin_path(data, plugin_path)
+    atomic_json_write(home / ".openclaw" / "openclaw.json", data)
+
+configured_agents = []
+hook_path = install_common_hook_script()
+if selected("claude", "claude-code"):
+	register_claude_code_mcp()
+	register_claude_code_hook(hook_path)
+	configured_agents.append("Claude Code")
+if selected("codex"):
+	register_codex_mcp()
+	register_codex_hook(hook_path)
+	configured_agents.append("Codex")
+if selected("opencode", "open-code"):
+	register_opencode_mcp()
+	register_opencode_hook(hook_path)
+	configured_agents.append("opencode")
+if selected("hermes"):
+	register_hermes_mcp()
+	register_hermes_hook(hook_path)
+	configured_agents.append("Hermes")
+if selected("openclaw", "open-claw"):
+	register_openclaw_mcp()
+	register_openclaw_hook(hook_path)
+	configured_agents.append("OpenClaw")
+
+print("Memory OS setup bootstrap saved token to ~/.config/ai-secrets/secrets.env")
+print("API:", config["api_url"])
+print("MCP:", config["mcp_url"])
+if configured_agents:
+    print("Configured MCP for:", ", ".join(configured_agents))
+print("Agents:", ", ".join(config.get("agents", [])))
+PY
+`
 }
 
 func PATListHandler(authService auth.Service) app.HandlerFunc {

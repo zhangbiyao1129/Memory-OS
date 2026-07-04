@@ -5,7 +5,7 @@ COMPOSE_T480_FILE := deploy/docker-compose.t480.yml
 GOPROXY ?= https://goproxy.cn,direct
 NO_PROXY ?= localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-web,memory-mcp,memory-llm-mock
 
-.PHONY: test build-web smoke dev-up prod-up post-deploy-verify dev-down preflight secret-scan secret-injection-audit backup restore backup-restore-dry-run restore-rehearsal-preflight restore-rehearsal-dry-run docker-cleanup-plan docker-cleanup-images install-docker-cleanup-cron install-backup-cron verify audit-report final-delivery-report lint seed-dev t480-sync t480-build-check t480-deploy
+.PHONY: test build-web smoke dev-up prod-up prod-up-services post-deploy-verify verify-light dev-down preflight secret-scan secret-injection-audit backup restore backup-restore-dry-run restore-rehearsal-preflight restore-rehearsal-dry-run docker-cleanup-plan docker-cleanup-images install-docker-cleanup-cron install-backup-cron verify audit-report final-delivery-report lint seed-dev t480-sync t480-build-check t480-deploy t480-deploy-api-fast t480-deploy-web-fast t480-deploy-api-web-fast t480-verify-light
 
 test:
 	@if command -v go >/dev/null 2>&1 && go version | grep -q 'go1\.25'; then \
@@ -82,8 +82,24 @@ prod-up:
 	$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) up -d --build memory-api memory-worker memory-mcp memory-web && \
 	DRY_RUN=0 DOCKER_IMAGE_CLEANUP_MODE=dangling CONFIRM_DOCKER_IMAGE_CLEANUP=I_UNDERSTAND_IMAGE_DELETE bash scripts/docker-cleanup-images.sh
 
+SERVICES ?= memory-api memory-worker memory-mcp memory-web
+CLEANUP_IMAGES ?= 0
+prod-up-services:
+	. scripts/load-prod-env.sh && \
+	. scripts/load-build-info.sh && \
+	APP_ENV=production ALLOW_EXISTING_DEPLOYMENT=1 scripts/preflight.sh && \
+	export COMPOSE_PROJECT_NAME=deploy && \
+	APP_ENV=production ENABLE_DEV_ENDPOINTS=false \
+	$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) up -d --build $(SERVICES); \
+	if [[ "$(CLEANUP_IMAGES)" == "1" ]]; then \
+		DRY_RUN=0 DOCKER_IMAGE_CLEANUP_MODE=dangling CONFIRM_DOCKER_IMAGE_CLEANUP=I_UNDERSTAND_IMAGE_DELETE bash scripts/docker-cleanup-images.sh; \
+	fi
+
 post-deploy-verify:
 	scripts/post-deploy-verify.sh
+
+verify-light:
+	scripts/verify-light.sh
 
 dev-down:
 	$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) down
@@ -151,6 +167,18 @@ t480-build-check: t480-sync
 
 t480-deploy: t480-sync
 	ssh $${TARGET_HOST:-thinkpad} 'cd $${TARGET_DIR:-/opt/memory-os} && make prod-up && make post-deploy-verify'
+
+t480-deploy-api-fast: t480-sync
+	ssh $${TARGET_HOST:-thinkpad} 'cd $${TARGET_DIR:-/opt/memory-os} && SERVICES="memory-api" make prod-up-services && make verify-light'
+
+t480-deploy-web-fast: t480-sync
+	ssh $${TARGET_HOST:-thinkpad} 'cd $${TARGET_DIR:-/opt/memory-os} && SERVICES="memory-web" make prod-up-services && make verify-light'
+
+t480-deploy-api-web-fast: t480-sync
+	ssh $${TARGET_HOST:-thinkpad} 'cd $${TARGET_DIR:-/opt/memory-os} && SERVICES="memory-api memory-web" make prod-up-services && make verify-light'
+
+t480-verify-light:
+	ssh $${TARGET_HOST:-thinkpad} 'cd $${TARGET_DIR:-/opt/memory-os} && make verify-light'
 
 lint:
 	gofmt -w cmd internal
