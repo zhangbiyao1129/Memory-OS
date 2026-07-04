@@ -28,7 +28,7 @@ func TestWebDockerfileServesGeneratedNuxtStaticSite(t *testing.T) {
 	if !strings.Contains(dockerfile, "RUN rm -rf /usr/share/nginx/html/*") {
 		t.Fatalf("Dockerfile.web must remove nginx default html before copying Nuxt output")
 	}
-	if !strings.Contains(dockerfile, "COPY --from=build /src/web/.output/public/ /usr/share/nginx/html/") {
+	if !strings.Contains(dockerfile, "COPY --from=build /src/frontend/.output/public/ /usr/share/nginx/html/") {
 		t.Fatalf("Dockerfile.web must copy generated Nuxt public contents into nginx html root")
 	}
 }
@@ -103,8 +103,8 @@ func TestDockerignoreExcludesDevelopmentArtifactsFromBuildContext(t *testing.T) 
 		".codebase-memory/",
 		".playwright-mcp/",
 		"node_modules/",
-		"web/.nuxt/",
-		"web/.output/",
+		"frontend/.nuxt/",
+		"frontend/.output/",
 		"artifacts/",
 		"backups/",
 		"docs.zip",
@@ -118,7 +118,7 @@ func TestDockerignoreExcludesDevelopmentArtifactsFromBuildContext(t *testing.T) 
 	for _, forbidden := range []string{
 		"cmd/",
 		"internal/",
-		"web/",
+		"frontend/",
 		"migrations/",
 		"deploy/",
 		"go.mod",
@@ -159,7 +159,7 @@ func TestComposePassesProductionRetrievalEnvToMCP(t *testing.T) {
 }
 
 func TestSearchTestPageUsesAuthenticatedRuntimeContext(t *testing.T) {
-	content, err := os.ReadFile("../../web/pages/search-test.vue")
+	content, err := os.ReadFile("../../frontend/pages/search-test.vue")
 	if err != nil {
 		t.Fatalf("read search-test page: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestSearchTestPageUsesAuthenticatedRuntimeContext(t *testing.T) {
 }
 
 func TestSearchTestPageDisplaysUnifiedRetrievalEvidence(t *testing.T) {
-	content, err := os.ReadFile("../../web/pages/search-test.vue")
+	content, err := os.ReadFile("../../frontend/pages/search-test.vue")
 	if err != nil {
 		t.Fatalf("read search-test page: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestSearchTestPageDisplaysUnifiedRetrievalEvidence(t *testing.T) {
 }
 
 func TestDashboardPageUsesRealAPIStats(t *testing.T) {
-	content, err := os.ReadFile("../../web/pages/index.vue")
+	content, err := os.ReadFile("../../frontend/pages/index.vue")
 	if err != nil {
 		t.Fatalf("read dashboard page: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestDashboardPageUsesRealAPIStats(t *testing.T) {
 }
 
 func TestLoginPageSupportsPasswordLoginAndPATFallback(t *testing.T) {
-	content, err := os.ReadFile("../../web/pages/login.vue")
+	content, err := os.ReadFile("../../frontend/pages/login.vue")
 	if err != nil {
 		t.Fatalf("read login page: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestLoginPageSupportsPasswordLoginAndPATFallback(t *testing.T) {
 }
 
 func TestHotMemoryPageUsesRealAPI(t *testing.T) {
-	content, err := os.ReadFile("../../web/pages/hot-memory/index.vue")
+	content, err := os.ReadFile("../../frontend/pages/hot-memory/index.vue")
 	if err != nil {
 		t.Fatalf("read hot memory page: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestHotMemoryPageUsesRealAPI(t *testing.T) {
 }
 
 func TestSecretsPageUsesRealAPIAndMetadataOnlyFlow(t *testing.T) {
-	content, err := os.ReadFile("../../web/pages/secrets/index.vue")
+	content, err := os.ReadFile("../../frontend/pages/secrets/index.vue")
 	if err != nil {
 		t.Fatalf("read secrets page: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestSecretsPageUsesRealAPIAndMetadataOnlyFlow(t *testing.T) {
 }
 
 func TestTokensPageUsesRealAPIAndOneTimeTokenFlow(t *testing.T) {
-	content, err := os.ReadFile("../../web/pages/tokens/index.vue")
+	content, err := os.ReadFile("../../frontend/pages/tokens/index.vue")
 	if err != nil {
 		t.Fatalf("read tokens page: %v", err)
 	}
@@ -379,7 +379,7 @@ func TestTokensPageUsesRealAPIAndOneTimeTokenFlow(t *testing.T) {
 }
 
 func TestAppShellHidesGlobalContextSelectors(t *testing.T) {
-	content, err := os.ReadFile("../../web/components/AppShell.vue")
+	content, err := os.ReadFile("../../frontend/components/AppShell.vue")
 	if err != nil {
 		t.Fatalf("read AppShell: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestAppShellHidesGlobalContextSelectors(t *testing.T) {
 }
 
 func TestSettingsPageCollectsAdvancedGovernanceMenus(t *testing.T) {
-	content, err := os.ReadFile("../../web/pages/settings/index.vue")
+	content, err := os.ReadFile("../../frontend/pages/settings/index.vue")
 	if err != nil {
 		t.Fatalf("read settings page: %v", err)
 	}
@@ -432,7 +432,7 @@ func TestSettingsPageCollectsAdvancedGovernanceMenus(t *testing.T) {
 }
 
 func TestLogsPageUsesRealAuditAndSecurityLogAPIs(t *testing.T) {
-	content, err := os.ReadFile("../../web/pages/logs/index.vue")
+	content, err := os.ReadFile("../../frontend/pages/logs/index.vue")
 	if err != nil {
 		t.Fatalf("read logs page: %v", err)
 	}
@@ -467,7 +467,7 @@ func TestLogsPageUsesRealAuditAndSecurityLogAPIs(t *testing.T) {
 }
 
 func TestAppShellLogoutNavigatesToLogin(t *testing.T) {
-	content, err := os.ReadFile("../../web/components/AppShell.vue")
+	content, err := os.ReadFile("../../frontend/components/AppShell.vue")
 	if err != nil {
 		t.Fatalf("read AppShell: %v", err)
 	}
@@ -491,11 +491,11 @@ func TestAppShellLogoutNavigatesToLogin(t *testing.T) {
 }
 
 func TestArchivePagesUseRealAPI(t *testing.T) {
-	listContent, err := os.ReadFile("../../web/pages/archive/index.vue")
+	listContent, err := os.ReadFile("../../frontend/pages/archive/index.vue")
 	if err != nil {
 		t.Fatalf("read archive list page: %v", err)
 	}
-	detailContent, err := os.ReadFile("../../web/pages/archive/[id].vue")
+	detailContent, err := os.ReadFile("../../frontend/pages/archive/[id].vue")
 	if err != nil {
 		t.Fatalf("read archive detail page: %v", err)
 	}
@@ -555,11 +555,11 @@ func TestArchivePagesUseRealAPI(t *testing.T) {
 }
 
 func TestTenantPagesUseRealDeleteAPI(t *testing.T) {
-	orgContent, err := os.ReadFile("../../web/pages/orgs/index.vue")
+	orgContent, err := os.ReadFile("../../frontend/pages/orgs/index.vue")
 	if err != nil {
 		t.Fatalf("read orgs page: %v", err)
 	}
-	projectContent, err := os.ReadFile("../../web/pages/projects/index.vue")
+	projectContent, err := os.ReadFile("../../frontend/pages/projects/index.vue")
 	if err != nil {
 		t.Fatalf("read projects page: %v", err)
 	}
@@ -591,11 +591,11 @@ func TestTenantPagesUseRealDeleteAPI(t *testing.T) {
 }
 
 func TestTenantPagesUseRealEditAPI(t *testing.T) {
-	orgContent, err := os.ReadFile("../../web/pages/orgs/index.vue")
+	orgContent, err := os.ReadFile("../../frontend/pages/orgs/index.vue")
 	if err != nil {
 		t.Fatalf("read orgs page: %v", err)
 	}
-	projectContent, err := os.ReadFile("../../web/pages/projects/index.vue")
+	projectContent, err := os.ReadFile("../../frontend/pages/projects/index.vue")
 	if err != nil {
 		t.Fatalf("read projects page: %v", err)
 	}
@@ -623,11 +623,11 @@ func TestTenantPagesUseRealEditAPI(t *testing.T) {
 }
 
 func TestProjectPageKeepsMemberGovernanceInAdvancedSettings(t *testing.T) {
-	content, err := os.ReadFile("../../web/pages/projects/index.vue")
+	content, err := os.ReadFile("../../frontend/pages/projects/index.vue")
 	if err != nil {
 		t.Fatalf("read projects page: %v", err)
 	}
-	settingsContent, err := os.ReadFile("../../web/pages/settings/index.vue")
+	settingsContent, err := os.ReadFile("../../frontend/pages/settings/index.vue")
 	if err != nil {
 		t.Fatalf("read settings page: %v", err)
 	}
@@ -656,7 +656,7 @@ func TestProjectPageKeepsMemberGovernanceInAdvancedSettings(t *testing.T) {
 }
 
 func TestProjectPageShowsAutoGitWorkspaceMetadata(t *testing.T) {
-	content, err := os.ReadFile("../../web/pages/projects/index.vue")
+	content, err := os.ReadFile("../../frontend/pages/projects/index.vue")
 	if err != nil {
 		t.Fatalf("read projects page: %v", err)
 	}
@@ -691,11 +691,11 @@ func TestProjectPageShowsAutoGitWorkspaceMetadata(t *testing.T) {
 }
 
 func TestPermissionsPageUsesRealMembershipGovernanceAPI(t *testing.T) {
-	content, err := os.ReadFile("../../web/pages/permissions/index.vue")
+	content, err := os.ReadFile("../../frontend/pages/permissions/index.vue")
 	if err != nil {
 		t.Fatalf("read permissions page: %v", err)
 	}
-	shellContent, err := os.ReadFile("../../web/components/AppShell.vue")
+	shellContent, err := os.ReadFile("../../frontend/components/AppShell.vue")
 	if err != nil {
 		t.Fatalf("read AppShell: %v", err)
 	}
@@ -729,7 +729,7 @@ func TestPermissionsPageUsesRealMembershipGovernanceAPI(t *testing.T) {
 }
 
 func TestPermissionsPageReloadsAfterMembershipMutation(t *testing.T) {
-	content, err := os.ReadFile("../../web/pages/permissions/index.vue")
+	content, err := os.ReadFile("../../frontend/pages/permissions/index.vue")
 	if err != nil {
 		t.Fatalf("read permissions page: %v", err)
 	}
@@ -744,7 +744,7 @@ func TestPermissionsPageReloadsAfterMembershipMutation(t *testing.T) {
 }
 
 func TestRolesPageUsesRealRoleManagementAPI(t *testing.T) {
-	content, err := os.ReadFile("../../web/pages/roles/index.vue")
+	content, err := os.ReadFile("../../frontend/pages/roles/index.vue")
 	if err != nil {
 		t.Fatalf("read roles page: %v", err)
 	}
@@ -782,7 +782,7 @@ func TestRolesPageUsesRealRoleManagementAPI(t *testing.T) {
 }
 
 func TestRolesPageUsesLoadedRoleDirectoryAndLocalPersistence(t *testing.T) {
-	content, err := os.ReadFile("../../web/pages/roles/index.vue")
+	content, err := os.ReadFile("../../frontend/pages/roles/index.vue")
 	if err != nil {
 		t.Fatalf("read roles page: %v", err)
 	}
@@ -807,7 +807,7 @@ func TestRolesPageUsesLoadedRoleDirectoryAndLocalPersistence(t *testing.T) {
 }
 
 func TestRolesPageReloadsAfterSave(t *testing.T) {
-	content, err := os.ReadFile("../../web/pages/roles/index.vue")
+	content, err := os.ReadFile("../../frontend/pages/roles/index.vue")
 	if err != nil {
 		t.Fatalf("read roles page: %v", err)
 	}
@@ -822,11 +822,11 @@ func TestRolesPageReloadsAfterSave(t *testing.T) {
 }
 
 func TestUsersPageUsesRealStatusGovernanceAPI(t *testing.T) {
-	content, err := os.ReadFile("../../web/pages/users/index.vue")
+	content, err := os.ReadFile("../../frontend/pages/users/index.vue")
 	if err != nil {
 		t.Fatalf("read users page: %v", err)
 	}
-	shellContent, err := os.ReadFile("../../web/components/AppShell.vue")
+	shellContent, err := os.ReadFile("../../frontend/components/AppShell.vue")
 	if err != nil {
 		t.Fatalf("read AppShell: %v", err)
 	}
@@ -862,7 +862,7 @@ func TestUsersPageUsesRealStatusGovernanceAPI(t *testing.T) {
 }
 
 func TestUsersPageReloadsAfterMutation(t *testing.T) {
-	content, err := os.ReadFile("../../web/pages/users/index.vue")
+	content, err := os.ReadFile("../../frontend/pages/users/index.vue")
 	if err != nil {
 		t.Fatalf("read users page: %v", err)
 	}

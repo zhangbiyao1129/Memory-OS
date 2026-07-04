@@ -8,7 +8,7 @@ NO_PROXY ?= localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-web,memo
 .PHONY: test build-web smoke dev-up prod-up post-deploy-verify dev-down preflight secret-scan secret-injection-audit backup restore backup-restore-dry-run restore-rehearsal-preflight restore-rehearsal-dry-run docker-cleanup-plan docker-cleanup-images install-docker-cleanup-cron install-backup-cron verify audit-report final-delivery-report lint seed-dev
 
 test:
-	@if command -v go >/dev/null 2>&1; then \
+	@if command -v go >/dev/null 2>&1 && go version | grep -q 'go1\.25'; then \
 		GOPROXY=$(GOPROXY) go test ./...; \
 	else \
 		docker run --rm -e GOPROXY=$(GOPROXY) -e NO_PROXY=$(NO_PROXY) -e no_proxy=$(NO_PROXY) -v "$$(pwd)":/src -w /src golang:1.25-bookworm go test ./...; \
@@ -16,13 +16,13 @@ test:
 
 build-web:
 	@if command -v npm >/dev/null 2>&1; then \
-		cd web && npm install && npm run build; \
+		cd frontend && npm install && npm run build; \
 	else \
-		docker run --rm -e NO_PROXY=$(NO_PROXY) -e no_proxy=$(NO_PROXY) -v "$$(pwd)/web":/src -w /src node:22-bookworm bash -lc 'npm install && npm run build'; \
+		docker run --rm -e NO_PROXY=$(NO_PROXY) -e no_proxy=$(NO_PROXY) -v "$$(pwd)/frontend":/src -w /src node:22-bookworm bash -lc 'npm install && npm run build'; \
 	fi
 
 smoke:
-	@if command -v go >/dev/null 2>&1; then \
+	@if command -v go >/dev/null 2>&1 && go version | grep -q 'go1\.25'; then \
 		SMOKE_ENABLE_DEV_ENDPOINTS=$${SMOKE_ENABLE_DEV_ENDPOINTS:-false} GOPROXY=$(GOPROXY) go run ./cmd/memory-smoke; \
 	else \
 		docker run --rm --network $${SMOKE_DOCKER_NETWORK:-host} \
@@ -76,7 +76,8 @@ prod-up-mock:
 prod-up:
 	. scripts/load-prod-env.sh && \
 	. scripts/load-build-info.sh && \
-	ALLOW_EXISTING_DEPLOYMENT=1 scripts/preflight.sh && \
+	APP_ENV=production ALLOW_EXISTING_DEPLOYMENT=1 scripts/preflight.sh && \
+	export COMPOSE_PROJECT_NAME=deploy && \
 	APP_ENV=production ENABLE_DEV_ENDPOINTS=false \
 	$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) up -d --build memory-api memory-worker memory-mcp memory-web && \
 	DRY_RUN=0 DOCKER_IMAGE_CLEANUP_MODE=dangling CONFIRM_DOCKER_IMAGE_CLEANUP=I_UNDERSTAND_IMAGE_DELETE bash scripts/docker-cleanup-images.sh
@@ -97,10 +98,10 @@ secret-injection-audit:
 	scripts/secret-injection-audit.sh
 
 backup:
-	. scripts/load-prod-env.sh && scripts/backup.sh
+	. scripts/load-prod-env.sh && export COMPOSE_PROJECT_NAME=deploy && scripts/backup.sh
 
 restore:
-	. scripts/load-prod-env.sh && scripts/restore.sh
+	. scripts/load-prod-env.sh && export COMPOSE_PROJECT_NAME=deploy && scripts/restore.sh
 
 backup-restore-dry-run:
 	@set -euo pipefail; \

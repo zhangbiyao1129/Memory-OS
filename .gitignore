@@ -30,7 +30,7 @@ node_modules/
 .nuxt/
 .output/
 dist/
-web/dist/
+frontend/dist/
 
 # Local runtime data
 archives/

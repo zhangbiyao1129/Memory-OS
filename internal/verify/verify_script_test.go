@@ -769,11 +769,11 @@ func TestProductionCommandsLoadEnvironmentWithoutInliningSecrets(t *testing.T) {
 	if !strings.Contains(postDeploy, ". scripts/load-prod-env.sh") {
 		t.Fatal("post-deploy-verify must source scripts/load-prod-env.sh before compose checks")
 	}
-	if !strings.Contains(makefile, "backup:\n\t. scripts/load-prod-env.sh && scripts/backup.sh") {
-		t.Fatal("backup target must source scripts/load-prod-env.sh before scripts/backup.sh")
+	if !strings.Contains(makefile, "backup:\n\t. scripts/load-prod-env.sh && export COMPOSE_PROJECT_NAME=deploy && scripts/backup.sh") {
+		t.Fatal("backup target must source scripts/load-prod-env.sh and export COMPOSE_PROJECT_NAME=deploy before scripts/backup.sh")
 	}
-	if !strings.Contains(makefile, "restore:\n\t. scripts/load-prod-env.sh && scripts/restore.sh") {
-		t.Fatal("restore target must source scripts/load-prod-env.sh before scripts/restore.sh")
+	if !strings.Contains(makefile, "restore:\n\t. scripts/load-prod-env.sh && export COMPOSE_PROJECT_NAME=deploy && scripts/restore.sh") {
+		t.Fatal("restore target must source scripts/load-prod-env.sh and export COMPOSE_PROJECT_NAME=deploy before scripts/restore.sh")
 	}
 	for _, forbidden := range []string{
 		"echo $POSTGRES_PASSWORD",
