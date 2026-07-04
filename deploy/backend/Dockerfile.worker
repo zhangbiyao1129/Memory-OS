@@ -11,7 +11,9 @@ ENV NO_PROXY=${NO_PROXY}
 ENV no_proxy=${NO_PROXY}
 COPY go.mod go.sum ./
 RUN go mod download
-COPY . .
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+COPY migrations/ ./migrations/
 RUN go build -ldflags "-X memory-os/internal/buildinfo.Version=${BUILD_VERSION} -X memory-os/internal/buildinfo.Commit=${BUILD_COMMIT} -X memory-os/internal/buildinfo.BuildTime=${BUILD_TIME} -X memory-os/internal/buildinfo.Dirty=${BUILD_DIRTY}" -o /out/memory-worker ./cmd/memory-worker
 
 FROM debian:bookworm-slim

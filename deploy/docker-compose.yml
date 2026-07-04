@@ -37,7 +37,7 @@ services:
   memory-llm-mock:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.llm-mock
+      dockerfile: deploy/backend/Dockerfile.llm-mock
     image: memory-llm-mock:0.4
     environment:
       LLM_MOCK_PORT: 11434
@@ -47,7 +47,7 @@ services:
   memory-api:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.api
+      dockerfile: deploy/backend/Dockerfile.api
       args:
         BUILD_VERSION: ${BUILD_VERSION:-0.4.0-dev}
         BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
@@ -87,7 +87,7 @@ services:
   memory-worker:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.worker
+      dockerfile: deploy/backend/Dockerfile.worker
       args:
         BUILD_VERSION: ${BUILD_VERSION:-0.4.0-dev}
         BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
@@ -121,7 +121,7 @@ services:
   memory-mcp:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.mcp
+      dockerfile: deploy/backend/Dockerfile.mcp
       args:
         BUILD_VERSION: ${BUILD_VERSION:-0.4.0-dev}
         BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
@@ -145,7 +145,7 @@ services:
   memory-web:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.web
+      dockerfile: deploy/frontend/Dockerfile.web
       args:
         NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-http://localhost:18081}
     ports:

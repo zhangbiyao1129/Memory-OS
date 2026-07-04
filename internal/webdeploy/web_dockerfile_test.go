@@ -10,7 +10,7 @@ import (
 const backendNoProxyDefault = "localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-web,memory-mcp,memory-llm-mock"
 
 func TestWebDockerfileServesGeneratedNuxtStaticSite(t *testing.T) {
-	content, err := os.ReadFile("../../deploy/Dockerfile.web")
+	content, err := os.ReadFile("../../deploy/frontend/Dockerfile.web")
 	if err != nil {
 		t.Fatalf("read Dockerfile.web: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestComposeWebServiceDoesNotDependOnAPIContainer(t *testing.T) {
 	webService := compose[webIndex:volumesIndex]
 
 	for _, required := range []string{
-		"dockerfile: deploy/Dockerfile.web",
+		"dockerfile: deploy/frontend/Dockerfile.web",
 		"NUXT_PUBLIC_API_BASE: ${NUXT_PUBLIC_API_BASE:-http://localhost:18081}",
 		`"18080:18080"`,
 	} {
@@ -924,7 +924,7 @@ func TestRestoreRehearsalComposeIsIsolated(t *testing.T) {
 }
 
 func TestBackendDockerfilesInjectBuildInfo(t *testing.T) {
-	for _, path := range []string{"../../deploy/Dockerfile.api", "../../deploy/Dockerfile.worker", "../../deploy/Dockerfile.mcp"} {
+	for _, path := range []string{"../../deploy/backend/Dockerfile.api", "../../deploy/backend/Dockerfile.worker", "../../deploy/backend/Dockerfile.mcp"} {
 		content, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
@@ -948,7 +948,7 @@ func TestBackendDockerfilesInjectBuildInfo(t *testing.T) {
 }
 
 func TestBackendDockerfilesConfigureGoModuleProxy(t *testing.T) {
-	for _, path := range []string{"../../deploy/Dockerfile.api", "../../deploy/Dockerfile.worker", "../../deploy/Dockerfile.mcp"} {
+	for _, path := range []string{"../../deploy/backend/Dockerfile.api", "../../deploy/backend/Dockerfile.worker", "../../deploy/backend/Dockerfile.mcp"} {
 		content, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
