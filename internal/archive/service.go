@@ -28,6 +28,7 @@ type CreateRequest struct {
 	CreatedAt  time.Time
 	RenderMode string
 	Events     []eventlog.TurnEvent
+	Markdown   string // 非空时直传,跳过 Events 渲染(Phase 5 TopicComposer 用)
 }
 
 type EditRequest struct {
@@ -109,6 +110,10 @@ func (s Service) Create(request CreateRequest) (Result, error) {
 }
 
 func renderArchiveMarkdown(request CreateRequest) (string, error) {
+	// Markdown 非空时直传,跳过 Events 渲染(Phase 5 TopicComposer 沉淀产物)。
+	if request.Markdown != "" {
+		return request.Markdown, nil
+	}
 	renderRequest := RenderRequest{ArchiveID: request.ArchiveID, Title: request.Title, Events: request.Events}
 	if request.RenderMode == "knowledge" {
 		return RenderKnowledgeMarkdown(renderRequest)

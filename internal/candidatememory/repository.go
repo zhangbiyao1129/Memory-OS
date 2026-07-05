@@ -26,6 +26,14 @@ type ListFilter struct {
 	Limit     int
 }
 
+// TopicStateFilter 主题状态列表过滤。
+type TopicStateFilter struct {
+	OrgID     string
+	ProjectID string
+	SourceKey string
+	Limit     int
+}
+
 // Repository 候选记忆持久化接口。PG 实现见 pg_repository.go,内存实现用于测试。
 // 所有写操作必须以 org_id 限定,避免跨租户读写。
 type Repository interface {
@@ -41,6 +49,7 @@ type Repository interface {
 
 	UpsertTopicState(ctx context.Context, ts TopicState) (TopicState, error)
 	GetTopicState(ctx context.Context, orgID, projectID, sourceKey, threadID string) (TopicState, error)
+	ListTopicStates(ctx context.Context, filter TopicStateFilter) ([]TopicState, error)
 }
 
 // InMemoryRepository 内存版 Repository,用于单元测试与本地无 DB 场景。
@@ -278,6 +287,29 @@ func (r *InMemoryRepository) GetTopicState(ctx context.Context, orgID, projectID
 		return TopicState{}, ErrNotFound
 	}
 	return cloneTopicState(ts), nil
+}
+
+func (r *InMemoryRepository) ListTopicStates(ctx context.Context, filter TopicStateFilter) ([]TopicState, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := []TopicState{}
+	for _, ts := range r.topics {
+		if filter.OrgID != "" && ts.OrgID != filter.OrgID {
+			continue
+		}
+		if filter.ProjectID != "" && ts.ProjectID != filter.ProjectID {
+			continue
+		}
+		if filter.SourceKey != "" && ts.SourceKey != filter.SourceKey {
+			continue
+		}
+		out = append(out, cloneTopicState(ts))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if filter.Limit > 0 && len(out) > filter.Limit {
+		out = out[:filter.Limit]
+	}
+	return out, nil
 }
 
 func cloneCandidate(c Candidate) Candidate {

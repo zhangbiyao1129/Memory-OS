@@ -30,6 +30,7 @@ type Options struct {
 	ArchiveGenerationResolver ArchiveGenerationResolver
 	Reranker                  Reranker
 	AccessLog                 AccessLog
+	ArchiveFeedbackThreshold  int // Archive 高频命中生成候选阈值,0 用默认 3
 }
 
 type Service struct {
@@ -38,14 +39,27 @@ type Service struct {
 	archiveGenerationResolver ArchiveGenerationResolver
 	reranker                  Reranker
 	accessLog                 AccessLog
+	feedback                  *ArchiveFeedbackTracker
 }
 
 func NewService(options Options) Service {
-	return Service{hotMemory: options.HotMemory, archiveRAG: options.ArchiveRAG, archiveGenerationResolver: options.ArchiveGenerationResolver, reranker: options.Reranker, accessLog: options.AccessLog}
+	threshold := options.ArchiveFeedbackThreshold
+	if threshold <= 0 {
+		threshold = 3
+	}
+	return Service{hotMemory: options.HotMemory, archiveRAG: options.ArchiveRAG, archiveGenerationResolver: options.ArchiveGenerationResolver, reranker: options.Reranker, accessLog: options.AccessLog, feedback: NewArchiveFeedbackTracker(threshold)}
 }
 
 func (s Service) Configured() bool {
 	return s.hotMemory != nil || s.archiveRAG != nil
+}
+
+// PendingArchiveCandidates 返回 Archive 高频命中生成的待处理候选。
+func (s Service) PendingArchiveCandidates() []ArchiveCandidate {
+	if s.feedback == nil {
+		return nil
+	}
+	return s.feedback.PendingCandidates()
 }
 
 func (s Service) Search(request SearchRequest) (SearchResponse, error) {
@@ -135,7 +149,22 @@ func (s Service) collect(request SearchRequest) ([]candidate, int, error) {
 		}
 		for _, result := range results {
 			candidates = append(candidates, candidate{id: "archive:" + result.Source.ChunkID, text: result.Text, score: result.Score, source: SourceRef{Kind: SourceArchiveChunk, ArchiveID: result.Source.ArchiveID, ChunkID: result.Source.ChunkID, SourceEventIDs: result.Source.SourceEventIDs}})
+			// Phase 7: 记录 Archive 命中,高频时生成摘要型候选。
+			if s.feedback != nil {
+				s.feedback.RecordHit(ArchiveHit{
+					ArchiveID: result.Source.ArchiveID,
+					ChunkID:   result.Source.ChunkID,
+					Content:   result.Text,
+					OrgID:     request.Actor.OrgID,
+					ProjectID: request.Actor.ProjectID,
+					UserID:    request.Actor.UserID,
+				})
+			}
 		}
+	}
+	// Phase 7: 对所有候选施加内容类型 boost（短事实 +20%，完整过程 +10%）。
+	for i := range candidates {
+		boostCandidate(&candidates[i])
 	}
 	return dedupeCandidates(candidates), markedUsed, nil
 }

@@ -12,6 +12,8 @@ const nav = [
   ['项目', '/projects'],
   ['归档库', '/archive'],
   ['热记忆', '/hot-memory'],
+  ['候选记忆', '/candidates'],
+  ['主题状态', '/topics'],
   ['Secret Vault', '/secrets'],
   ['Token', '/tokens'],
   ['日志', '/logs'],

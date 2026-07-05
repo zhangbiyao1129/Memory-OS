@@ -248,6 +248,48 @@ func (r *PGRepository) GetTopicState(ctx context.Context, orgID, projectID, sour
 	return scanTopicState(row)
 }
 
+func (r *PGRepository) ListTopicStates(ctx context.Context, filter TopicStateFilter) ([]TopicState, error) {
+	if err := r.check(); err != nil {
+		return nil, err
+	}
+	where := []string{"1=1"}
+	args := []any{}
+	argIdx := 1
+	if filter.OrgID != "" {
+		where = append(where, fmt.Sprintf("org_id=$%d", argIdx))
+		args = append(args, filter.OrgID)
+		argIdx++
+	}
+	if filter.ProjectID != "" {
+		where = append(where, fmt.Sprintf("project_id=$%d", argIdx))
+		args = append(args, filter.ProjectID)
+		argIdx++
+	}
+	if filter.SourceKey != "" {
+		where = append(where, fmt.Sprintf("source_key=$%d", argIdx))
+		args = append(args, filter.SourceKey)
+		argIdx++
+	}
+	query := "SELECT " + topicColumns + " FROM topic_memory_states WHERE " + strings.Join(where, " AND ") + " ORDER BY created_at DESC"
+	if filter.Limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
+	}
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TopicState
+	for rows.Next() {
+		ts, err := scanTopicState(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ts)
+	}
+	return out, rows.Err()
+}
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }

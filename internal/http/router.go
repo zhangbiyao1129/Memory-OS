@@ -50,6 +50,9 @@ type RouterOptions struct {
 	ArchiveService         archive.Service
 	ArchiveQueue           archiveEnqueuer
 	CandidateQueue         candidateEnqueuer
+	CandidateService       *candidatememory.Service
+	TopicComposer          *candidatememory.TopicComposer
+	TopicRepository        candidatememory.Repository
 	LegacyTurnEventArchive bool
 	ArchiveIndexQueue      archiveIndexQueue
 	QdrantStatusService    qdrant.StatusService
@@ -116,6 +119,17 @@ func RegisterRoutes(engine *route.Engine, options RouterOptions) {
 	engine.POST("/memory/hot-memory/demote", HotMemoryDemoteHandler(options.HotMemoryService, options.AuthService, options.TenantService))
 	engine.POST("/memory/hot-memory/mark-used", HotMemoryMarkUsedHandler(options.HotMemoryService, options.AuthService, options.TenantService))
 	engine.POST("/memory/hot-memory/delete", HotMemoryDeleteHandler(options.HotMemoryService, options.AuthService, options.TenantService))
+	if options.CandidateService != nil {
+		engine.POST("/memory/candidates/list", CandidateListHandler(options.CandidateService, options.AuthService, options.TenantService))
+		engine.POST("/memory/candidates/accept", CandidateAcceptHandler(options.CandidateService, options.AuthService, options.TenantService))
+		engine.POST("/memory/candidates/discard", CandidateDiscardHandler(options.CandidateService, options.AuthService, options.TenantService))
+	}
+	if options.TopicComposer != nil {
+		engine.POST("/memory/candidates/compose", TopicComposeHandler(options.TopicComposer, options.AuthService, options.TenantService))
+	}
+	if options.TopicRepository != nil {
+		engine.POST("/memory/topics/list", TopicListHandler(options.TopicRepository, options.AuthService, options.TenantService))
+	}
 	engine.POST("/memory/secrets/create", SecretCreateHandler(options.SecretVault, options.AuthService, options.TenantService))
 	engine.POST("/memory/secrets/list", SecretListHandler(options.SecretVault, options.AuthService, options.TenantService))
 	engine.POST("/memory/secrets/disable", SecretDisableHandler(options.SecretVault, options.AuthService, options.TenantService))
@@ -448,6 +462,46 @@ func OpenAPIHandler() app.HandlerFunc {
 						"summary": "Soft delete a Hot Memory fact",
 						"responses": map[string]any{
 							"200": map[string]any{"description": "Hot Memory metadata"},
+						},
+					},
+				},
+				"/memory/candidates/list": map[string]any{
+					"post": map[string]any{
+						"summary": "List candidate memories",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Candidate list"},
+						},
+					},
+				},
+				"/memory/candidates/accept": map[string]any{
+					"post": map[string]any{
+						"summary": "Accept a candidate memory",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Candidate metadata"},
+						},
+					},
+				},
+				"/memory/candidates/discard": map[string]any{
+					"post": map[string]any{
+						"summary": "Discard a candidate memory",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Candidate metadata"},
+						},
+					},
+				},
+				"/memory/candidates/compose": map[string]any{
+					"post": map[string]any{
+						"summary": "Compose topic candidates into a Markdown archive",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Compose result"},
+						},
+					},
+				},
+				"/memory/topics/list": map[string]any{
+					"post": map[string]any{
+						"summary": "List topic memory states",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Topic state list"},
 						},
 					},
 				},
@@ -1481,6 +1535,230 @@ func hotMemoryActionHandler(service hotmemory.Service, authService auth.Service,
 		}
 		c.JSON(consts.StatusOK, hotMemoryResponse(updated))
 	}
+}
+
+// --- 候选记忆 API (Phase 6) ---
+
+type candidateListRequest struct {
+	OrgID     string `json:"org_id"`
+	ProjectID string `json:"project_id"`
+	SourceKey string `json:"source_key"`
+	ThreadID  string `json:"thread_id"`
+	Status    string `json:"status"`
+	RiskLevel string `json:"risk_level"`
+	Limit     int    `json:"limit"`
+}
+
+type candidateActionRequest struct {
+	CandidateID string `json:"candidate_id"`
+	OrgID       string `json:"org_id"`
+}
+
+type topicComposeRequest struct {
+	OrgID     string `json:"org_id"`
+	ProjectID string `json:"project_id"`
+	SourceKey string `json:"source_key"`
+	ThreadID  string `json:"thread_id"`
+	Force     bool   `json:"force"`
+}
+
+type topicListRequest struct {
+	OrgID     string `json:"org_id"`
+	ProjectID string `json:"project_id"`
+	SourceKey string `json:"source_key"`
+	Limit     int    `json:"limit"`
+}
+
+func CandidateListHandler(service *candidatememory.Service, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		var request candidateListRequest
+		if err := c.BindAndValidate(&request); err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_candidate_list_request"})
+			return
+		}
+		permissions, ok := authorizeProjectScope(c, authService, tenantService, request.OrgID, request.ProjectID, "memory:read", "", "candidate_forbidden")
+		if !ok {
+			return
+		}
+		filter := candidatememory.ListFilter{
+			OrgID:     permissions.OrgID,
+			ProjectID: permissions.ProjectID,
+			SourceKey: request.SourceKey,
+			ThreadID:  request.ThreadID,
+			Status:    candidatememory.Status(request.Status),
+			RiskLevel: candidatememory.RiskLevel(request.RiskLevel),
+			Limit:     request.Limit,
+		}
+		candidates, err := service.List(ctx, filter)
+		if err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "candidate_list_rejected", "message": err.Error()})
+			return
+		}
+		c.JSON(consts.StatusOK, map[string]any{"candidates": candidateListResponse(candidates)})
+	}
+}
+
+func CandidateAcceptHandler(service *candidatememory.Service, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		var request candidateActionRequest
+		if err := c.BindAndValidate(&request); err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_candidate_action_request"})
+			return
+		}
+		existing, err := service.Get(ctx, request.OrgID, request.CandidateID)
+		if err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "candidate_not_found", "message": err.Error()})
+			return
+		}
+		permissions, ok := authorizeProjectScope(c, authService, tenantService, existing.OrgID, existing.ProjectID, "memory:write", "project:"+existing.ProjectID+":write", "candidate_forbidden")
+		if !ok {
+			return
+		}
+		_ = permissions
+		updated, err := service.Accept(ctx, request.OrgID, request.CandidateID)
+		if err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "candidate_accept_rejected", "message": err.Error()})
+			return
+		}
+		c.JSON(consts.StatusOK, candidateResponse(updated))
+	}
+}
+
+func CandidateDiscardHandler(service *candidatememory.Service, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		var request candidateActionRequest
+		if err := c.BindAndValidate(&request); err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_candidate_action_request"})
+			return
+		}
+		existing, err := service.Get(ctx, request.OrgID, request.CandidateID)
+		if err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "candidate_not_found", "message": err.Error()})
+			return
+		}
+		permissions, ok := authorizeProjectScope(c, authService, tenantService, existing.OrgID, existing.ProjectID, "memory:write", "project:"+existing.ProjectID+":write", "candidate_forbidden")
+		if !ok {
+			return
+		}
+		_ = permissions
+		updated, err := service.Discard(ctx, request.OrgID, request.CandidateID)
+		if err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "candidate_discard_rejected", "message": err.Error()})
+			return
+		}
+		c.JSON(consts.StatusOK, candidateResponse(updated))
+	}
+}
+
+func TopicComposeHandler(composer *candidatememory.TopicComposer, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		var request topicComposeRequest
+		if err := c.BindAndValidate(&request); err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_topic_compose_request"})
+			return
+		}
+		permissions, ok := authorizeProjectScope(c, authService, tenantService, request.OrgID, request.ProjectID, "memory:write", "project:"+request.ProjectID+":write", "topic_forbidden")
+		if !ok {
+			return
+		}
+		_ = permissions
+		result, err := composer.Compose(ctx, candidatememory.ComposeRequest{
+			OrgID:     request.OrgID,
+			ProjectID: request.ProjectID,
+			SourceKey: request.SourceKey,
+			ThreadID:  request.ThreadID,
+			Force:     request.Force,
+		})
+		if err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "topic_compose_rejected", "message": err.Error()})
+			return
+		}
+		c.JSON(consts.StatusOK, result)
+	}
+}
+
+func TopicListHandler(repo candidatememory.Repository, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		var request topicListRequest
+		if err := c.BindAndValidate(&request); err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_topic_list_request"})
+			return
+		}
+		permissions, ok := authorizeProjectScope(c, authService, tenantService, request.OrgID, request.ProjectID, "memory:read", "", "topic_forbidden")
+		if !ok {
+			return
+		}
+		topics, err := repo.ListTopicStates(ctx, candidatememory.TopicStateFilter{
+			OrgID:     permissions.OrgID,
+			ProjectID: permissions.ProjectID,
+			SourceKey: request.SourceKey,
+			Limit:     request.Limit,
+		})
+		if err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "topic_list_rejected", "message": err.Error()})
+			return
+		}
+		c.JSON(consts.StatusOK, map[string]any{"topics": topicStateListResponse(topics)})
+	}
+}
+
+func candidateListResponse(candidates []candidatememory.Candidate) []map[string]any {
+	out := make([]map[string]any, 0, len(candidates))
+	for _, c := range candidates {
+		out = append(out, candidateResponse(c))
+	}
+	return out
+}
+
+func candidateResponse(c candidatememory.Candidate) map[string]any {
+	return map[string]any{
+		"candidate_id":     c.CandidateID,
+		"org_id":           c.OrgID,
+		"project_id":       c.ProjectID,
+		"source_key":       c.SourceKey,
+		"user_id":          c.UserID,
+		"agent_id":         c.AgentID,
+		"thread_id":        c.ThreadID,
+		"session_id":       c.SessionID,
+		"source_event_ids": c.SourceEventIDs,
+		"memory_type":      c.MemoryType,
+		"content":          c.Content,
+		"summary":          c.Summary,
+		"risk_level":       c.RiskLevel,
+		"confidence":       c.Confidence,
+		"status":           c.Status,
+		"scores":           c.Scores,
+		"created_at":       c.CreatedAt,
+		"updated_at":       c.UpdatedAt,
+	}
+}
+
+func topicStateListResponse(topics []candidatememory.TopicState) []map[string]any {
+	out := make([]map[string]any, 0, len(topics))
+	for _, ts := range topics {
+		out = append(out, topicStateResponse(ts))
+	}
+	return out
+}
+
+func topicStateResponse(ts candidatememory.TopicState) map[string]any {
+	resp := map[string]any{
+		"id":                  ts.ID,
+		"org_id":              ts.OrgID,
+		"project_id":          ts.ProjectID,
+		"source_key":          ts.SourceKey,
+		"thread_id":           ts.ThreadID,
+		"candidate_count":     ts.CandidateCount,
+		"completion_score":    ts.CompletionScore,
+		"ready_to_compose":    ts.ReadyToCompose,
+		"composed_archive_id": ts.ComposedArchiveID,
+		"created_at":          ts.CreatedAt,
+		"updated_at":          ts.UpdatedAt,
+	}
+	if ts.LastEventAt != nil {
+		resp["last_event_at"] = ts.LastEventAt
+	}
+	return resp
 }
 
 func SecretCreateHandler(vault secret.Vault, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {

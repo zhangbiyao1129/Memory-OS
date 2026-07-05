@@ -208,6 +208,12 @@ func routerOptions(cfg config.Config, healthService health.Service, pool *pgxpoo
 	options.ArchiveIndexQueue = jobs.NewPGArchiveIndexQueue(pool, jobs.PGArchiveIndexQueueOptions{WorkerID: "memory-api"})
 	candidateRepo := candidatememory.NewPGRepository(pool)
 	options.CandidateQueue = jobs.NewPGCandidateMemoryQueue(candidateRepo, jobs.PGCandidateMemoryQueueOptions{WorkerID: "memory-api"})
+	options.CandidateService = candidatememory.NewService(candidateRepo, candidatememory.RuleScorer{})
+	options.TopicRepository = candidateRepo
+	archiveIndexQueue := jobs.NewPGArchiveIndexQueue(pool, jobs.PGArchiveIndexQueueOptions{WorkerID: "memory-api"})
+	archiveCreator := jobs.NewProductionArchiveCreator(options.ArchiveService, archiveIndexQueue)
+	composer := candidatememory.NewTopicComposer(candidateRepo, archiveCreator)
+	options.TopicComposer = &composer
 	qdrantClient, err := qdrant.NewClient(cfg.QdrantURL)
 	if err != nil {
 		return httpapi.RouterOptions{}, err
