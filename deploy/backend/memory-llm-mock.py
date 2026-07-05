@@ -62,6 +62,17 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/healthz":
             self._write_json(200, {"status": "ok"})
             return
+        if self.path == "/v1/chat/completions":
+            self._write_json(200, {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"candidates":[{"memory_type":"fact","content":"mock candidate memory","summary":"mock summary","confidence":0.8}]}'
+                        }
+                    }
+                ]
+            })
+            return
         self.send_response(404)
         self.end_headers()
         self.wfile.write(b"{}");

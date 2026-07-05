@@ -43,10 +43,33 @@ func NewOpenAICompatible(cfg OpenAICompatibleConfig) (*OpenAICompatibleClient, e
 }
 
 func (c *OpenAICompatibleClient) Chat(ctx context.Context, request ChatRequest) (ChatResponse, error) {
-	if err := c.ensureConfigured(c.cfg.LLMModel); err != nil {
+	model := strings.TrimSpace(request.Model)
+	if model == "" {
+		model = c.cfg.LLMModel
+	}
+	if err := c.ensureConfigured(model); err != nil {
 		return ChatResponse{}, err
 	}
-	return ChatResponse{}, errors.New("chat client transport is not implemented in phase 1")
+
+	messages := make([]map[string]string, 0, len(request.Messages))
+	for _, m := range request.Messages {
+		messages = append(messages, map[string]string{"role": m.Role, "content": m.Content})
+	}
+
+	var decoded struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := c.postJSON(ctx, "/v1/chat/completions", map[string]any{"model": model, "messages": messages}, &decoded); err != nil {
+		return ChatResponse{}, err
+	}
+	if len(decoded.Choices) == 0 {
+		return ChatResponse{}, errors.New("chat response has no choices")
+	}
+	return ChatResponse{Text: decoded.Choices[0].Message.Content}, nil
 }
 
 func (c *OpenAICompatibleClient) Embed(ctx context.Context, texts []string) (EmbeddingResponse, error) {

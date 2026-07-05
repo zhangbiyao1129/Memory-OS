@@ -2248,11 +2248,11 @@ def selected(*names):
     return normalized == "auto" or normalized in names
 
 def register_claude_code_mcp():
-    claude_config = home / ".claude.json"
+    claude_config = home / ".claude" / ".mcp.json"
     data = json_file(claude_config)
     servers = data.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
-        raise ValueError("~/.claude.json mcpServers must be a JSON object")
+        raise ValueError("~/.claude/.mcp.json mcpServers must be a JSON object")
     servers["memory-os"] = {
         "type": "http",
         "url": config["mcp_url"],

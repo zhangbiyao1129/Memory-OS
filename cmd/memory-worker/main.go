@@ -58,6 +58,7 @@ var newRAGIndexStore = func(ctx context.Context, cfg config.Config, pool *pgxpoo
 var newRAGIndexWorker = func(store rag.Store) *jobs.RAGIndexWorker {
 	return jobs.NewRAGIndexWorker(rag.NewService(store))
 }
+var newOpenAICompatibleClient = llm.NewOpenAICompatible
 
 // eventlogCandidateLoader 把候选任务转换为提炼请求:从 eventlog 加载已保存(已脱敏)事件。
 type eventlogCandidateLoader struct {
@@ -163,7 +164,7 @@ func buildWorker(cfg config.Config) (*jobs.Runner, error) {
 		// 候选记忆链路(Phase 4):queue 始终装配(memory-api enqueue 用),worker 需 LLM。
 		candidateRepo := candidatememory.NewPGRepository(pool)
 		candidateQueue = jobs.NewPGCandidateMemoryQueue(candidateRepo, jobs.PGCandidateMemoryQueueOptions{WorkerID: "memory-worker"})
-		if llmClient, llmErr := llm.NewOpenAICompatible(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, EmbeddingModel: cfg.EmbeddingModel}); llmErr == nil {
+		if llmClient, llmErr := newOpenAICompatibleClient(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, LLMModel: cfg.LLMModel, EmbeddingModel: cfg.EmbeddingModel}); llmErr == nil {
 			extractor := candidatememory.NewLLMExtractor(llmClient).WithModel(cfg.LLMModel)
 			candidateService := candidatememory.NewService(candidateRepo, candidatememory.RuleScorer{})
 			eventLoader := eventlogCandidateLoader{eventlog: eventlog.NewService(eventlog.NewPGRepository(pool), eventlog.SanitizerOptions{MaxTurnEventBytes: 256 * 1024, MaxToolOutputBytes: 64 * 1024})}

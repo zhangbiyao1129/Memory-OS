@@ -10,6 +10,7 @@ import (
 	"memory-os/internal/archive"
 	"memory-os/internal/config"
 	"memory-os/internal/jobs"
+	"memory-os/internal/llm"
 	"memory-os/internal/rag"
 )
 
@@ -63,6 +64,70 @@ func TestWorkerLoggerOptionsUsesConfiguredEnvironment(t *testing.T) {
 	}
 	if options.Service != "memory-worker" {
 		t.Fatalf("Service = %q, want memory-worker", options.Service)
+	}
+}
+
+func TestBuildWorkerPassesLLMModelToCandidateWorker(t *testing.T) {
+	originalNewPool := newPostgresPool
+	originalRunMigrations := runWorkerMigrations
+	originalClosePool := closePostgresPool
+	originalNewArchiveService := newArchiveService
+	originalNewArchiveQueue := newArchiveQueue
+	originalNewRAGIndexQueue := newRAGIndexQueue
+	originalNewRAGIndexWorker := newRAGIndexWorker
+	originalNewRAGIndexStore := newRAGIndexStore
+	originalNewOpenAICompatibleClient := newOpenAICompatibleClient
+	t.Cleanup(func() {
+		newPostgresPool = originalNewPool
+		runWorkerMigrations = originalRunMigrations
+		closePostgresPool = originalClosePool
+		newArchiveService = originalNewArchiveService
+		newArchiveQueue = originalNewArchiveQueue
+		newRAGIndexQueue = originalNewRAGIndexQueue
+		newRAGIndexWorker = originalNewRAGIndexWorker
+		newRAGIndexStore = originalNewRAGIndexStore
+		newOpenAICompatibleClient = originalNewOpenAICompatibleClient
+	})
+
+	var capturedLLMConfig llm.OpenAICompatibleConfig
+	newPostgresPool = func(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+		return &pgxpool.Pool{}, nil
+	}
+	runWorkerMigrations = func(ctx context.Context, pool *pgxpool.Pool) error { return nil }
+	closePostgresPool = func(pool *pgxpool.Pool) {}
+	newArchiveService = func(repo archive.Repository, root string) archive.Service {
+		return archive.NewService(archive.NewMemoryRepository(), t.TempDir())
+	}
+	newArchiveQueue = func(pool *pgxpool.Pool) jobs.ArchiveQueue { return fakeWorkerArchiveQueue{} }
+	newRAGIndexQueue = func(pool *pgxpool.Pool) jobs.RAGIndexQueue { return fakeWorkerRAGIndexQueue{} }
+	newRAGIndexStore = func(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (rag.Store, error) {
+		return rag.NewMemoryStore(), nil
+	}
+	newRAGIndexWorker = func(store rag.Store) *jobs.RAGIndexWorker {
+		return jobs.NewRAGIndexWorker(rag.NewService(store))
+	}
+	newOpenAICompatibleClient = func(cfg llm.OpenAICompatibleConfig) (*llm.OpenAICompatibleClient, error) {
+		capturedLLMConfig = cfg
+		return llm.NewOpenAICompatible(cfg)
+	}
+
+	worker, err := buildWorker(config.Config{
+		PostgresDSN:    "postgres://memory_os:secret@postgres:5432/memory_os",
+		ArchiveDir:     "/data/memory-os",
+		QdrantURL:      "http://qdrant:6333",
+		LLMBaseURL:     "http://llm.local:8000",
+		LLMAPIKey:      "test-key",
+		LLMModel:       "MiniMax-M2.7",
+		EmbeddingModel: "bge-m3",
+	})
+	if err != nil {
+		t.Fatalf("buildWorker() error = %v", err)
+	}
+	if worker == nil {
+		t.Fatal("buildWorker() returned nil worker")
+	}
+	if capturedLLMConfig.LLMModel != "MiniMax-M2.7" {
+		t.Fatalf("LLMModel = %q, want MiniMax-M2.7 — buildWorker did not pass LLMModel to LLM client", capturedLLMConfig.LLMModel)
 	}
 }
 

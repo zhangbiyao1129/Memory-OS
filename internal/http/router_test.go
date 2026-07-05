@@ -1235,7 +1235,7 @@ func TestPATCreateReturnsInstallCodeAndBootstrapConsumesOnce(t *testing.T) {
 func TestSetupInstallScriptRegistersMainstreamAgentMCPWithoutPlainToken(t *testing.T) {
 	script := setupInstallScript()
 	for _, required := range []string{
-		".claude.json",
+		".claude/.mcp.json",
 		".codex",
 		"opencode",
 		".hermes",
@@ -1352,16 +1352,16 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 		t.Fatalf("secrets.env mode = %v, %v; want 0600", info, err)
 	}
 
-	claudeBytes, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	claudeBytes, err := os.ReadFile(filepath.Join(home, ".claude", ".mcp.json"))
 	if err != nil {
-		t.Fatalf("read .claude.json: %v", err)
+		t.Fatalf("read .claude/.mcp.json: %v", err)
 	}
 	if strings.Contains(string(claudeBytes), bootstrapToken) {
-		t.Fatalf(".claude.json leaked plaintext token: %s", claudeBytes)
+		t.Fatalf(".claude/.mcp.json leaked plaintext token: %s", claudeBytes)
 	}
 	var claudeConfig map[string]any
 	if err := json.Unmarshal(claudeBytes, &claudeConfig); err != nil {
-		t.Fatalf(".claude.json is not JSON: %v", err)
+		t.Fatalf(".claude/.mcp.json is not JSON: %v", err)
 	}
 	servers := claudeConfig["mcpServers"].(map[string]any)
 	memoryOS := servers["memory-os"].(map[string]any)
