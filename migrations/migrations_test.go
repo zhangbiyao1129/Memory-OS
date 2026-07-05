@@ -372,3 +372,62 @@ func TestImportBatchesMigrationContainsRequiredTablesAndIndexes(t *testing.T) {
 		}
 	}
 }
+
+func TestCandidateMemoriesMigrationContainsRequiredTablesAndIndexes(t *testing.T) {
+	sql := readMigration(t, "000019_candidate_memories.sql")
+
+	required := []string{
+		"CREATE TABLE IF NOT EXISTS candidate_memories",
+		"CREATE TABLE IF NOT EXISTS candidate_memory_jobs",
+		"CREATE TABLE IF NOT EXISTS topic_memory_states",
+		// candidate_memories 字段
+		"candidate_id TEXT NOT NULL UNIQUE",
+		"org_id TEXT NOT NULL",
+		"project_id TEXT NOT NULL",
+		"source_key TEXT NOT NULL",
+		"user_id TEXT NOT NULL",
+		"agent_id TEXT NOT NULL",
+		"thread_id TEXT NOT NULL",
+		"session_id TEXT NOT NULL DEFAULT ''",
+		"source_event_ids TEXT[] NOT NULL DEFAULT '{}'",
+		"memory_type TEXT NOT NULL",
+		"content TEXT NOT NULL",
+		"summary TEXT NOT NULL DEFAULT ''",
+		"risk_level TEXT NOT NULL DEFAULT 'low'",
+		"confidence DOUBLE PRECISION NOT NULL DEFAULT 0",
+		"status TEXT NOT NULL DEFAULT 'pending'",
+		"similar_refs JSONB NOT NULL DEFAULT '[]'",
+		"scores JSONB NOT NULL DEFAULT '{}'",
+		// candidate_memory_jobs(archive_jobs 风格)
+		"idempotency_key TEXT NOT NULL UNIQUE",
+		"attempts INTEGER NOT NULL DEFAULT 0",
+		"max_attempts INTEGER NOT NULL DEFAULT 3",
+		"locked_by TEXT",
+		"locked_until TIMESTAMPTZ",
+		"last_error TEXT NOT NULL DEFAULT ''",
+		"completed_at TIMESTAMPTZ",
+		// topic_memory_states
+		"candidate_count INTEGER NOT NULL DEFAULT 0",
+		"completion_score DOUBLE PRECISION NOT NULL DEFAULT 0",
+		"last_event_at TIMESTAMPTZ",
+		"ready_to_compose BOOLEAN NOT NULL DEFAULT false",
+		"composed_archive_id TEXT NOT NULL DEFAULT ''",
+		// 索引
+		"CREATE INDEX IF NOT EXISTS candidate_memories_scope_idx",
+		"CREATE INDEX IF NOT EXISTS candidate_memories_status_idx",
+		"CREATE INDEX IF NOT EXISTS candidate_memories_thread_idx",
+		"CREATE INDEX IF NOT EXISTS candidate_memory_jobs_ready_idx",
+		"CREATE UNIQUE INDEX IF NOT EXISTS topic_memory_states_topic_unique",
+	}
+	for _, item := range required {
+		if !strings.Contains(sql, item) {
+			t.Fatalf("candidate memories migration missing %q", item)
+		}
+	}
+
+	for _, forbidden := range []string{"DROP TABLE", "DROP COLUMN"} {
+		if strings.Contains(strings.ToUpper(sql), forbidden) {
+			t.Fatalf("candidate memories migration contains destructive statement %q", forbidden)
+		}
+	}
+}

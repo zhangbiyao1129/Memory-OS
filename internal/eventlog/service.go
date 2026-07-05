@@ -27,6 +27,14 @@ func (s Service) Configured() bool {
 	return s.repo != nil
 }
 
+// GetEvent 按 event_id 读取已保存(已脱敏)的事件,供候选提炼 worker 使用。
+func (s Service) GetEvent(eventID string) (TurnEvent, error) {
+	if !s.Configured() {
+		return TurnEvent{}, ErrEventNotFound
+	}
+	return s.repo.GetEvent(eventID)
+}
+
 func (s Service) Ingest(event TurnEvent, requestID string, permissions tenant.PermissionContext) (IngestResult, error) {
 	if err := Validate(event); err != nil {
 		return IngestResult{}, err

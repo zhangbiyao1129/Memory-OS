@@ -10,8 +10,11 @@ type SaveResult struct {
 	Deduped bool
 }
 
+var ErrEventNotFound = errors.New("event not found")
+
 type Repository interface {
 	Save(event SanitizedEvent, requestID string) (SaveResult, error)
+	GetEvent(eventID string) (TurnEvent, error)
 	Count() int
 }
 
@@ -50,4 +53,15 @@ func (r *MemoryRepository) Count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.events)
+}
+
+// GetEvent 按 event_id 读取已保存(已脱敏)的事件,供候选提炼 worker 使用。
+func (r *MemoryRepository) GetEvent(eventID string) (TurnEvent, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	event, ok := r.events[eventID]
+	if !ok {
+		return TurnEvent{}, ErrEventNotFound
+	}
+	return event, nil
 }

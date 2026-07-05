@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os/signal"
 	"strings"
 	"syscall"
 
 	"memory-os/internal/archive"
+	"memory-os/internal/candidatememory"
 	"memory-os/internal/config"
 	"memory-os/internal/db"
+	"memory-os/internal/eventlog"
 	"memory-os/internal/jobs"
 	"memory-os/internal/llm"
 	"memory-os/internal/logger"
@@ -54,6 +57,33 @@ var newRAGIndexStore = func(ctx context.Context, cfg config.Config, pool *pgxpoo
 }
 var newRAGIndexWorker = func(store rag.Store) *jobs.RAGIndexWorker {
 	return jobs.NewRAGIndexWorker(rag.NewService(store))
+}
+
+// eventlogCandidateLoader 把候选任务转换为提炼请求:从 eventlog 加载已保存(已脱敏)事件。
+type eventlogCandidateLoader struct {
+	eventlog eventlog.Service
+}
+
+func (l eventlogCandidateLoader) LoadExtractionRequest(ctx context.Context, job candidatememory.Job) (candidatememory.ExtractionRequest, error) {
+	event, err := l.eventlog.GetEvent(job.SourceEventID)
+	if err != nil {
+		return candidatememory.ExtractionRequest{}, err
+	}
+	payload, _ := json.Marshal(event.Payload)
+	return candidatememory.ExtractionRequest{
+		OrgID:     event.Actor.OrgID,
+		ProjectID: event.Actor.ProjectID,
+		UserID:    event.Actor.UserID,
+		AgentID:   event.Actor.AgentID,
+		ThreadID:  event.ThreadID,
+		SessionID: event.SessionID,
+		SourceKey: job.SourceKey,
+		Events: []candidatememory.ExtractionEvent{{
+			EventID: event.EventID,
+			Type:    string(event.Type),
+			Payload: payload,
+		}},
+	}, nil
 }
 
 func main() {
@@ -105,6 +135,8 @@ func buildWorker(cfg config.Config) (*jobs.Runner, error) {
 	var archiveQueue jobs.ArchiveQueue
 	var ragIndexWorker *jobs.RAGIndexWorker
 	var ragIndexQueue jobs.RAGIndexQueue
+	var candidateWorker *jobs.CandidateMemoryWorker
+	var candidateQueue jobs.CandidateMemoryQueue
 	var cleanup func()
 	if cfg.PostgresDSN != "" {
 		pool, err := newPostgresPool(context.Background(), cfg.PostgresDSN)
@@ -127,8 +159,19 @@ func buildWorker(cfg config.Config) (*jobs.Runner, error) {
 		archiveQueue = newArchiveQueue(pool)
 		ragIndexWorker = newRAGIndexWorker(ragIndexStore)
 		cleanup = func() { closePostgresPool(pool) }
+
+		// 候选记忆链路(Phase 4):queue 始终装配(memory-api enqueue 用),worker 需 LLM。
+		candidateRepo := candidatememory.NewPGRepository(pool)
+		candidateQueue = jobs.NewPGCandidateMemoryQueue(candidateRepo, jobs.PGCandidateMemoryQueueOptions{WorkerID: "memory-worker"})
+		if llmClient, llmErr := llm.NewOpenAICompatible(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, EmbeddingModel: cfg.EmbeddingModel}); llmErr == nil {
+			extractor := candidatememory.NewLLMExtractor(llmClient).WithModel(cfg.LLMModel)
+			candidateService := candidatememory.NewService(candidateRepo, candidatememory.RuleScorer{})
+			eventLoader := eventlogCandidateLoader{eventlog: eventlog.NewService(eventlog.NewPGRepository(pool), eventlog.SanitizerOptions{MaxTurnEventBytes: 256 * 1024, MaxToolOutputBytes: 64 * 1024})}
+			worker := jobs.NewCandidateMemoryWorker(extractor, candidatememory.NewRouter(nil), candidateService, candidateRepo, eventLoader)
+			candidateWorker = &worker
+		}
 	}
-	runner := jobs.NewRunner(jobs.Options{Concurrency: 1, ArchiveWorker: archiveWorker, ArchiveQueue: archiveQueue, RAGIndexWorker: ragIndexWorker, RAGIndexQueue: ragIndexQueue, Cleanup: cleanup})
+	runner := jobs.NewRunner(jobs.Options{Concurrency: 1, ArchiveWorker: archiveWorker, ArchiveQueue: archiveQueue, RAGIndexWorker: ragIndexWorker, RAGIndexQueue: ragIndexQueue, CandidateWorker: candidateWorker, CandidateQueue: candidateQueue, Cleanup: cleanup})
 	return &runner, nil
 }
 

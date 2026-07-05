@@ -19,6 +19,7 @@ import (
 	"memory-os/internal/audit"
 	"memory-os/internal/auth"
 	"memory-os/internal/buildinfo"
+	"memory-os/internal/candidatememory"
 	"memory-os/internal/eventlog"
 	"memory-os/internal/health"
 	"memory-os/internal/hotmemory"
@@ -35,25 +36,31 @@ var devEventLogService = eventlog.NewService(eventlog.NewMemoryRepository(), eve
 var defaultSetupCodes = newMemorySetupCodeStore(10 * time.Minute)
 
 type RouterOptions struct {
-	HealthService       health.Service
-	AppEnv              string
-	EnableDevEndpoints  bool
-	AuthService         auth.Service
-	TenantService       tenant.Service
-	RetrievalService    retrieval.Service
-	RetrievalAccessLog  retrieval.AccessLogReader
-	HotMemoryService    hotmemory.Service
-	EventLogService     eventlog.Service
-	AuditService        audit.Service
-	SecretVault         secret.Vault
-	ArchiveService      archive.Service
-	ArchiveQueue        archiveEnqueuer
-	ArchiveIndexQueue   archiveIndexQueue
-	QdrantStatusService qdrant.StatusService
+	HealthService          health.Service
+	AppEnv                 string
+	EnableDevEndpoints     bool
+	AuthService            auth.Service
+	TenantService          tenant.Service
+	RetrievalService       retrieval.Service
+	RetrievalAccessLog     retrieval.AccessLogReader
+	HotMemoryService       hotmemory.Service
+	EventLogService        eventlog.Service
+	AuditService           audit.Service
+	SecretVault            secret.Vault
+	ArchiveService         archive.Service
+	ArchiveQueue           archiveEnqueuer
+	CandidateQueue         candidateEnqueuer
+	LegacyTurnEventArchive bool
+	ArchiveIndexQueue      archiveIndexQueue
+	QdrantStatusService    qdrant.StatusService
 }
 
 type archiveEnqueuer interface {
 	Enqueue(ctx context.Context, job jobs.ArchiveJob) error
+}
+
+type candidateEnqueuer interface {
+	Enqueue(ctx context.Context, job candidatememory.Job) error
 }
 
 type archiveIndexEnqueuer interface {
@@ -90,7 +97,7 @@ func RegisterRoutes(engine *route.Engine, options RouterOptions) {
 	if !eventLogService.Configured() {
 		eventLogService = devEventLogService
 	}
-	engine.POST("/memory/turn-event", TurnEventHandler(eventLogService, options.AuthService, options.TenantService, options.ArchiveQueue))
+	engine.POST("/memory/turn-event", TurnEventHandler(eventLogService, options.AuthService, options.TenantService, options.ArchiveQueue, options.CandidateQueue, options.LegacyTurnEventArchive))
 	engine.POST("/memory/auth/login-password", PasswordLoginHandler(options.AuthService, options.TenantService, options.AuditService))
 	engine.POST("/memory/search", MemorySearchHandler(options.AuthService, options.TenantService, options.RetrievalService))
 	engine.POST("/memory/archive/create", ArchiveCreateHandler(options.ArchiveService, options.AuthService, options.TenantService))
@@ -776,7 +783,7 @@ type turnEventRequest struct {
 	Event     eventlog.TurnEvent `json:"event"`
 }
 
-func TurnEventHandler(service eventlog.Service, authService auth.Service, tenantService tenant.Service, archiveQueue archiveEnqueuer) app.HandlerFunc {
+func TurnEventHandler(service eventlog.Service, authService auth.Service, tenantService tenant.Service, archiveQueue archiveEnqueuer, candidateQueue candidateEnqueuer, legacyArchive bool) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var request turnEventRequest
 		if err := c.BindAndValidate(&request); err != nil {
@@ -831,10 +838,27 @@ func TurnEventHandler(service eventlog.Service, authService auth.Service, tenant
 			c.JSON(consts.StatusBadRequest, map[string]string{"error": "turn_event_rejected", "message": err.Error()})
 			return
 		}
-		if archiveQueue != nil && !result.Deduped {
+		if result.Deduped {
+			c.JSON(consts.StatusOK, result)
+			return
+		}
+		// LEGACY_TURN_EVENT_ARCHIVE=true:保留旧 per-turn archive 自动入库(兼容)
+		if legacyArchive && archiveQueue != nil {
 			if err := archiveQueue.Enqueue(ctx, archiveJobFromTurnEvent(request.RequestID, result.Event)); err != nil {
 				c.JSON(consts.StatusInternalServerError, map[string]string{"error": "archive_job_enqueue_failed"})
 				return
+			}
+			c.JSON(consts.StatusOK, result)
+			return
+		}
+		// 默认链路:对触发事件类型 enqueue 候选提炼任务(Phase 4 worker 消费)。
+		// source_key 缺失则跳过,不写无归属候选,event 已入库 eventlog。
+		if candidateQueue != nil && shouldEnqueueCandidate(result.Event.Type) {
+			if job, ok := candidateJobFromTurnEvent(request, result.Event); ok {
+				if err := candidateQueue.Enqueue(ctx, job); err != nil {
+					c.JSON(consts.StatusInternalServerError, map[string]string{"error": "candidate_job_enqueue_failed"})
+					return
+				}
 			}
 		}
 		c.JSON(consts.StatusOK, result)
@@ -886,6 +910,37 @@ func archiveJobFromTurnEvent(requestID string, event eventlog.TurnEvent) jobs.Ar
 		CreatedAt: event.CreatedAt,
 		Events:    []eventlog.TurnEvent{event},
 	}
+}
+
+// shouldEnqueueCandidate 判断事件类型是否触发候选提炼。
+// 触发类型:assistant_final / turn_completed / turn_failed / manual_archive_request。
+func shouldEnqueueCandidate(eventType eventlog.EventType) bool {
+	switch eventType {
+	case eventlog.EventAssistantFinal, eventlog.EventTurnCompleted, eventlog.EventTurnFailed, eventlog.EventManualArchive:
+		return true
+	}
+	return false
+}
+
+// candidateJobFromTurnEvent 构造候选提炼任务。
+// source_key 优先取 workspace 显式值,其次从 git_remote 解析;缺失则返回 ok=false,不写无归属候选(硬规则 4)。
+func candidateJobFromTurnEvent(request turnEventRequest, event eventlog.TurnEvent) (candidatememory.Job, bool) {
+	identity := request.Workspace
+	if identity.SourceKey == "" {
+		if resolved, err := workspace.Resolve(identity); err == nil {
+			identity = resolved
+		}
+	}
+	if identity.SourceKey == "" {
+		return candidatememory.Job{}, false
+	}
+	return candidatememory.Job{
+		IdempotencyKey: fmt.Sprintf("candidate:%s:%s:%s:extract", event.Actor.ProjectID, identity.SourceKey, event.EventID),
+		OrgID:          event.Actor.OrgID,
+		ProjectID:      event.Actor.ProjectID,
+		SourceKey:      identity.SourceKey,
+		SourceEventID:  event.EventID,
+	}, true
 }
 
 func bearerToken(c *app.RequestContext) string {

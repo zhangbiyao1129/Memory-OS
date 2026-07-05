@@ -11,6 +11,7 @@ import (
 	"memory-os/internal/archive"
 	"memory-os/internal/audit"
 	"memory-os/internal/auth"
+	"memory-os/internal/candidatememory"
 	"memory-os/internal/config"
 	"memory-os/internal/db"
 	"memory-os/internal/eventlog"
@@ -174,7 +175,7 @@ var newProductionHotMemory = func(cfg config.Config, pool *pgxpool.Pool) (hotmem
 }
 
 func routerOptions(cfg config.Config, healthService health.Service, pool *pgxpool.Pool) (httpapi.RouterOptions, error) {
-	options := httpapi.RouterOptions{HealthService: healthService, AppEnv: cfg.AppEnv, EnableDevEndpoints: cfg.EnableDevEndpoints}
+	options := httpapi.RouterOptions{HealthService: healthService, AppEnv: cfg.AppEnv, EnableDevEndpoints: cfg.EnableDevEndpoints, LegacyTurnEventArchive: cfg.LegacyTurnEventArchive}
 	if pool == nil {
 		return options, nil
 	}
@@ -205,6 +206,8 @@ func routerOptions(cfg config.Config, healthService health.Service, pool *pgxpoo
 	options.SecretVault = secretVault
 	options.ArchiveQueue = jobs.NewPGArchiveQueue(pool, jobs.PGArchiveQueueOptions{WorkerID: "memory-api"})
 	options.ArchiveIndexQueue = jobs.NewPGArchiveIndexQueue(pool, jobs.PGArchiveIndexQueueOptions{WorkerID: "memory-api"})
+	candidateRepo := candidatememory.NewPGRepository(pool)
+	options.CandidateQueue = jobs.NewPGCandidateMemoryQueue(candidateRepo, jobs.PGCandidateMemoryQueueOptions{WorkerID: "memory-api"})
 	qdrantClient, err := qdrant.NewClient(cfg.QdrantURL)
 	if err != nil {
 		return httpapi.RouterOptions{}, err

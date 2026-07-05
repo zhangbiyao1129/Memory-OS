@@ -21,6 +21,7 @@ import (
 	"memory-os/internal/archive"
 	"memory-os/internal/audit"
 	"memory-os/internal/auth"
+	"memory-os/internal/candidatememory"
 	"memory-os/internal/eventlog"
 	"memory-os/internal/health"
 	"memory-os/internal/hotmemory"
@@ -316,7 +317,7 @@ func TestTurnEventEndpointAcceptsPATWorkspaceIdentity(t *testing.T) {
 	}
 	queue := &fakeArchiveQueue{}
 	eventService := eventlog.NewService(eventlog.NewMemoryRepository(), eventlog.SanitizerOptions{})
-	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), AuthService: authService, TenantService: tenantService, EventLogService: eventService, ArchiveQueue: queue})
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), AuthService: authService, TenantService: tenantService, EventLogService: eventService, ArchiveQueue: queue, LegacyTurnEventArchive: true})
 
 	body := `{"request_id":"request_workspace_1","workspace":{"git_remote":"git@gitlab.example.com:team/memory-os.git","git_root":"/work/memory-os","cwd":"/work/memory-os","git_branch":"main"},"event":{"version":"v1","event_id":"event_workspace_1","turn_id":"turn_workspace_1","thread_id":"thread_workspace_1","session_id":"session_workspace_1","type":"user_message","created_at":"2026-07-01T00:00:00Z","actor":{"agent_id":"claude-code"},"payload":{"text":"hello workspace"}}}`
 	response := ut.PerformRequest(h.Engine, "POST", "/memory/turn-event", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + token})
@@ -353,11 +354,11 @@ func TestTenantProjectResponseIncludesWorkspaceSourceMetadata(t *testing.T) {
 	}
 }
 
-func TestTurnEventEndpointEnqueuesArchiveJob(t *testing.T) {
+func TestTurnEventEndpointLegacyModeEnqueuesArchiveJob(t *testing.T) {
 	h := server.New(server.WithHostPorts("127.0.0.1:0"))
 	queue := &fakeArchiveQueue{}
 	eventService := eventlog.NewService(eventlog.NewMemoryRepository(), eventlog.SanitizerOptions{})
-	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), EventLogService: eventService, ArchiveQueue: queue})
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), EventLogService: eventService, ArchiveQueue: queue, LegacyTurnEventArchive: true})
 
 	body := `{"request_id":"request_1","event":{"version":"v1","event_id":"event_1","turn_id":"turn_1","thread_id":"thread_1","session_id":"session_1","type":"user_message","created_at":"2026-07-01T00:00:00Z","actor":{"user_id":"user_1","org_id":"org_1","project_id":"project_1","agent_id":"codex"},"payload":{"text":"token sk-test-redacted-example"}}}`
 	response := ut.PerformRequest(h.Engine, "POST", "/memory/turn-event", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"})
@@ -379,11 +380,11 @@ func TestTurnEventEndpointEnqueuesArchiveJob(t *testing.T) {
 	}
 }
 
-func TestTurnEventEndpointDoesNotEnqueueDuplicateArchiveJob(t *testing.T) {
+func TestTurnEventEndpointLegacyModeDoesNotEnqueueDuplicateArchiveJob(t *testing.T) {
 	h := server.New(server.WithHostPorts("127.0.0.1:0"))
 	queue := &fakeArchiveQueue{}
 	eventService := eventlog.NewService(eventlog.NewMemoryRepository(), eventlog.SanitizerOptions{})
-	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), EventLogService: eventService, ArchiveQueue: queue})
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), EventLogService: eventService, ArchiveQueue: queue, LegacyTurnEventArchive: true})
 
 	body := `{"request_id":"request_1","event":{"version":"v1","event_id":"event_1","turn_id":"turn_1","thread_id":"thread_1","session_id":"session_1","type":"user_message","created_at":"2026-07-01T00:00:00Z","actor":{"user_id":"user_1","org_id":"org_1","project_id":"project_1","agent_id":"codex"},"payload":{"text":"hello"}}}`
 	first := ut.PerformRequest(h.Engine, "POST", "/memory/turn-event", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"})
@@ -415,6 +416,103 @@ type fakeArchiveIndexQueue struct {
 func (q *fakeArchiveIndexQueue) Enqueue(ctx context.Context, job jobs.RAGIndexJob) error {
 	q.jobs = append(q.jobs, job)
 	return nil
+}
+
+type fakeCandidateQueue struct {
+	jobs []candidatememory.Job
+}
+
+func (q *fakeCandidateQueue) Enqueue(ctx context.Context, job candidatememory.Job) error {
+	q.jobs = append(q.jobs, job)
+	return nil
+}
+
+// 默认 LegacyTurnEventArchive=false:不再自动 enqueue archive job(Phase 2 新默认语义)。
+func TestTurnEventEndpointDefaultDoesNotEnqueueArchiveJob(t *testing.T) {
+	h := server.New(server.WithHostPorts("127.0.0.1:0"))
+	archiveQueue := &fakeArchiveQueue{}
+	candidateQueue := &fakeCandidateQueue{}
+	eventService := eventlog.NewService(eventlog.NewMemoryRepository(), eventlog.SanitizerOptions{})
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), EventLogService: eventService, ArchiveQueue: archiveQueue, CandidateQueue: candidateQueue})
+
+	body := `{"request_id":"r1","workspace":{"source_key":"github.com/acme/web"},"event":{"version":"v1","event_id":"e1","turn_id":"t1","thread_id":"th1","session_id":"s1","type":"assistant_final","created_at":"2026-07-01T00:00:00Z","actor":{"user_id":"u1","org_id":"org_1","project_id":"project_1","agent_id":"codex"},"payload":{"text":"done"}}}`
+	response := ut.PerformRequest(h.Engine, "POST", "/memory/turn-event", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"})
+
+	assert.DeepEqual(t, 200, response.Code)
+	if len(archiveQueue.jobs) != 0 {
+		t.Fatalf("默认不应 enqueue archive job,得到 %d", len(archiveQueue.jobs))
+	}
+}
+
+// 默认链路:触发事件类型(assistant_final)+ 有效 source_key → enqueue candidate job,idempotency_key 符合规范。
+func TestTurnEventEndpointDefaultEnqueuesCandidateJob(t *testing.T) {
+	h := server.New(server.WithHostPorts("127.0.0.1:0"))
+	candidateQueue := &fakeCandidateQueue{}
+	eventService := eventlog.NewService(eventlog.NewMemoryRepository(), eventlog.SanitizerOptions{})
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), EventLogService: eventService, CandidateQueue: candidateQueue})
+
+	body := `{"request_id":"r1","workspace":{"source_key":"github.com/acme/web"},"event":{"version":"v1","event_id":"e1","turn_id":"t1","thread_id":"th1","session_id":"s1","type":"assistant_final","created_at":"2026-07-01T00:00:00Z","actor":{"user_id":"u1","org_id":"org_1","project_id":"project_1","agent_id":"codex"},"payload":{"text":"done"}}}`
+	response := ut.PerformRequest(h.Engine, "POST", "/memory/turn-event", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"})
+
+	assert.DeepEqual(t, 200, response.Code)
+	if len(candidateQueue.jobs) != 1 {
+		t.Fatalf("应 enqueue 1 个 candidate job,得到 %d", len(candidateQueue.jobs))
+	}
+	job := candidateQueue.jobs[0]
+	if job.IdempotencyKey != "candidate:project_1:github.com/acme/web:e1:extract" {
+		t.Fatalf("idempotency_key 不正确: %s", job.IdempotencyKey)
+	}
+	if job.SourceKey != "github.com/acme/web" || job.SourceEventID != "e1" || job.OrgID != "org_1" || job.ProjectID != "project_1" {
+		t.Fatalf("candidate job 字段不正确: %+v", job)
+	}
+}
+
+// 缺 source_key(workspace 无 source_key 且无 git_remote 可解析)→ 不写无归属候选,event 仍入库。
+func TestTurnEventEndpointCandidateJobRequiresSourceKey(t *testing.T) {
+	h := server.New(server.WithHostPorts("127.0.0.1:0"))
+	candidateQueue := &fakeCandidateQueue{}
+	eventService := eventlog.NewService(eventlog.NewMemoryRepository(), eventlog.SanitizerOptions{})
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), EventLogService: eventService, CandidateQueue: candidateQueue})
+
+	body := `{"request_id":"r2","workspace":{},"event":{"version":"v1","event_id":"e2","turn_id":"t2","thread_id":"th2","session_id":"s2","type":"assistant_final","created_at":"2026-07-01T00:00:00Z","actor":{"user_id":"u1","org_id":"org_1","project_id":"project_1","agent_id":"codex"},"payload":{"text":"done"}}}`
+	response := ut.PerformRequest(h.Engine, "POST", "/memory/turn-event", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"})
+
+	assert.DeepEqual(t, 200, response.Code)
+	if len(candidateQueue.jobs) != 0 {
+		t.Fatalf("缺 source_key 不应 enqueue candidate,得到 %d", len(candidateQueue.jobs))
+	}
+}
+
+// 重复 event(deduped)→ 不重复 enqueue candidate。
+func TestTurnEventEndpointDoesNotEnqueueDuplicateCandidateJob(t *testing.T) {
+	h := server.New(server.WithHostPorts("127.0.0.1:0"))
+	candidateQueue := &fakeCandidateQueue{}
+	eventService := eventlog.NewService(eventlog.NewMemoryRepository(), eventlog.SanitizerOptions{})
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), EventLogService: eventService, CandidateQueue: candidateQueue})
+
+	body := `{"request_id":"r3","workspace":{"source_key":"github.com/acme/web"},"event":{"version":"v1","event_id":"e3","turn_id":"t3","thread_id":"th3","session_id":"s3","type":"turn_completed","created_at":"2026-07-01T00:00:00Z","actor":{"user_id":"u1","org_id":"org_1","project_id":"project_1","agent_id":"codex"},"payload":{"text":"done"}}}`
+	ut.PerformRequest(h.Engine, "POST", "/memory/turn-event", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"})
+	ut.PerformRequest(h.Engine, "POST", "/memory/turn-event", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"})
+
+	if len(candidateQueue.jobs) != 1 {
+		t.Fatalf("重复 event 不应重复 enqueue candidate,得到 %d", len(candidateQueue.jobs))
+	}
+}
+
+// 非触发事件类型(user_message)→ 不 enqueue candidate。
+func TestTurnEventEndpointSkipsCandidateForNonTriggerType(t *testing.T) {
+	h := server.New(server.WithHostPorts("127.0.0.1:0"))
+	candidateQueue := &fakeCandidateQueue{}
+	eventService := eventlog.NewService(eventlog.NewMemoryRepository(), eventlog.SanitizerOptions{})
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), EventLogService: eventService, CandidateQueue: candidateQueue})
+
+	body := `{"request_id":"r4","workspace":{"source_key":"github.com/acme/web"},"event":{"version":"v1","event_id":"e4","turn_id":"t4","thread_id":"th4","session_id":"s4","type":"user_message","created_at":"2026-07-01T00:00:00Z","actor":{"user_id":"u1","org_id":"org_1","project_id":"project_1","agent_id":"codex"},"payload":{"text":"hi"}}}`
+	response := ut.PerformRequest(h.Engine, "POST", "/memory/turn-event", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"})
+
+	assert.DeepEqual(t, 200, response.Code)
+	if len(candidateQueue.jobs) != 0 {
+		t.Fatalf("非触发类型不应 enqueue candidate,得到 %d", len(candidateQueue.jobs))
+	}
 }
 
 func (q *fakeArchiveIndexQueue) RetryFailed(ctx context.Context, archiveID string, indexGeneration int) (int64, error) {

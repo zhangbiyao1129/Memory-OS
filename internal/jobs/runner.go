@@ -25,13 +25,15 @@ type RAGIndexQueue interface {
 
 // Options 保存 worker 运行参数。
 type Options struct {
-	Concurrency    int
-	ArchiveWorker  *ArchiveWorker
-	ArchiveQueue   ArchiveQueue
-	RAGIndexWorker *RAGIndexWorker
-	RAGIndexQueue  RAGIndexQueue
-	PollInterval   time.Duration
-	Cleanup        func()
+	Concurrency     int
+	ArchiveWorker   *ArchiveWorker
+	ArchiveQueue    ArchiveQueue
+	RAGIndexWorker  *RAGIndexWorker
+	RAGIndexQueue   RAGIndexQueue
+	CandidateWorker *CandidateMemoryWorker
+	CandidateQueue  CandidateMemoryQueue
+	PollInterval    time.Duration
+	Cleanup         func()
 }
 
 // Runner 是 Phase 1 的后台任务骨架，后续承载 archive/index/hotmemory jobs。
@@ -70,6 +72,9 @@ func (r Runner) Run(ctx context.Context) error {
 	if r.options.RAGIndexWorker != nil && r.options.RAGIndexQueue != nil {
 		loops = append(loops, r.runRAGIndexLoop)
 	}
+	if r.options.CandidateWorker != nil && r.options.CandidateQueue != nil {
+		loops = append(loops, r.runCandidateLoop)
+	}
 	if len(loops) > 0 {
 		return runLoops(ctx, loops)
 	}
@@ -91,6 +96,14 @@ func (r Runner) RAGIndexWorkerConfigured() bool {
 
 func (r Runner) RAGIndexQueueConfigured() bool {
 	return r.options.RAGIndexQueue != nil
+}
+
+func (r Runner) CandidateWorkerConfigured() bool {
+	return r.options.CandidateWorker != nil
+}
+
+func (r Runner) CandidateQueueConfigured() bool {
+	return r.options.CandidateQueue != nil
 }
 
 func (r Runner) runArchiveLoop(ctx context.Context) error {
@@ -152,6 +165,38 @@ func (r Runner) runRAGIndexLoop(ctx context.Context) error {
 			continue
 		}
 		if err := r.options.RAGIndexQueue.Complete(ctx, job, result); err != nil {
+			return err
+		}
+	}
+}
+
+func (r Runner) runCandidateLoop(ctx context.Context) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		job, ok, err := r.options.CandidateQueue.Lease(ctx)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			if err := waitForNextPoll(ctx, r.options.PollInterval); err != nil {
+				return nil
+			}
+			continue
+		}
+
+		result, err := r.options.CandidateWorker.Handle(job)
+		if err != nil {
+			if failErr := r.options.CandidateQueue.Fail(ctx, job, err); failErr != nil {
+				return failErr
+			}
+			continue
+		}
+		if err := r.options.CandidateQueue.Complete(ctx, job, result); err != nil {
 			return err
 		}
 	}

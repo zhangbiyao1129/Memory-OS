@@ -2,6 +2,7 @@ package eventlog
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/jackc/pgx/v5"
@@ -86,4 +87,36 @@ func (r *PGRepository) Count() int {
 		return 0
 	}
 	return count
+}
+
+// GetEvent 按 event_id 读取已保存事件(join turn_events + turn_event_payloads),返回已脱敏事件。
+func (r *PGRepository) GetEvent(eventID string) (TurnEvent, error) {
+	if r == nil || r.pool == nil {
+		return TurnEvent{}, errors.New("postgres pool is not configured")
+	}
+	var event TurnEvent
+	var eventType string
+	var payload []byte
+	err := r.pool.QueryRow(context.Background(), `
+SELECT e.event_id, e.turn_id, e.thread_id, e.session_id, e.event_type,
+       e.user_id, e.org_id, e.project_id, e.agent_id, e.created_at, p.payload
+FROM turn_events e
+LEFT JOIN turn_event_payloads p ON p.event_id = e.event_id
+WHERE e.event_id = $1`, eventID).Scan(
+		&event.EventID, &event.TurnID, &event.ThreadID, &event.SessionID, &eventType,
+		&event.Actor.UserID, &event.Actor.OrgID, &event.Actor.ProjectID, &event.Actor.AgentID, &event.CreatedAt, &payload,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return TurnEvent{}, ErrEventNotFound
+		}
+		return TurnEvent{}, err
+	}
+	event.Type = EventType(eventType)
+	if len(payload) > 0 {
+		if err := json.Unmarshal(payload, &event.Payload); err != nil {
+			return TurnEvent{}, err
+		}
+	}
+	return event, nil
 }
