@@ -26,6 +26,7 @@ import (
 	"memory-os/internal/health"
 	"memory-os/internal/hotmemory"
 	"memory-os/internal/jobs"
+	"memory-os/internal/memorystats"
 	"memory-os/internal/qdrant"
 	"memory-os/internal/rag"
 	"memory-os/internal/retrieval"
@@ -2601,4 +2602,53 @@ func fixtureRetrievalService() retrieval.Service {
 	_ = ragService.Index(rag.IndexRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Chunks: []archive.Chunk{{ChunkID: "chunk_old", ArchiveID: "archive_1", IndexGeneration: 1, Content: "old deploy API note", ContentHash: "hash_old"}}})
 
 	return retrieval.NewService(retrieval.Options{HotMemory: hot, ArchiveRAG: ragService, Reranker: retrieval.FailingReranker{}, AccessLog: retrieval.NewMemoryAccessLog()})
+}
+
+func TestMemoryLifecycleStatsRequiresPATAndConfiguredService(t *testing.T) {
+	h := server.New(server.WithHostPorts("127.0.0.1:0"))
+	authService := auth.NewService(auth.NewMemoryRepository())
+	tenantService := tenant.NewService(tenant.NewMemoryRepository())
+	RegisterRoutes(h.Engine, RouterOptions{
+		HealthService: health.NewService(nil),
+		AuthService:   authService,
+		TenantService: tenantService,
+	})
+	response := ut.PerformRequest(h.Engine, "POST", "/memory/stats/lifecycle", &ut.Body{Body: strings.NewReader(`{"org_id":"org_1","project_id":"project_1"}`), Len: len(`{"org_id":"org_1","project_id":"project_1"}`)}, ut.Header{Key: "Content-Type", Value: "application/json"})
+	if response.Code != 503 {
+		t.Fatalf("status = %d, want 503", response.Code)
+	}
+}
+
+func TestMemoryLifecycleStatsReturnsSnapshotForCurrentProject(t *testing.T) {
+	h := server.New(server.WithHostPorts("127.0.0.1:0"))
+	authService := auth.NewService(auth.NewMemoryRepository())
+	token, _, err := authService.CreatePAT("user_1", "reader", []string{"memory:read"}, time.Hour)
+	if err != nil {
+		t.Fatalf("CreatePAT() error = %v", err)
+	}
+	tenantService := archiveTenantService(t, tenant.RoleOwner)
+	repo := memorystats.NewMemoryRepository(memorystats.Snapshot{
+		Archives:    memorystats.AssetStats{Total: 2, ByStatus: map[string]int64{"active": 2}},
+		HotMemories: memorystats.HotMemoryStats{Total: 1, ByStatus: map[string]int64{"active": 1}},
+		Topics:      memorystats.TopicStats{Total: 3, ReadyToCompose: 1, Composed: 1, Open: 1},
+	})
+	RegisterRoutes(h.Engine, RouterOptions{
+		HealthService:      health.NewService(nil),
+		AuthService:        authService,
+		TenantService:      tenantService,
+		MemoryStatsService: memorystats.NewService(repo),
+	})
+
+	body := `{"org_id":"org_1","project_id":"project_1"}`
+	response := ut.PerformRequest(h.Engine, "POST", "/memory/stats/lifecycle", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + token})
+	assert.DeepEqual(t, 200, response.Code)
+	if !strings.Contains(response.Body.String(), `"total":2`) || !strings.Contains(response.Body.String(), `"ready_to_compose":1`) {
+		t.Fatalf("memory stats response mismatch: %s", response.Body.String())
+	}
+	if repo.LastFilter.UserID != "user_1" || repo.LastFilter.OrgID != "org_1" || repo.LastFilter.ProjectID != "project_1" {
+		t.Fatalf("repo filter = %#v, want PAT subject and requested project", repo.LastFilter)
+	}
+	if len(repo.LastFilter.PermissionLabels) == 0 {
+		t.Fatalf("repo filter permission labels empty: %#v", repo.LastFilter)
+	}
 }

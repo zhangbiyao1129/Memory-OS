@@ -24,6 +24,7 @@ import (
 	"memory-os/internal/health"
 	"memory-os/internal/hotmemory"
 	"memory-os/internal/jobs"
+	"memory-os/internal/memorystats"
 	"memory-os/internal/qdrant"
 	"memory-os/internal/rag"
 	"memory-os/internal/retrieval"
@@ -56,6 +57,7 @@ type RouterOptions struct {
 	LegacyTurnEventArchive bool
 	ArchiveIndexQueue      archiveIndexQueue
 	QdrantStatusService    qdrant.StatusService
+	MemoryStatsService     memorystats.Service
 }
 
 type archiveEnqueuer interface {
@@ -161,6 +163,7 @@ func RegisterRoutes(engine *route.Engine, options RouterOptions) {
 	engine.POST("/memory/audit/list", AuditListHandler(options.AuditService, options.AuthService, options.TenantService))
 	engine.POST("/memory/retrieval/access-log/list", RetrievalAccessLogListHandler(options.RetrievalAccessLog, options.AuthService, options.TenantService))
 	engine.POST("/memory/qdrant/status", QdrantStatusHandler(options.QdrantStatusService, options.AuthService))
+	engine.POST("/memory/stats/lifecycle", MemoryStatsHandler(options.MemoryStatsService, options.AuthService, options.TenantService))
 	if options.AppEnv == "development" && options.EnableDevEndpoints {
 		engine.POST("/dev/smoke/phase2", DevPhase2SmokeHandler())
 		engine.POST("/dev/smoke/archive", DevArchiveSmokeHandler())
@@ -209,6 +212,9 @@ func validateProductionRouterOptions(options RouterOptions) error {
 	}
 	if !options.QdrantStatusService.Configured() {
 		missing = append(missing, "qdrant_status")
+	}
+	if !options.MemoryStatsService.Configured() {
+		missing = append(missing, "memory_stats")
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("production router missing configured services: %s", strings.Join(missing, ", "))
@@ -334,6 +340,14 @@ func OpenAPIHandler() app.HandlerFunc {
 						"summary": "Get Qdrant collection and index job status",
 						"responses": map[string]any{
 							"200": map[string]any{"description": "Qdrant collection and index status"},
+						},
+					},
+				},
+				"/memory/stats/lifecycle": map[string]any{
+					"post": map[string]any{
+						"summary": "Get memory lifecycle statistics",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Memory lifecycle statistics"},
 						},
 					},
 				},
@@ -739,6 +753,40 @@ func OpenAPIHandler() app.HandlerFunc {
 				},
 			},
 		})
+	}
+}
+
+type memoryStatsRequest struct {
+	OrgID     string `json:"org_id"`
+	ProjectID string `json:"project_id"`
+}
+
+func MemoryStatsHandler(service memorystats.Service, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		if !service.Configured() {
+			c.JSON(consts.StatusServiceUnavailable, map[string]string{"error": "memory_stats_not_configured"})
+			return
+		}
+		var request memoryStatsRequest
+		if err := c.BindAndValidate(&request); err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_memory_stats_request"})
+			return
+		}
+		permissions, ok := authorizeProjectScope(c, authService, tenantService, request.OrgID, request.ProjectID, "memory:read", "", "memory_stats_forbidden")
+		if !ok {
+			return
+		}
+		snapshot, err := service.Snapshot(ctx, memorystats.Filter{
+			UserID:           permissions.UserID,
+			OrgID:            permissions.OrgID,
+			ProjectID:        permissions.ProjectID,
+			PermissionLabels: permissions.PermissionLabels,
+		})
+		if err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "memory_stats_rejected", "message": err.Error()})
+			return
+		}
+		c.JSON(consts.StatusOK, snapshot)
 	}
 }
 

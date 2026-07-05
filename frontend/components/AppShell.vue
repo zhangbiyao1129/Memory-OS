@@ -7,18 +7,9 @@ const loadingTenants = ref(false)
 const tenantError = ref('')
 const nav = [
   ['总览', '/'],
-  ['用户', '/users'],
-  ['组织', '/orgs'],
-  ['项目', '/projects'],
-  ['归档库', '/archive'],
-  ['热记忆', '/hot-memory'],
-  ['候选记忆', '/candidates'],
-  ['主题状态', '/topics'],
-  ['Secret Vault', '/secrets'],
-  ['Token', '/tokens'],
+  ['记忆', '/memory'],
+  ['检索', '/search'],
   ['日志', '/logs'],
-  ['Qdrant 状态', '/qdrant'],
-  ['检索测试', '/search-test'],
   ['高级设置', '/settings']
 ]
 
@@ -86,10 +77,10 @@ watch(() => context.orgId, async (_next, previous) => {
           <p class="text-xs uppercase tracking-[0.35em] text-orange-800">Memory OS</p>
           <h1 class="mt-2 text-3xl font-black tracking-tight">原生记忆控制台</h1>
         </NuxtLink>
-        <div class="mt-6 rounded-3xl bg-orange-50 p-4 text-sm text-orange-950">
-          <p class="text-xs font-black uppercase tracking-widest text-orange-800">工作空间自动识别</p>
-          <p class="mt-2 font-bold">{{ context.orgs[0]?.name || '我的 Memory OS' }}</p>
-          <p class="mt-1 text-xs text-orange-800">项目会在 Agent 写入时按目录 / Git 自动归类；需要治理时再到“项目”页查看和整理。</p>
+        <div class=”mt-6 rounded-3xl bg-orange-50 p-4 text-sm text-orange-950”>
+          <p class=”text-xs font-black uppercase tracking-widest text-orange-800”>当前记忆上下文</p>
+          <p class=”mt-2 font-bold”>{{ context.orgs[0]?.name || '我的 Memory OS' }}</p>
+          <p class=”mt-1 text-xs text-orange-800”>项目会在 Agent 写入时按目录 / Git 自动归类；日常使用只需要关注当前项目的记忆与检索。</p>
           <p v-if="loadingTenants" class="mt-2 rounded-2xl bg-white/70 p-2 text-xs text-orange-800">正在加载工作空间信息...</p>
           <p v-if="tenantError" class="rounded-2xl bg-red-50 p-2 text-xs text-red-700">{{ tenantError }}</p>
         </div>

@@ -60,7 +60,7 @@ onMounted(async () => {
   <AppShell>
     <div class="flex flex-wrap items-start justify-between gap-4">
       <div>
-        <h2 class="text-3xl font-black">Qdrant 索引状态</h2>
+        <h2 class="text-3xl font-black">索引诊断</h2>
         <p class="mt-2 text-stone-600">读取真实 Qdrant collection 与 PostgreSQL 索引任务统计，不再展示静态假数据。</p>
       </div>
       <button class="rounded-2xl border px-4 py-2 font-bold" :disabled="loading" @click="loadStatus">

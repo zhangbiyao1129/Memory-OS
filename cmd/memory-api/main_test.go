@@ -127,6 +127,9 @@ func TestRouterOptionsConfiguresCoreServicesWhenPostgresPoolExists(t *testing.T)
 	if !options.QdrantStatusService.Configured() {
 		t.Fatal("QdrantStatusService not configured")
 	}
+	if !options.MemoryStatsService.Configured() {
+		t.Fatal("MemoryStatsService not configured")
+	}
 	if options.AppEnv != "production" {
 		t.Fatalf("AppEnv = %q, want production", options.AppEnv)
 	}
@@ -176,6 +179,9 @@ func TestRouterOptionsLeavesAuthOpenForDevelopmentSmoke(t *testing.T) {
 	}
 	if options.QdrantStatusService.Configured() {
 		t.Fatal("QdrantStatusService configured in development smoke mode")
+	}
+	if options.MemoryStatsService.Configured() {
+		t.Fatal("MemoryStatsService configured in development smoke mode")
 	}
 }
 

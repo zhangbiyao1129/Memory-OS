@@ -21,6 +21,7 @@ import (
 	"memory-os/internal/jobs"
 	"memory-os/internal/llm"
 	"memory-os/internal/logger"
+	"memory-os/internal/memorystats"
 	"memory-os/internal/qdrant"
 	"memory-os/internal/rag"
 	"memory-os/internal/redis"
@@ -223,6 +224,7 @@ func routerOptions(cfg config.Config, healthService health.Service, pool *pgxpoo
 		Store:          qdrant.NewPGStatusStore(pool),
 		CollectionName: qdrant.DefaultCollectionName,
 	})
+	options.MemoryStatsService = memorystats.NewService(memorystats.NewPGRepository(pool))
 	return options, nil
 }
 

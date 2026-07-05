@@ -218,7 +218,7 @@ watch(() => [context.orgId, context.projectId, context.agentId, scope.value, sta
   <AppShell>
     <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div>
-        <h2 class="text-3xl font-black">Hot Memory 管理</h2>
+        <h2 class="text-3xl font-black">热记忆</h2>
         <p class="mt-2 text-stone-600">连接真实 <code>/memory/hot-memory/*</code> API，支持创建、提升、降权、标记使用和软删除。</p>
       </div>
       <button class="rounded-2xl border bg-white px-4 py-2 font-bold" :disabled="loading" @click="loadMemories">{{ loading ? '刷新中...' : '刷新' }}</button>

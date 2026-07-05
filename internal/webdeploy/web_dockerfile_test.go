@@ -198,9 +198,9 @@ func TestComposePassesProductionRetrievalEnvToMCP(t *testing.T) {
 }
 
 func TestSearchTestPageUsesAuthenticatedRuntimeContext(t *testing.T) {
-	content, err := os.ReadFile("../../frontend/pages/search-test.vue")
+	content, err := os.ReadFile("../../frontend/components/RagSearchWorkbench.vue")
 	if err != nil {
-		t.Fatalf("read search-test page: %v", err)
+		t.Fatalf("read RagSearchWorkbench component: %v", err)
 	}
 	page := string(content)
 
@@ -209,7 +209,7 @@ func TestSearchTestPageUsesAuthenticatedRuntimeContext(t *testing.T) {
 		"archive_index_generation: 2",
 	} {
 		if strings.Contains(page, forbidden) {
-			t.Fatalf("search test page must not hardcode production search context marker %q", forbidden)
+			t.Fatalf("RagSearchWorkbench must not hardcode production search context marker %q", forbidden)
 		}
 	}
 	for _, required := range []string{
@@ -219,15 +219,15 @@ func TestSearchTestPageUsesAuthenticatedRuntimeContext(t *testing.T) {
 		"context.projectId",
 	} {
 		if !strings.Contains(page, required) {
-			t.Fatalf("search test page must use authenticated runtime context marker %q", required)
+			t.Fatalf("RagSearchWorkbench must use authenticated runtime context marker %q", required)
 		}
 	}
 }
 
 func TestSearchTestPageDisplaysUnifiedRetrievalEvidence(t *testing.T) {
-	content, err := os.ReadFile("../../frontend/pages/search-test.vue")
+	content, err := os.ReadFile("../../frontend/components/RagSearchWorkbench.vue")
 	if err != nil {
-		t.Fatalf("read search-test page: %v", err)
+		t.Fatalf("read RagSearchWorkbench component: %v", err)
 	}
 	page := string(content)
 
@@ -245,7 +245,7 @@ func TestSearchTestPageDisplaysUnifiedRetrievalEvidence(t *testing.T) {
 		"<SourceRefList",
 	} {
 		if !strings.Contains(page, required) {
-			t.Fatalf("search test page must display unified retrieval evidence marker %q", required)
+			t.Fatalf("RagSearchWorkbench must display unified retrieval evidence marker %q", required)
 		}
 	}
 }
@@ -263,20 +263,22 @@ func TestDashboardPageUsesRealAPIStats(t *testing.T) {
 		"['Secret 引用', '6'",
 		"['Adapter', '5'",
 		"const stats = [",
+		"/memory/secrets/list",
+		"/memory/tokens/adapter/list",
+		"/memory/qdrant/status",
+		"Secret 引用",
+		"Adapter Token",
+		"Qdrant Points",
 	} {
 		if strings.Contains(page, forbidden) {
 			t.Fatalf("dashboard page must not keep static stats marker %q", forbidden)
 		}
 	}
 	for _, required := range []string{
-		"/memory/archive/list",
-		"/memory/hot-memory/list",
-		"/memory/secrets/list",
-		"/memory/tokens/adapter/list",
-		"/memory/qdrant/status",
-		"loadDashboardStats",
-		"dashboardStats",
-		"真实 API",
+		"useMemoryLifecycleStats",
+		"生命周期",
+		"候选状态",
+		"主题沉淀",
 	} {
 		if !strings.Contains(page, required) {
 			t.Fatalf("dashboard page must use real API stats marker %q", required)
@@ -436,18 +438,29 @@ func TestAppShellHidesGlobalContextSelectors(t *testing.T) {
 		"claude</option>",
 		"opencode</option>",
 		"hermes</option>",
-		"['权限', '/permissions']",
-		"['角色目录', '/roles']",
+		"['组织', '/orgs']",
+		"['用户', '/users']",
+		"['项目', '/projects']",
+		"['归档库', '/archive']",
+		"['热记忆', '/hot-memory']",
+		"['候选记忆', '/candidates']",
+		"['主题状态', '/topics']",
+		"['Secret Vault', '/secrets']",
+		"['Token', '/tokens']",
+		"['Qdrant 状态', '/qdrant']",
+		"['检索测试', '/search-test']",
 	} {
 		if strings.Contains(component, forbidden) {
 			t.Fatalf("AppShell must hide global workspace selector marker %q", forbidden)
 		}
 	}
 	for _, required := range []string{
-		"工作空间自动识别",
-		"项目会在 Agent 写入时按目录 / Git 自动归类",
-		"loadTenants",
+		"['总览', '/']",
+		"['记忆', '/memory']",
+		"['检索', '/search']",
+		"['日志', '/logs']",
 		"['高级设置', '/settings']",
+		"当前记忆上下文",
 	} {
 		if !strings.Contains(component, required) {
 			t.Fatalf("AppShell must explain automatic workspace context marker %q", required)
@@ -463,10 +476,17 @@ func TestSettingsPageCollectsAdvancedGovernanceMenus(t *testing.T) {
 	page := string(content)
 	for _, required := range []string{
 		"高级设置",
+		"/orgs",
+		"/users",
+		"/projects",
+		"/tokens",
 		"/permissions",
 		"/roles",
-		"成员权限",
-		"角色目录",
+		"/secrets",
+		"/qdrant",
+		"MCP 接入",
+		"Secret Vault",
+		"索引诊断",
 		"日常使用可以忽略",
 	} {
 		if !strings.Contains(page, required) {
@@ -870,12 +890,7 @@ func TestUsersPageUsesRealStatusGovernanceAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read users page: %v", err)
 	}
-	shellContent, err := os.ReadFile("../../frontend/components/AppShell.vue")
-	if err != nil {
-		t.Fatalf("read AppShell: %v", err)
-	}
 	page := string(content)
-	shell := string(shellContent)
 
 	for _, forbidden := range []string{
 		"user_1",
@@ -899,9 +914,6 @@ func TestUsersPageUsesRealStatusGovernanceAPI(t *testing.T) {
 		if !strings.Contains(page, required) {
 			t.Fatalf("users page must use real user governance marker %q", required)
 		}
-	}
-	if !strings.Contains(shell, "['用户', '/users']") {
-		t.Fatalf("AppShell must expose users page navigation")
 	}
 }
 
@@ -1225,5 +1237,48 @@ func findRepoRoot(t *testing.T) string {
 			t.Fatal("could not find repo root")
 		}
 		dir = parent
+	}
+}
+
+func TestMemoryPageCollectsLifecycleMenusAndCharts(t *testing.T) {
+	content, err := os.ReadFile("../../frontend/pages/memory/index.vue")
+	if err != nil {
+		t.Fatalf("read memory page: %v", err)
+	}
+	page := string(content)
+	for _, required := range []string{
+		"useMemoryLifecycleStats",
+		"生命周期",
+		"/archive",
+		"/hot-memory",
+		"/candidates",
+		"/topics",
+		"归档库",
+		"热记忆",
+		"候选记忆",
+		"主题沉淀",
+		"<BarChart",
+		"<StackedBar",
+		"<RingMeter",
+	} {
+		if !strings.Contains(page, required) {
+			t.Fatalf("memory page missing marker %q", required)
+		}
+	}
+}
+
+func TestSearchPageAndLegacySearchTestShareWorkbench(t *testing.T) {
+	searchPage, err := os.ReadFile("../../frontend/pages/search.vue")
+	if err != nil {
+		t.Fatalf("read search page: %v", err)
+	}
+	legacyPage, err := os.ReadFile("../../frontend/pages/search-test.vue")
+	if err != nil {
+		t.Fatalf("read legacy search-test page: %v", err)
+	}
+	for name, page := range map[string]string{"search": string(searchPage), "search-test": string(legacyPage)} {
+		if !strings.Contains(page, "<RagSearchWorkbench") {
+			t.Fatalf("%s page must render RagSearchWorkbench", name)
+		}
 	}
 }

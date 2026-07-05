@@ -76,7 +76,7 @@ watch(() => [context.orgId, context.projectId], () => {
   <AppShell>
     <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div>
-        <h2 class="text-3xl font-black">主题状态</h2>
+        <h2 class="text-3xl font-black">主题沉淀</h2>
         <p class="mt-2 text-stone-600">候选记忆按 source_key + thread_id 聚合的主题沉淀状态。</p>
       </div>
       <button class="rounded-2xl border bg-white px-4 py-2 font-bold" :disabled="loading" @click="loadTopics">{{ loading ? '刷新中...' : '刷新' }}</button>

@@ -155,7 +155,7 @@ watch(() => auth.isAuthenticated, () => loadTokens())
   <AppShell>
     <div class="flex flex-wrap items-start justify-between gap-4">
       <div>
-        <h2 class="text-3xl font-black">Token 管理</h2>
+        <h2 class="text-3xl font-black">MCP 接入</h2>
         <p class="mt-2 text-stone-600">
           创建一个通用 MCP Token，并生成一条单行安装命令。项目由工作目录 / Git 自动识别，Agent 只作为来源 metadata 记录；日常接入不需要单独复制 token。
         </p>
