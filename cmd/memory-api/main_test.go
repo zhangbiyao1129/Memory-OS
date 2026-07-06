@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -332,6 +333,14 @@ func (maintenanceRepoStub) UpdateRun(ctx context.Context, runID string, status c
 
 func (maintenanceRepoStub) GetRunningRun(ctx context.Context, orgID, projectID string) (*candidatememory.MaintenanceRun, error) {
 	return nil, nil
+}
+
+func (maintenanceRepoStub) UpdateStage(ctx context.Context, runID string, stage candidatememory.MaintenanceRunStage, totalCandidates int) error {
+	return nil
+}
+
+func (maintenanceRepoStub) MarkStaleRunningAsFailed(ctx context.Context, before time.Time) (int, error) {
+	return 0, nil
 }
 
 func secretVaultTestConfig() config.Config {

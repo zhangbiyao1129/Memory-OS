@@ -26,6 +26,43 @@ type Candidate = {
 
 type CandidateListResponse = { candidates: Candidate[] }
 
+type MaintenanceStatus = {
+  active: boolean
+  run_id: string
+  status: string
+  stage: string
+  progress_percent: number
+  total_candidates: number
+  processed: number
+  discarded: number
+  kept: number
+  composed: number
+  archive_id: string
+  summary: string
+  last_error: string
+  started_at: string
+  completed_at: string | null
+}
+
+/** 数字兜底,杜绝 undefined */
+function n(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+function stageLabel(stage: string): string {
+  const labels: Record<string, string> = {
+    queued: '排队中',
+    loading_candidates: '加载候选',
+    calling_llm: '模型处理中',
+    validating: '校验结果',
+    applying: '执行清洗',
+    composing: '沉淀归档',
+    done: '已完成',
+    failed: '失败'
+  }
+  return labels[stage] || stage
+}
+
 const loading = ref(false)
 const error = ref('')
 const success = ref('')
@@ -42,6 +79,10 @@ const cleaning = ref(false)
 const cleanSourceKey = ref('')
 const cleanThreadId = ref('')
 const { stats: lifecycleStats, loadStats: loadLifecycleStats } = useMemoryLifecycleStats()
+
+// 维护任务状态
+const maintenanceStatus = ref<MaintenanceStatus | null>(null)
+let pollTimer: ReturnType<typeof setInterval> | null = null
 
 const hasProjectContext = computed(() => Boolean(context.orgId && context.projectId))
 
@@ -90,6 +131,103 @@ function requestBody(extra: Record<string, unknown> = {}) {
     org_id: context.orgId,
     project_id: context.projectId,
     ...extra
+  }
+}
+
+// localStorage key
+function maintenanceKey(): string {
+  return `maintenance_run:${context.orgId}:${context.projectId}`
+}
+
+function saveRunID(runID: string) {
+  try {
+    localStorage.setItem(maintenanceKey(), runID)
+  } catch {}
+}
+
+function clearRunID() {
+  try {
+    localStorage.removeItem(maintenanceKey())
+  } catch {}
+}
+
+function loadSavedRunID(): string | null {
+  try {
+    return localStorage.getItem(maintenanceKey())
+  } catch {
+    return null
+  }
+}
+
+// 轮询维护状态
+function startPolling(runID?: string) {
+  stopPolling()
+  pollTimer = setInterval(async () => {
+    try {
+      const body: Record<string, unknown> = {
+        org_id: context.orgId,
+        project_id: context.projectId
+      }
+      if (runID) body.run_id = runID
+      const status = await request<MaintenanceStatus>('/memory/candidates/maintenance/status', {
+        method: 'POST',
+        body: requestBody(body)
+      })
+      maintenanceStatus.value = status
+      if (status.status === 'done') {
+        stopPolling()
+        clearRunID()
+        success.value = `清洗完成：处理 ${n(status.processed)} 条，丢弃 ${n(status.discarded)} 条，保留 ${n(status.kept)} 条，沉淀 ${n(status.composed)} 条。`
+        cleaning.value = false
+        await loadCandidates()
+        await loadLifecycleStats()
+      } else if (status.status === 'failed') {
+        stopPolling()
+        clearRunID()
+        error.value = status.last_error || '清洗失败'
+        cleaning.value = false
+      }
+    } catch {
+      // 轮询失败不停止,等待下次
+    }
+  }, 2000)
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+// 恢复已有任务
+async function restoreMaintenanceTask() {
+  const savedRunID = loadSavedRunID()
+  try {
+    const body: Record<string, unknown> = {
+      org_id: context.orgId,
+      project_id: context.projectId
+    }
+    if (savedRunID) body.run_id = savedRunID
+    const status = await request<MaintenanceStatus>('/memory/candidates/maintenance/status', {
+      method: 'POST',
+      body: requestBody(body)
+    })
+    if (status && status.active) {
+      maintenanceStatus.value = status
+      cleaning.value = true
+      startPolling(status.run_id)
+    } else if (status && status.status === 'done') {
+      // 任务已完成,清理
+      clearRunID()
+      if (savedRunID) {
+        success.value = `清洗完成：处理 ${n(status.processed)} 条，丢弃 ${n(status.discarded)} 条，保留 ${n(status.kept)} 条，沉淀 ${n(status.composed)} 条。`
+      }
+    } else {
+      clearRunID()
+    }
+  } catch {
+    clearRunID()
   }
 }
 
@@ -183,19 +321,30 @@ async function runMaintenance() {
   cleaning.value = true
   error.value = ''
   success.value = ''
+  maintenanceStatus.value = null
   try {
-    const result = await request<{ run_id: string; processed: number; discarded: number; kept: number; composed: number; archive_id: string }>('/memory/candidates/maintenance/run', {
+    const result = await request<MaintenanceStatus>('/memory/candidates/maintenance/run', {
       method: 'POST',
       body: requestBody({
         source_key: cleanSourceKey.value.trim(),
         thread_id: cleanThreadId.value.trim()
       })
     })
-    success.value = `清洗完成：处理 ${result.processed} 条，丢弃 ${result.discarded} 条，保留 ${result.kept} 条，沉淀 ${result.composed} 条。`
-    await loadCandidates()
+    if (result && result.active) {
+      // 任务已启动或已有运行中任务
+      maintenanceStatus.value = result
+      saveRunID(result.run_id)
+      startPolling(result.run_id)
+    } else if (result && result.status === 'done') {
+      // 已有完成的任务直接返回
+      cleaning.value = false
+      success.value = `清洗完成：处理 ${n(result.processed)} 条，丢弃 ${n(result.discarded)} 条，保留 ${n(result.kept)} 条，沉淀 ${n(result.composed)} 条。`
+      await loadCandidates()
+    } else {
+      cleaning.value = false
+    }
   } catch (err: any) {
     error.value = err.message || '清洗失败'
-  } finally {
     cleaning.value = false
   }
 }
@@ -203,11 +352,18 @@ async function runMaintenance() {
 onMounted(async () => {
   auth.initFromStorage()
   context.initFromStorage()
-  await Promise.all([loadCandidates(), loadLifecycleStats()])
+  await Promise.all([loadCandidates(), loadLifecycleStats(), restoreMaintenanceTask()])
 })
 
 watch(() => [context.orgId, context.projectId, statusFilter.value, riskFilter.value], () => {
+  stopPolling()
+  maintenanceStatus.value = null
   void loadCandidates()
+  void restoreMaintenanceTask()
+})
+
+onBeforeUnmount(() => {
+  stopPolling()
 })
 </script>
 
@@ -298,13 +454,40 @@ watch(() => [context.orgId, context.projectId, statusFilter.value, riskFilter.va
         </button>
       </div>
       <p v-if="!hasProjectContext" class="mt-3 rounded-2xl bg-amber-50 p-3 text-sm text-amber-800">请先选择组织和项目。</p>
+
+      <!-- 进度条 -->
+      <div v-if="maintenanceStatus && maintenanceStatus.active" class="mt-4 rounded-2xl bg-orange-50 p-4">
+        <div class="flex items-center justify-between text-sm font-bold text-orange-900">
+          <span>{{ stageLabel(maintenanceStatus.stage) }}</span>
+          <span>{{ n(maintenanceStatus.progress_percent) }}%</span>
+        </div>
+        <div class="mt-2 h-3 w-full overflow-hidden rounded-full bg-orange-200">
+          <div class="h-full rounded-full bg-orange-500 transition-all duration-500" :style="{ width: n(maintenanceStatus.progress_percent) + '%' }"></div>
+        </div>
+        <p class="mt-2 text-xs text-orange-700">
+          <template v-if="maintenanceStatus.stage === 'calling_llm'">模型处理中，请稍候...</template>
+          <template v-else>已加载 {{ n(maintenanceStatus.total_candidates) }} 条候选</template>
+        </p>
+      </div>
+
+      <!-- 失败原因 -->
+      <div v-if="maintenanceStatus && maintenanceStatus.status === 'failed'" class="mt-4 rounded-2xl bg-red-50 p-4">
+        <p class="text-sm font-bold text-red-900">清洗失败：{{ maintenanceStatus.last_error || '未知错误' }}</p>
+      </div>
+
+      <!-- 完成统计 -->
+      <div v-if="maintenanceStatus && maintenanceStatus.status === 'done' && !cleaning" class="mt-4 rounded-2xl bg-emerald-50 p-4">
+        <p class="text-sm font-bold text-emerald-900">
+          清洗完成：处理 {{ n(maintenanceStatus.processed) }} 条，丢弃 {{ n(maintenanceStatus.discarded) }} 条，保留 {{ n(maintenanceStatus.kept) }} 条，沉淀 {{ n(maintenanceStatus.composed) }} 条。
+        </p>
+      </div>
     </section>
 
     <!-- 候选列表 -->
     <section class="mt-6 rounded-3xl border bg-white p-5">
       <h3 class="text-xl font-black">候选列表（当前页 {{ candidates.length }} 条）</h3>
       <p class="mt-2 text-sm text-stone-500">
-        当前页显示 {{ candidates.length }} 条，当前项目待处理候选 {{ lifecycleStats?.candidates.actionable_total ?? 0 }} 条。
+        当前页显示 {{ candidates.length }} 条，当前项目待处理候选 {{ n(lifecycleStats?.candidates?.actionable_total) }} 条。
       </p>
       <div v-if="loading" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">正在加载候选记忆...</div>
       <div v-else-if="candidates.length === 0" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">当前过滤条件下暂无候选记忆。</div>

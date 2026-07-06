@@ -24,28 +24,44 @@ const (
 	MaintenanceRunFailed  MaintenanceRunStatus = "failed"
 )
 
+// MaintenanceRunStage 清洗整合任务阶段。
+type MaintenanceRunStage string
+
+const (
+	StageQueued            MaintenanceRunStage = "queued"
+	StageLoadingCandidates MaintenanceRunStage = "loading_candidates"
+	StageCallingLLM        MaintenanceRunStage = "calling_llm"
+	StageValidating        MaintenanceRunStage = "validating"
+	StageApplying          MaintenanceRunStage = "applying"
+	StageComposing         MaintenanceRunStage = "composing"
+	StageDone              MaintenanceRunStage = "done"
+	StageFailed            MaintenanceRunStage = "failed"
+)
+
 // MaintenanceRun 一次清洗整合操作的审计记录。
 type MaintenanceRun struct {
-	ID          int64
-	RunID       string
-	OrgID       string
-	ProjectID   string
-	SourceKey   string
-	ThreadID    string
-	TriggerType MaintenanceTriggerType
-	Status      MaintenanceRunStatus
-	Processed   int
-	Discarded   int
-	Kept        int
-	Composed    int
-	ArchiveID   string
-	Summary     string
-	LastError   string
-	LockedBy    string
-	StartedAt   time.Time
-	CompletedAt *time.Time
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID              int64
+	RunID           string
+	OrgID           string
+	ProjectID       string
+	SourceKey       string
+	ThreadID        string
+	TriggerType     MaintenanceTriggerType
+	Status          MaintenanceRunStatus
+	Stage           MaintenanceRunStage
+	TotalCandidates int
+	Processed       int
+	Discarded       int
+	Kept            int
+	Composed        int
+	ArchiveID       string
+	Summary         string
+	LastError       string
+	LockedBy        string
+	StartedAt       time.Time
+	CompletedAt     *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // MaintenanceRequest 清洗整合请求。
@@ -73,6 +89,8 @@ type MaintenanceRepository interface {
 	GetRun(ctx context.Context, runID string) (MaintenanceRun, error)
 	UpdateRun(ctx context.Context, runID string, status MaintenanceRunStatus, result MaintenanceRunUpdate) error
 	GetRunningRun(ctx context.Context, orgID, projectID string) (*MaintenanceRun, error)
+	UpdateStage(ctx context.Context, runID string, stage MaintenanceRunStage, totalCandidates int) error
+	MarkStaleRunningAsFailed(ctx context.Context, before time.Time) (int, error)
 }
 
 // MaintenanceRunUpdate 清洗整合更新字段。
@@ -85,6 +103,74 @@ type MaintenanceRunUpdate struct {
 	Summary     string
 	LastError   string
 	CompletedAt *time.Time
+}
+
+// StageProgress 返回阶段对应的进度百分比。
+func StageProgress(stage MaintenanceRunStage) int {
+	switch stage {
+	case StageQueued:
+		return 5
+	case StageLoadingCandidates:
+		return 10
+	case StageCallingLLM:
+		return 45
+	case StageValidating:
+		return 65
+	case StageApplying:
+		return 80
+	case StageComposing:
+		return 90
+	case StageDone:
+		return 100
+	case StageFailed:
+		return 0
+	default:
+		return 0
+	}
+}
+
+// MaintenanceStatusDTO 统一任务状态响应 DTO。
+type MaintenanceStatusDTO struct {
+	Active          bool    `json:"active"`
+	RunID           string  `json:"run_id"`
+	Status          string  `json:"status"`
+	Stage           string  `json:"stage"`
+	ProgressPercent int     `json:"progress_percent"`
+	TotalCandidates int     `json:"total_candidates"`
+	Processed       int     `json:"processed"`
+	Discarded       int     `json:"discarded"`
+	Kept            int     `json:"kept"`
+	Composed        int     `json:"composed"`
+	ArchiveID       string  `json:"archive_id"`
+	Summary         string  `json:"summary"`
+	LastError       string  `json:"last_error"`
+	StartedAt       string  `json:"started_at"`
+	CompletedAt     *string `json:"completed_at"`
+}
+
+// ToStatusDTO 将 MaintenanceRun 转换为统一 DTO。
+func (r MaintenanceRun) ToStatusDTO() MaintenanceStatusDTO {
+	dto := MaintenanceStatusDTO{
+		Active:          r.Status == MaintenanceRunRunning,
+		RunID:           r.RunID,
+		Status:          string(r.Status),
+		Stage:           string(r.Stage),
+		ProgressPercent: StageProgress(r.Stage),
+		TotalCandidates: r.TotalCandidates,
+		Processed:       r.Processed,
+		Discarded:       r.Discarded,
+		Kept:            r.Kept,
+		Composed:        r.Composed,
+		ArchiveID:       r.ArchiveID,
+		Summary:         r.Summary,
+		LastError:       r.LastError,
+		StartedAt:       r.StartedAt.Format(time.RFC3339),
+	}
+	if r.CompletedAt != nil {
+		s := r.CompletedAt.Format(time.RFC3339)
+		dto.CompletedAt = &s
+	}
+	return dto
 }
 
 // MaintenanceService 清洗整合业务逻辑。
@@ -133,30 +219,14 @@ var (
 	ErrNoCandidatesToClean = errors.New("no candidates to clean")
 )
 
-// Run 执行清洗整合(手动或自动触发)。
-// 复用同一套逻辑,区别仅在 trigger_type 审计记录。
-func (s *MaintenanceService) Run(ctx context.Context, req MaintenanceRequest) (MaintenanceResult, error) {
-	// 1. 检查是否有运行中的任务(项目级防重入)
+// StartRun 创建清洗任务并返回,实际执行由 ExecuteRun 在后台完成。
+func (s *MaintenanceService) StartRun(ctx context.Context, req MaintenanceRequest) (MaintenanceRun, error) {
+	// 1. 检查是否有运行中的任务(项目级防重入),返回已有任务
 	if existing, err := s.repo.GetRunningRun(ctx, req.OrgID, req.ProjectID); err == nil && existing != nil {
-		return MaintenanceResult{}, ErrMaintenanceAlreadyRunning
+		return *existing, nil
 	}
 
-	// 2. 加载待清洗候选
-	candidates, err := s.candidateRepo.ListCandidates(ctx, ListFilter{
-		OrgID:     req.OrgID,
-		ProjectID: req.ProjectID,
-		SourceKey: req.SourceKey,
-		ThreadID:  req.ThreadID,
-		Status:    StatusPending,
-	})
-	if err != nil {
-		return MaintenanceResult{}, err
-	}
-	if len(candidates) == 0 {
-		return MaintenanceResult{}, ErrNoCandidatesToClean
-	}
-
-	// 3. 创建审计记录
+	// 2. 创建审计记录(queued 阶段)
 	runID := fmt.Sprintf("maint_%s_%d", req.OrgID, time.Now().UnixNano())
 	run, err := s.repo.CreateRun(ctx, MaintenanceRun{
 		RunID:       runID,
@@ -166,22 +236,54 @@ func (s *MaintenanceService) Run(ctx context.Context, req MaintenanceRequest) (M
 		ThreadID:    req.ThreadID,
 		TriggerType: req.Trigger,
 		Status:      MaintenanceRunRunning,
+		Stage:       StageQueued,
 		StartedAt:   time.Now().UTC(),
 	})
 	if err != nil {
-		return MaintenanceResult{}, err
+		return MaintenanceRun{}, err
+	}
+	return run, nil
+}
+
+// ExecuteRun 在后台执行清洗整合逻辑,阶段会持久化到数据库。
+func (s *MaintenanceService) ExecuteRun(ctx context.Context, req MaintenanceRequest, runID string) {
+	// 0. 清理超时 running 任务(服务重启保护)
+	_, _ = s.repo.MarkStaleRunningAsFailed(ctx, time.Now().Add(-10*time.Minute))
+
+	// 1. 加载待清洗候选
+	if err := s.repo.UpdateStage(ctx, runID, StageLoadingCandidates, 0); err != nil {
+		return
+	}
+	candidates, err := s.candidateRepo.ListCandidates(ctx, ListFilter{
+		OrgID:     req.OrgID,
+		ProjectID: req.ProjectID,
+		SourceKey: req.SourceKey,
+		ThreadID:  req.ThreadID,
+		Status:    StatusPending,
+	})
+	if err != nil {
+		s.failRun(ctx, runID, err)
+		return
+	}
+	if len(candidates) == 0 {
+		s.failRun(ctx, runID, ErrNoCandidatesToClean)
+		return
 	}
 
-	// 4. LLM 清洗(失败时零写入)
+	// 更新 total_candidates
+	_ = s.repo.UpdateStage(ctx, runID, StageCallingLLM, len(candidates))
+
+	// 2. LLM 清洗(失败时零写入)
 	cleanResult, err := s.cleaner.Clean(ctx, candidates)
 	if err != nil {
-		_ = s.repo.UpdateRun(ctx, run.RunID, MaintenanceRunFailed, MaintenanceRunUpdate{
-			LastError: err.Error(),
-		})
-		return MaintenanceResult{}, err
+		s.failRun(ctx, runID, err)
+		return
 	}
 
-	// 5. 校验 candidate_id 是否存在(防幻觉)
+	// 3. 校验 candidate_id 是否存在(防幻觉)
+	if err := s.repo.UpdateStage(ctx, runID, StageValidating, len(candidates)); err != nil {
+		return
+	}
 	discardSet := make(map[string]bool, len(cleanResult.DiscardIDs))
 	for _, id := range cleanResult.DiscardIDs {
 		discardSet[id] = true
@@ -191,40 +293,35 @@ func (s *MaintenanceService) Run(ctx context.Context, req MaintenanceRequest) (M
 		keepSet[id] = true
 	}
 
-	// 验证所有 ID 都存在
 	for _, id := range cleanResult.DiscardIDs {
 		if _, err := s.candidateRepo.GetCandidate(ctx, req.OrgID, id); err != nil {
-			_ = s.repo.UpdateRun(ctx, run.RunID, MaintenanceRunFailed, MaintenanceRunUpdate{
-				LastError: fmt.Sprintf("candidate_id %s not found", id),
-			})
-			return MaintenanceResult{}, fmt.Errorf("candidate_id %s not found: %w", id, err)
+			s.failRun(ctx, runID, fmt.Errorf("candidate_id %s not found: %w", id, err))
+			return
 		}
 	}
 	for _, id := range cleanResult.KeepIDs {
 		if _, err := s.candidateRepo.GetCandidate(ctx, req.OrgID, id); err != nil {
-			_ = s.repo.UpdateRun(ctx, run.RunID, MaintenanceRunFailed, MaintenanceRunUpdate{
-				LastError: fmt.Sprintf("candidate_id %s not found", id),
-			})
-			return MaintenanceResult{}, fmt.Errorf("candidate_id %s not found: %w", id, err)
+			s.failRun(ctx, runID, fmt.Errorf("candidate_id %s not found: %w", id, err))
+			return
 		}
 	}
 
-	// 6. 执行清洗动作
+	// 4. 执行清洗动作
+	if err := s.repo.UpdateStage(ctx, runID, StageApplying, len(candidates)); err != nil {
+		return
+	}
 	discarded := 0
 	kept := 0
 	for _, c := range candidates {
 		if discardSet[c.CandidateID] {
 			// 高风险候选不能被 AI 自动丢弃
 			if c.RiskLevel == RiskHigh {
-				// 高风险保留并写入风险说明
 				kept++
 				continue
 			}
 			if _, err := s.candidateRepo.UpdateCandidateStatus(ctx, req.OrgID, c.CandidateID, StatusDiscarded, c.Scores); err != nil {
-				_ = s.repo.UpdateRun(ctx, run.RunID, MaintenanceRunFailed, MaintenanceRunUpdate{
-					LastError: fmt.Sprintf("discard candidate %s failed: %s", c.CandidateID, err.Error()),
-				})
-				return MaintenanceResult{}, err
+				s.failRun(ctx, runID, fmt.Errorf("discard candidate %s failed: %s", c.CandidateID, err.Error()))
+				return
 			}
 			discarded++
 		} else if keepSet[c.CandidateID] {
@@ -232,7 +329,10 @@ func (s *MaintenanceService) Run(ctx context.Context, req MaintenanceRequest) (M
 		}
 	}
 
-	// 7. 触发 TopicComposer 沉淀(复用现有逻辑)
+	// 5. 触发 TopicComposer 沉淀
+	if err := s.repo.UpdateStage(ctx, runID, StageComposing, len(candidates)); err != nil {
+		return
+	}
 	composed := 0
 	archiveID := ""
 	if s.composer != nil {
@@ -241,7 +341,7 @@ func (s *MaintenanceService) Run(ctx context.Context, req MaintenanceRequest) (M
 			ProjectID: req.ProjectID,
 			SourceKey: req.SourceKey,
 			ThreadID:  req.ThreadID,
-			Force:     true, // 清洗后强制沉淀
+			Force:     true,
 		})
 		if err == nil && result.Ready {
 			composed = result.Composed
@@ -249,9 +349,9 @@ func (s *MaintenanceService) Run(ctx context.Context, req MaintenanceRequest) (M
 		}
 	}
 
-	// 8. 更新审计记录(成功)
+	// 6. 更新审计记录(成功)
 	now := time.Now().UTC()
-	_ = s.repo.UpdateRun(ctx, run.RunID, MaintenanceRunDone, MaintenanceRunUpdate{
+	_ = s.repo.UpdateRun(ctx, runID, MaintenanceRunDone, MaintenanceRunUpdate{
 		Processed:   len(candidates),
 		Discarded:   discarded,
 		Kept:        kept,
@@ -260,15 +360,26 @@ func (s *MaintenanceService) Run(ctx context.Context, req MaintenanceRequest) (M
 		Summary:     cleanResult.Summary,
 		CompletedAt: &now,
 	})
+	// 成功时也更新 stage 为 done
+	_ = s.repo.UpdateStage(ctx, runID, StageDone, len(candidates))
+}
 
-	return MaintenanceResult{
-		RunID:     runID,
-		Processed: len(candidates),
-		Discarded: discarded,
-		Kept:      kept,
-		Composed:  composed,
-		ArchiveID: archiveID,
-	}, nil
+// failRun 标记任务失败。
+func (s *MaintenanceService) failRun(ctx context.Context, runID string, err error) {
+	_ = s.repo.UpdateRun(ctx, runID, MaintenanceRunFailed, MaintenanceRunUpdate{
+		LastError: err.Error(),
+	})
+	_ = s.repo.UpdateStage(ctx, runID, StageFailed, 0)
+}
+
+// GetActiveRun 获取项目当前运行中的任务。
+func (s *MaintenanceService) GetActiveRun(ctx context.Context, orgID, projectID string) (*MaintenanceRun, error) {
+	return s.repo.GetRunningRun(ctx, orgID, projectID)
+}
+
+// GetRun 按 runID 查询任务。
+func (s *MaintenanceService) GetRun(ctx context.Context, runID string) (MaintenanceRun, error) {
+	return s.repo.GetRun(ctx, runID)
 }
 
 // ShouldAutoClean 判断是否应该自动触发清洗整合。

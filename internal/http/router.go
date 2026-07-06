@@ -135,6 +135,7 @@ func RegisterRoutes(engine *route.Engine, options RouterOptions) {
 	}
 	if options.MaintenanceService != nil {
 		engine.POST("/memory/candidates/maintenance/run", MaintenanceRunHandler(options.MaintenanceService, options.AuthService, options.TenantService))
+		engine.POST("/memory/candidates/maintenance/status", MaintenanceStatusHandler(options.MaintenanceService, options.AuthService, options.TenantService))
 	}
 	engine.POST("/memory/secrets/create", SecretCreateHandler(options.SecretVault, options.AuthService, options.TenantService))
 	engine.POST("/memory/secrets/list", SecretListHandler(options.SecretVault, options.AuthService, options.TenantService))
@@ -517,9 +518,17 @@ func OpenAPIHandler() app.HandlerFunc {
 				},
 				"/memory/candidates/maintenance/run": map[string]any{
 					"post": map[string]any{
-						"summary": "Run AI maintenance to clean and consolidate candidates",
+						"summary": "Start AI maintenance (returns immediately, runs in background)",
 						"responses": map[string]any{
-							"200": map[string]any{"description": "Maintenance result"},
+							"200": map[string]any{"description": "Maintenance status DTO"},
+						},
+					},
+				},
+				"/memory/candidates/maintenance/status": map[string]any{
+					"post": map[string]any{
+						"summary": "Query maintenance task progress and status",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Maintenance status DTO"},
 						},
 					},
 				},
@@ -4334,7 +4343,7 @@ func MaintenanceRunHandler(service *candidatememory.MaintenanceService, authServ
 			return
 		}
 		_ = permissions
-		result, err := service.Run(ctx, candidatememory.MaintenanceRequest{
+		run, err := service.StartRun(ctx, candidatememory.MaintenanceRequest{
 			OrgID:     request.OrgID,
 			ProjectID: request.ProjectID,
 			SourceKey: request.SourceKey,
@@ -4345,6 +4354,55 @@ func MaintenanceRunHandler(service *candidatememory.MaintenanceService, authServ
 			c.JSON(consts.StatusBadRequest, map[string]string{"error": "maintenance_run_rejected", "message": err.Error()})
 			return
 		}
-		c.JSON(consts.StatusOK, result)
+		// 后台执行清洗,不阻塞 HTTP 请求
+		go service.ExecuteRun(context.Background(), candidatememory.MaintenanceRequest{
+			OrgID:     request.OrgID,
+			ProjectID: request.ProjectID,
+			SourceKey: request.SourceKey,
+			ThreadID:  request.ThreadID,
+			Trigger:   candidatememory.MaintenanceTriggerManual,
+		}, run.RunID)
+		c.JSON(consts.StatusOK, run.ToStatusDTO())
+	}
+}
+
+// --- 候选记忆清洗整合状态查询 API ---
+
+type maintenanceStatusRequest struct {
+	OrgID     string `json:"org_id"`
+	ProjectID string `json:"project_id"`
+	RunID     string `json:"run_id"`
+}
+
+func MaintenanceStatusHandler(service *candidatememory.MaintenanceService, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		var request maintenanceStatusRequest
+		if err := c.BindAndValidate(&request); err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_maintenance_status_request"})
+			return
+		}
+		permissions, ok := authorizeProjectScope(c, authService, tenantService, request.OrgID, request.ProjectID, "memory:read", "", "maintenance_forbidden")
+		if !ok {
+			return
+		}
+		_ = permissions
+		if request.RunID != "" {
+			run, err := service.GetRun(ctx, request.RunID)
+			if err != nil {
+				c.JSON(consts.StatusOK, map[string]any{"active": false})
+				return
+			}
+			dto := run.ToStatusDTO()
+			dto.Active = run.Status == candidatememory.MaintenanceRunRunning
+			c.JSON(consts.StatusOK, dto)
+			return
+		}
+		// 不传 run_id,返回当前项目正在运行的任务
+		active, err := service.GetActiveRun(ctx, request.OrgID, request.ProjectID)
+		if err != nil || active == nil {
+			c.JSON(consts.StatusOK, map[string]any{"active": false})
+			return
+		}
+		c.JSON(consts.StatusOK, active.ToStatusDTO())
 	}
 }

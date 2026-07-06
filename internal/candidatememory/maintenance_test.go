@@ -85,6 +85,41 @@ func (r *InMemoryMaintenanceRepository) ListRunningRuns(ctx context.Context, org
 	return out, nil
 }
 
+func (r *InMemoryMaintenanceRepository) UpdateStage(ctx context.Context, runID string, stage MaintenanceRunStage, totalCandidates int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	run, ok := r.runs[runID]
+	if !ok {
+		return ErrMaintenanceNotFound
+	}
+	run.Stage = stage
+	if totalCandidates > 0 {
+		run.TotalCandidates = totalCandidates
+	}
+	run.UpdatedAt = time.Now().UTC()
+	r.runs[runID] = run
+	return nil
+}
+
+func (r *InMemoryMaintenanceRepository) MarkStaleRunningAsFailed(ctx context.Context, before time.Time) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := 0
+	for id, run := range r.runs {
+		if run.Status == MaintenanceRunRunning && run.StartedAt.Before(before) {
+			run.Status = MaintenanceRunFailed
+			run.Stage = StageFailed
+			run.LastError = "stale: exceeded timeout"
+			now := time.Now().UTC()
+			run.CompletedAt = &now
+			run.UpdatedAt = now
+			r.runs[id] = run
+			count++
+		}
+	}
+	return count, nil
+}
+
 // fakeMaintenanceCleaner 测试用 LLM 清洗器。
 type fakeMaintenanceCleaner struct {
 	result CleanResult
@@ -124,7 +159,9 @@ func newTestMaintenanceService(t *testing.T, cleaner MaintenanceCleaner, candida
 	return NewMaintenanceService(maintRepo, candidateRepo, &composer, cleaner), maintRepo
 }
 
-func TestMaintenanceServiceManualTrigger(t *testing.T) {
+// --- 测试:创建任务后立即返回,不等待 LLM ---
+
+func TestMaintenanceStartRunReturnsImmediately(t *testing.T) {
 	cleaner := &trackingMaintenanceCleaner{
 		result: CleanResult{
 			DiscardIDs: []string{"cand-noise"},
@@ -137,7 +174,8 @@ func TestMaintenanceServiceManualTrigger(t *testing.T) {
 		Candidate{CandidateID: "cand-valuable", OrgID: "org-1", ProjectID: "proj-1", Status: StatusPending, RiskLevel: RiskLow},
 	)
 
-	result, err := service.Run(context.Background(), MaintenanceRequest{
+	// StartRun 应立即返回
+	run, err := service.StartRun(context.Background(), MaintenanceRequest{
 		OrgID:     "org-1",
 		ProjectID: "proj-1",
 		Trigger:   MaintenanceTriggerManual,
@@ -145,95 +183,52 @@ func TestMaintenanceServiceManualTrigger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.Processed != 2 {
-		t.Fatalf("expected 2 processed, got %d", result.Processed)
+	if run.RunID == "" {
+		t.Fatal("run_id should not be empty")
 	}
-	if result.Discarded != 1 {
-		t.Fatalf("expected 1 discarded, got %d", result.Discarded)
+	if run.Status != MaintenanceRunRunning {
+		t.Fatalf("expected status running, got %s", run.Status)
 	}
-	if result.Kept != 1 {
-		t.Fatalf("expected 1 kept, got %d", result.Kept)
+	if run.Stage != StageQueued {
+		t.Fatalf("expected stage queued, got %s", run.Stage)
+	}
+	// 此时 cleaner 不应被调用
+	if cleaner.called {
+		t.Fatal("cleaner should not be called yet")
+	}
+
+	// 执行后台清洗
+	service.ExecuteRun(context.Background(), MaintenanceRequest{
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+		Trigger:   MaintenanceTriggerManual,
+	}, run.RunID)
+
+	// 验证最终结果
+	final, err := maintRepo.GetRun(context.Background(), run.RunID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if final.Status != MaintenanceRunDone {
+		t.Fatalf("expected status done, got %s", final.Status)
+	}
+	if final.Processed != 2 {
+		t.Fatalf("expected 2 processed, got %d", final.Processed)
+	}
+	if final.Discarded != 1 {
+		t.Fatalf("expected 1 discarded, got %d", final.Discarded)
+	}
+	if final.Kept != 1 {
+		t.Fatalf("expected 1 kept, got %d", final.Kept)
 	}
 	if !cleaner.called {
 		t.Fatal("cleaner should be called")
 	}
-
-	// 验证审计记录
-	run, err := maintRepo.GetRun(context.Background(), result.RunID)
-	if err != nil {
-		t.Fatalf("get run: %v", err)
-	}
-	if run.Status != MaintenanceRunDone {
-		t.Fatalf("expected status done, got %s", run.Status)
-	}
-	if run.TriggerType != MaintenanceTriggerManual {
-		t.Fatalf("expected trigger manual, got %s", run.TriggerType)
-	}
 }
 
-func TestMaintenanceServiceHighRiskNotDiscarded(t *testing.T) {
-	cleaner := &fakeMaintenanceCleaner{
-		result: CleanResult{
-			DiscardIDs: []string{"cand-high-risk"}, // LLM 建议丢弃高风险
-			KeepIDs:    []string{},
-			Summary:    "测试高风险不丢弃",
-		},
-	}
-	service, _ := newTestMaintenanceService(t, cleaner,
-		Candidate{CandidateID: "cand-high-risk", OrgID: "org-1", ProjectID: "proj-1", Status: StatusPending, RiskLevel: RiskHigh},
-	)
+// --- 测试:已有 running 任务时返回已有任务 ---
 
-	result, err := service.Run(context.Background(), MaintenanceRequest{
-		OrgID:     "org-1",
-		ProjectID: "proj-1",
-		Trigger:   MaintenanceTriggerManual,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// 高风险候选不应被丢弃
-	if result.Discarded != 0 {
-		t.Fatalf("expected 0 discarded for high risk, got %d", result.Discarded)
-	}
-	if result.Kept != 1 {
-		t.Fatalf("expected 1 kept for high risk, got %d", result.Kept)
-	}
-}
-
-func TestMaintenanceServiceLLMFailureZeroWrite(t *testing.T) {
-	cleaner := &fakeMaintenanceCleaner{
-		err: errors.New("llm timeout"),
-	}
-	candidateRepo := NewInMemoryRepository()
-	candidateRepo.CreateCandidate(context.Background(), Candidate{
-		CandidateID: "cand-1", OrgID: "org-1", ProjectID: "proj-1", Status: StatusPending,
-	})
-	maintRepo := NewInMemoryMaintenanceRepository()
-	service := NewMaintenanceService(maintRepo, candidateRepo, nil, cleaner)
-
-	_, err := service.Run(context.Background(), MaintenanceRequest{
-		OrgID:     "org-1",
-		ProjectID: "proj-1",
-		Trigger:   MaintenanceTriggerManual,
-	})
-	if err == nil {
-		t.Fatal("expected error on LLM failure")
-	}
-
-	// 验证零写入:候选状态不变
-	cand, _ := candidateRepo.GetCandidate(context.Background(), "org-1", "cand-1")
-	if cand.Status != StatusPending {
-		t.Fatalf("candidate status should remain pending, got %s", cand.Status)
-	}
-
-	// 验证审计记录为 failed
-	runs, _ := maintRepo.ListRunningRuns(context.Background(), "org-1", "proj-1")
-	if len(runs) != 0 {
-		t.Fatal("no running runs should remain")
-	}
-}
-
-func TestMaintenanceServiceAlreadyRunning(t *testing.T) {
+func TestMaintenanceAlreadyRunningReturnsExisting(t *testing.T) {
 	cleaner := &fakeMaintenanceCleaner{result: CleanResult{Summary: "ok"}}
 	service, maintRepo := newTestMaintenanceService(t, cleaner,
 		Candidate{CandidateID: "cand-1", OrgID: "org-1", ProjectID: "proj-1", Status: StatusPending},
@@ -245,34 +240,137 @@ func TestMaintenanceServiceAlreadyRunning(t *testing.T) {
 		OrgID:     "org-1",
 		ProjectID: "proj-1",
 		Status:    MaintenanceRunRunning,
+		Stage:     StageCallingLLM,
 	})
 
-	// 第二次触发应失败
-	_, err := service.Run(context.Background(), MaintenanceRequest{
+	// 第二次触发应返回已有任务,不报错
+	run, err := service.StartRun(context.Background(), MaintenanceRequest{
 		OrgID:     "org-1",
 		ProjectID: "proj-1",
 		Trigger:   MaintenanceTriggerManual,
 	})
-	if !errors.Is(err, ErrMaintenanceAlreadyRunning) {
-		t.Fatalf("expected ErrMaintenanceAlreadyRunning, got %v", err)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if run.RunID != "existing-run" {
+		t.Fatalf("expected existing run_id, got %s", run.RunID)
 	}
 }
 
-func TestMaintenanceServiceNoCandidatesToClean(t *testing.T) {
-	cleaner := &fakeMaintenanceCleaner{result: CleanResult{Summary: "ok"}}
-	service, _ := newTestMaintenanceService(t, cleaner) // 无候选
+// --- 测试:阶段能正确更新 ---
 
-	_, err := service.Run(context.Background(), MaintenanceRequest{
+func TestMaintenanceStageUpdates(t *testing.T) {
+	cleaner := &fakeMaintenanceCleaner{
+		result: CleanResult{
+			DiscardIDs: []string{"cand-1"},
+			KeepIDs:    []string{},
+			Summary:    "ok",
+		},
+	}
+	service, maintRepo := newTestMaintenanceService(t, cleaner,
+		Candidate{CandidateID: "cand-1", OrgID: "org-1", ProjectID: "proj-1", Status: StatusPending, RiskLevel: RiskLow},
+	)
+
+	run, _ := service.StartRun(context.Background(), MaintenanceRequest{
 		OrgID:     "org-1",
 		ProjectID: "proj-1",
 		Trigger:   MaintenanceTriggerManual,
 	})
-	if !errors.Is(err, ErrNoCandidatesToClean) {
-		t.Fatalf("expected ErrNoCandidatesToClean, got %v", err)
+
+	service.ExecuteRun(context.Background(), MaintenanceRequest{
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+	}, run.RunID)
+
+	// 最终阶段应为 done
+	final, _ := maintRepo.GetRun(context.Background(), run.RunID)
+	if final.Stage != StageDone {
+		t.Fatalf("expected stage done, got %s", final.Stage)
+	}
+	if final.TotalCandidates != 1 {
+		t.Fatalf("expected total_candidates 1, got %d", final.TotalCandidates)
 	}
 }
 
-func TestMaintenanceServiceInvalidCandidateID(t *testing.T) {
+// --- 测试:成功后 processed/discarded/kept/composed 正确落库 ---
+
+func TestMaintenanceResultsPersisted(t *testing.T) {
+	cleaner := &fakeMaintenanceCleaner{
+		result: CleanResult{
+			DiscardIDs: []string{"cand-noise"},
+			KeepIDs:    []string{"cand-valuable"},
+			Summary:    "保留高价值",
+		},
+	}
+	service, maintRepo := newTestMaintenanceService(t, cleaner,
+		Candidate{CandidateID: "cand-noise", OrgID: "org-1", ProjectID: "proj-1", Status: StatusPending, RiskLevel: RiskLow},
+		Candidate{CandidateID: "cand-valuable", OrgID: "org-1", ProjectID: "proj-1", Status: StatusPending, RiskLevel: RiskLow},
+	)
+
+	run, _ := service.StartRun(context.Background(), MaintenanceRequest{
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+		Trigger:   MaintenanceTriggerManual,
+	})
+
+	service.ExecuteRun(context.Background(), MaintenanceRequest{
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+	}, run.RunID)
+
+	final, _ := maintRepo.GetRun(context.Background(), run.RunID)
+	if final.Processed != 2 {
+		t.Fatalf("expected 2 processed, got %d", final.Processed)
+	}
+	if final.Discarded != 1 {
+		t.Fatalf("expected 1 discarded, got %d", final.Discarded)
+	}
+	if final.Kept != 1 {
+		t.Fatalf("expected 1 kept, got %d", final.Kept)
+	}
+}
+
+// --- 测试:LLM 失败时任务 failed,候选状态零写入 ---
+
+func TestMaintenanceLLMFailureZeroWrite(t *testing.T) {
+	cleaner := &fakeMaintenanceCleaner{err: errors.New("llm timeout")}
+	candidateRepo := NewInMemoryRepository()
+	candidateRepo.CreateCandidate(context.Background(), Candidate{
+		CandidateID: "cand-1", OrgID: "org-1", ProjectID: "proj-1", Status: StatusPending,
+	})
+	maintRepo := NewInMemoryMaintenanceRepository()
+	service := NewMaintenanceService(maintRepo, candidateRepo, nil, cleaner)
+
+	run, _ := service.StartRun(context.Background(), MaintenanceRequest{
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+		Trigger:   MaintenanceTriggerManual,
+	})
+
+	service.ExecuteRun(context.Background(), MaintenanceRequest{
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+	}, run.RunID)
+
+	// 验证零写入:候选状态不变
+	cand, _ := candidateRepo.GetCandidate(context.Background(), "org-1", "cand-1")
+	if cand.Status != StatusPending {
+		t.Fatalf("candidate status should remain pending, got %s", cand.Status)
+	}
+
+	// 验证审计记录为 failed
+	final, _ := maintRepo.GetRun(context.Background(), run.RunID)
+	if final.Status != MaintenanceRunFailed {
+		t.Fatalf("expected status failed, got %s", final.Status)
+	}
+	if final.LastError != "llm timeout" {
+		t.Fatalf("expected last_error llm timeout, got %s", final.LastError)
+	}
+}
+
+// --- 测试:LLM 返回不存在 candidate_id 时任务 failed ---
+
+func TestMaintenanceInvalidCandidateIDFails(t *testing.T) {
 	cleaner := &fakeMaintenanceCleaner{
 		result: CleanResult{
 			DiscardIDs: []string{"nonexistent-id"},
@@ -280,17 +378,176 @@ func TestMaintenanceServiceInvalidCandidateID(t *testing.T) {
 			Summary:    "测试不存在的 ID",
 		},
 	}
-	service, _ := newTestMaintenanceService(t, cleaner,
+	service, maintRepo := newTestMaintenanceService(t, cleaner,
 		Candidate{CandidateID: "cand-1", OrgID: "org-1", ProjectID: "proj-1", Status: StatusPending},
 	)
 
-	_, err := service.Run(context.Background(), MaintenanceRequest{
+	run, _ := service.StartRun(context.Background(), MaintenanceRequest{
 		OrgID:     "org-1",
 		ProjectID: "proj-1",
 		Trigger:   MaintenanceTriggerManual,
 	})
-	if err == nil {
-		t.Fatal("expected error for nonexistent candidate ID")
+
+	service.ExecuteRun(context.Background(), MaintenanceRequest{
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+	}, run.RunID)
+
+	final, _ := maintRepo.GetRun(context.Background(), run.RunID)
+	if final.Status != MaintenanceRunFailed {
+		t.Fatalf("expected status failed, got %s", final.Status)
+	}
+	if final.Stage != StageFailed {
+		t.Fatalf("expected stage failed, got %s", final.Stage)
+	}
+}
+
+// --- 测试:高风险候选不会被自动丢弃 ---
+
+func TestMaintenanceHighRiskNotDiscarded(t *testing.T) {
+	cleaner := &fakeMaintenanceCleaner{
+		result: CleanResult{
+			DiscardIDs: []string{"cand-high-risk"},
+			KeepIDs:    []string{},
+			Summary:    "测试高风险不丢弃",
+		},
+	}
+	service, maintRepo := newTestMaintenanceService(t, cleaner,
+		Candidate{CandidateID: "cand-high-risk", OrgID: "org-1", ProjectID: "proj-1", Status: StatusPending, RiskLevel: RiskHigh},
+	)
+
+	run, _ := service.StartRun(context.Background(), MaintenanceRequest{
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+		Trigger:   MaintenanceTriggerManual,
+	})
+
+	service.ExecuteRun(context.Background(), MaintenanceRequest{
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+	}, run.RunID)
+
+	final, _ := maintRepo.GetRun(context.Background(), run.RunID)
+	if final.Discarded != 0 {
+		t.Fatalf("expected 0 discarded for high risk, got %d", final.Discarded)
+	}
+	if final.Kept != 1 {
+		t.Fatalf("expected 1 kept for high risk, got %d", final.Kept)
+	}
+}
+
+// --- 测试:status 接口支持 run_id 查询 ---
+
+func TestMaintenanceGetRunWithRunID(t *testing.T) {
+	cleaner := &fakeMaintenanceCleaner{result: CleanResult{Summary: "ok"}}
+	service, maintRepo := newTestMaintenanceService(t, cleaner)
+
+	maintRepo.CreateRun(context.Background(), MaintenanceRun{
+		RunID:     "test-run-123",
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+		Status:    MaintenanceRunRunning,
+		Stage:     StageCallingLLM,
+	})
+
+	run, err := service.GetRun(context.Background(), "test-run-123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if run.RunID != "test-run-123" {
+		t.Fatalf("expected run_id test-run-123, got %s", run.RunID)
+	}
+}
+
+// --- 测试:status 接口支持不传 run_id 恢复当前项目 running 任务 ---
+
+func TestMaintenanceGetActiveRun(t *testing.T) {
+	cleaner := &fakeMaintenanceCleaner{result: CleanResult{Summary: "ok"}}
+	service, maintRepo := newTestMaintenanceService(t, cleaner)
+
+	maintRepo.CreateRun(context.Background(), MaintenanceRun{
+		RunID:     "active-run",
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+		Status:    MaintenanceRunRunning,
+		Stage:     StageApplying,
+	})
+
+	run, err := service.GetActiveRun(context.Background(), "org-1", "proj-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if run == nil {
+		t.Fatal("expected active run, got nil")
+	}
+	if run.RunID != "active-run" {
+		t.Fatalf("expected run_id active-run, got %s", run.RunID)
+	}
+}
+
+// --- 测试:没有任务时返回 nil ---
+
+func TestMaintenanceGetActiveRunNone(t *testing.T) {
+	cleaner := &fakeMaintenanceCleaner{result: CleanResult{Summary: "ok"}}
+	service, _ := newTestMaintenanceService(t, cleaner)
+
+	run, err := service.GetActiveRun(context.Background(), "org-1", "proj-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if run != nil {
+		t.Fatalf("expected nil, got %v", run)
+	}
+}
+
+// --- 测试:响应 DTO 数字字段永远存在且为数字 ---
+
+func TestMaintenanceStatusDTODefaults(t *testing.T) {
+	run := MaintenanceRun{
+		RunID:  "test",
+		Status: MaintenanceRunRunning,
+		Stage:  StageQueued,
+	}
+	dto := run.ToStatusDTO()
+	if dto.ProgressPercent != 5 {
+		t.Fatalf("expected progress 5 for queued, got %d", dto.ProgressPercent)
+	}
+	if dto.TotalCandidates != 0 {
+		t.Fatalf("expected total_candidates 0, got %d", dto.TotalCandidates)
+	}
+	if dto.Processed != 0 {
+		t.Fatalf("expected processed 0, got %d", dto.Processed)
+	}
+	if dto.Discarded != 0 {
+		t.Fatalf("expected discarded 0, got %d", dto.Discarded)
+	}
+	if dto.Kept != 0 {
+		t.Fatalf("expected kept 0, got %d", dto.Kept)
+	}
+	if dto.Composed != 0 {
+		t.Fatalf("expected composed 0, got %d", dto.Composed)
+	}
+}
+
+func TestMaintenanceStageProgress(t *testing.T) {
+	tests := []struct {
+		stage MaintenanceRunStage
+		want  int
+	}{
+		{StageQueued, 5},
+		{StageLoadingCandidates, 10},
+		{StageCallingLLM, 45},
+		{StageValidating, 65},
+		{StageApplying, 80},
+		{StageComposing, 90},
+		{StageDone, 100},
+		{StageFailed, 0},
+	}
+	for _, tt := range tests {
+		got := StageProgress(tt.stage)
+		if got != tt.want {
+			t.Errorf("StageProgress(%s) = %d, want %d", tt.stage, got, tt.want)
+		}
 	}
 }
 
