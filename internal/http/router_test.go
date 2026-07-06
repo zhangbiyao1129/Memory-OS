@@ -1324,6 +1324,16 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 	}
 	preexistingClaudeSettings := `{
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ` + filepath.ToSlash(filepath.Join(home, ".claude", "scripts", "mem0_load.sh")) + `"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
@@ -1345,6 +1355,12 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
   }
 }
 `
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "scripts"), 0o755); err != nil {
+		t.Fatalf("create preexisting claude scripts dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "scripts", "mem0_load.sh"), []byte("#!/usr/bin/env sh\n"), 0o700); err != nil {
+		t.Fatalf("write existing mem0 hook script: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(preexistingClaudeSettings), 0o600); err != nil {
 		t.Fatalf("write preexisting Claude Code settings: %v", err)
 	}
@@ -1366,6 +1382,9 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 	}
 	if !strings.Contains(string(secretBytes), "MEMORY_OS_TOKEN='"+bootstrapToken+"'") {
 		t.Fatalf("secrets.env missing token assignment: %s", secretBytes)
+	}
+	if !strings.Contains(string(secretBytes), "MEMORY_OS_API_URL='"+server.URL+"'") {
+		t.Fatalf("secrets.env missing API URL assignment: %s", secretBytes)
 	}
 	if info, err := os.Stat(secretPath); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("secrets.env mode = %v, %v; want 0600", info, err)
@@ -1494,8 +1513,11 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 	if !strings.Contains(string(claudeSettingsBytes), "MEMORY_OS_HOOK_AGENT=claude-code") || !strings.Contains(string(claudeSettingsBytes), hookScript) {
 		t.Fatalf("Claude Code settings missing Memory OS Stop hook: %s", claudeSettingsBytes)
 	}
-	if !strings.Contains(string(claudeSettingsBytes), "mem0_save.sh") {
-		t.Fatalf("Claude Code settings must preserve non-Memory OS hooks: %s", claudeSettingsBytes)
+	if strings.Contains(string(claudeSettingsBytes), "mem0_save.sh") {
+		t.Fatalf("Claude Code settings must prune missing local hook scripts: %s", claudeSettingsBytes)
+	}
+	if !strings.Contains(string(claudeSettingsBytes), "mem0_load.sh") {
+		t.Fatalf("Claude Code settings must preserve existing non-Memory OS hooks: %s", claudeSettingsBytes)
 	}
 	if strings.Contains(string(claudeSettingsBytes), "memory_os_turn_event.sh") || strings.Count(string(claudeSettingsBytes), "MEMORY_OS_HOOK_AGENT=claude-code") != 1 {
 		t.Fatalf("Claude Code settings must replace old Memory OS hooks without duplicates: %s", claudeSettingsBytes)

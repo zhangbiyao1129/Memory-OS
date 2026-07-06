@@ -2178,8 +2178,13 @@ secret_file = secret_dir / "secrets.env"
 existing = ""
 if secret_file.exists():
     existing = secret_file.read_text()
-lines = [line for line in existing.splitlines() if not line.startswith("MEMORY_OS_TOKEN=")]
+lines = [
+    line for line in existing.splitlines()
+    if not line.startswith("MEMORY_OS_TOKEN=")
+    and not line.startswith("MEMORY_OS_API_URL=")
+]
 lines.append("MEMORY_OS_TOKEN='" + config["token"].replace("'", "'\"'\"'") + "'")
+lines.append("MEMORY_OS_API_URL='" + config["api_url"].replace("'", "'\"'\"'") + "'")
 secret_file.write_text("\n".join(lines) + "\n")
 secret_dir.chmod(0o700)
 secret_file.chmod(0o600)
@@ -2518,6 +2523,13 @@ def is_memory_os_hook_command(command):
         or "memory_os_turn_event.sh" in command
     )
 
+def is_missing_claude_script_command(command):
+    parts = shlex.split(command)
+    for part in parts:
+        if "/.claude/scripts/" in part and part.startswith("/"):
+            return not pathlib.Path(part).exists()
+    return False
+
 def prune_memory_os_hook_groups(groups):
     pruned_groups = []
     for group in groups:
@@ -2532,6 +2544,8 @@ def prune_memory_os_hook_groups(groups):
         for item in hooks:
             command = item.get("command", "") if isinstance(item, dict) else ""
             if command and is_memory_os_hook_command(command):
+                continue
+            if command and is_missing_claude_script_command(command):
                 continue
             kept.append(item)
         if kept:
