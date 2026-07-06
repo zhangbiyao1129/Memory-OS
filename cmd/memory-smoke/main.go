@@ -500,7 +500,7 @@ func pipelineE2ESmoke(ctx context.Context, apiBaseURL string) (err error) {
 	if searchToken == "" {
 		return fmt.Errorf("pipeline e2e smoke requires SMOKE_SEARCH_PAT or provisioned postgres actor")
 	}
-	body := fmt.Sprintf(`{"request_id":"pipeline-e2e-%[1]s","event":{"version":"v1","event_id":"event_%[1]s","turn_id":"turn_%[1]s","thread_id":"thread_%[1]s","session_id":"session_%[1]s","type":"user_message","created_at":"2026-07-02T00:00:00Z","actor":{"user_id":"%[2]s","org_id":"%[3]s","project_id":"%[4]s","agent_id":"%[5]s"},"payload":{"text":"Memory OS pipeline e2e %[1]s sk-test-redacted-example"}}}`,
+	body := fmt.Sprintf(`{"request_id":"pipeline-e2e-%[1]s","workspace":{"git_remote":"local/pipeline-e2e/%[1]s","git_root":"/pipeline-e2e/%[1]s","cwd":"/pipeline-e2e/%[1]s"},"event":{"version":"v1","event_id":"event_%[1]s","turn_id":"turn_%[1]s","thread_id":"thread_%[1]s","session_id":"session_%[1]s","type":"assistant_final","created_at":"2026-07-02T00:00:00Z","actor":{"user_id":"%[2]s","org_id":"%[3]s","project_id":"%[4]s","agent_id":"%[5]s"},"payload":{"text":"Memory OS pipeline e2e %[1]s sk-test-redacted-example"}}}`,
 		marker, actor.UserID, actor.OrgID, actor.ProjectID, actor.AgentID)
 	payload, err := postJSONWithBearerAllowStatus(ctx, strings.TrimRight(apiBaseURL, "/")+"/memory/turn-event", body, token)
 	if err != nil {
@@ -514,9 +514,13 @@ func pipelineE2ESmoke(ctx context.Context, apiBaseURL string) (err error) {
 		return fmt.Errorf("pipeline e2e turn event response was not accepted: %s", payload)
 	}
 
+	deadline := time.Now().Add(pipelineE2ETimeout())
+	if smokePostgresDSN() != "" && !strings.EqualFold(strings.TrimSpace(os.Getenv("SMOKE_PIPELINE_EXPECT_ARCHIVE")), "true") {
+		return waitForPipelineCandidateJob(ctx, smokePostgresDSN(), expectedEventID, deadline)
+	}
+
 	searchBody := fmt.Sprintf(`{"request_id":"pipeline-search-%[1]s","query":"%[1]s","actor":{"user_id":"%[2]s","org_id":"%[3]s","project_id":"%[4]s","agent_id":"%[5]s"},"scope":"project","visibility":"project","permission_labels":["%[6]s"],"max_context_bytes":512}`,
 		marker, actor.UserID, actor.OrgID, actor.ProjectID, actor.AgentID, actor.PermissionLabel)
-	deadline := time.Now().Add(pipelineE2ETimeout())
 	var lastPayload string
 	for {
 		searchPayload, err := postJSONWithBearerAllowStatus(ctx, strings.TrimRight(apiBaseURL, "/")+"/memory/search", searchBody, searchToken)
@@ -793,6 +797,45 @@ type pipelineE2EActor struct {
 	SearchToken string
 	Scope       smokeActorScope
 	Cleanup     func(context.Context) error
+}
+
+var waitForPipelineCandidateJob = waitForPipelineCandidateJobInPostgres
+
+func waitForPipelineCandidateJobInPostgres(ctx context.Context, dsn string, eventID string, deadline time.Time) error {
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	var lastStatus string
+	var lastError string
+	for {
+		err := pool.QueryRow(ctx, `
+SELECT status, coalesce(last_error, '')
+FROM candidate_memory_jobs
+WHERE source_event_id = $1
+ORDER BY created_at DESC
+LIMIT 1`, eventID).Scan(&lastStatus, &lastError)
+		if err == nil {
+			switch lastStatus {
+			case "done":
+				return nil
+			case "failed":
+				return fmt.Errorf("candidate job failed for event %s: %s", eventID, lastError)
+			}
+		}
+		if time.Now().After(deadline) {
+			if lastStatus == "" {
+				return fmt.Errorf("candidate job was not created for event %s", eventID)
+			}
+			return fmt.Errorf("candidate job for event %s did not complete, last status %q: %s", eventID, lastStatus, lastError)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 var provisionPipelineE2EActor = provisionPipelineE2EActorFromPostgres

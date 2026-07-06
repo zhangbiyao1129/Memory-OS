@@ -51,7 +51,7 @@ func TestGitDetectorDetectsWorkspaceWithoutLeakingRemoteCredentials(t *testing.T
 	}
 }
 
-func TestGitDetectorRequiresRemote(t *testing.T) {
+func TestGitDetectorFallsBackToLocalWorkspaceWhenRemoteIsMissing(t *testing.T) {
 	runner := &fakeCommandRunner{outputs: map[string]string{
 		"git rev-parse --show-toplevel":      "/work/no-remote\n",
 		"git config --get remote.origin.url": "",
@@ -60,8 +60,18 @@ func TestGitDetectorRequiresRemote(t *testing.T) {
 	}}
 	detector := NewGitDetector(runner)
 
-	_, err := detector.Detect(context.Background(), "/work/no-remote")
-	if err == nil {
-		t.Fatal("Detect() error = nil, want missing remote error")
+	identity, err := detector.Detect(context.Background(), "/work/no-remote")
+	if err != nil {
+		t.Fatalf("Detect() error = %v", err)
+	}
+
+	if identity.CWD != "/work/no-remote" || identity.GitRoot != "/work/no-remote" {
+		t.Fatalf("workspace paths = %#v, want local cwd as cwd and git root", identity)
+	}
+	if identity.GitRemote != "local/work/no-remote" {
+		t.Fatalf("GitRemote = %q, want local/work/no-remote", identity.GitRemote)
+	}
+	if identity.GitBranch != "" || identity.GitCommit != "" {
+		t.Fatalf("git metadata = %#v, want empty branch and commit for local fallback", identity)
 	}
 }

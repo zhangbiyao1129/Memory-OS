@@ -2356,6 +2356,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+DEFAULT_MEMORY_OS_API_URL = __MEMORY_OS_API_URL__
+
 def load_secrets():
     secrets = Path.home() / ".config" / "ai-secrets" / "secrets.env"
     if not secrets.exists():
@@ -2386,6 +2388,26 @@ def git_value(cwd, *args):
         return subprocess.check_output(["git", "-C", cwd, *args], text=True, stderr=subprocess.DEVNULL, timeout=2).strip()
     except Exception:
         return ""
+
+def workspace_identity(cwd):
+    git_root = git_value(cwd, "rev-parse", "--show-toplevel")
+    git_remote = git_value(cwd, "remote", "get-url", "origin")
+    if git_remote:
+        return {
+            "git_remote": git_remote,
+            "git_root": git_root,
+            "cwd": cwd,
+            "git_branch": git_value(cwd, "branch", "--show-current"),
+            "git_commit": git_value(cwd, "rev-parse", "HEAD"),
+        }
+    abs_cwd = str(Path(cwd).expanduser().resolve())
+    return {
+        "git_remote": "local/" + abs_cwd.lstrip("/"),
+        "git_root": abs_cwd,
+        "cwd": abs_cwd,
+        "git_branch": "",
+        "git_commit": "",
+    }
 
 def extract_text(data, raw):
     if isinstance(data, dict):
@@ -2427,27 +2449,17 @@ api = os.environ.get("MEMORY_OS_API_URL", os.environ.get("MEMORY_OS_SETUP_API_UR
 if not api:
     api = os.environ.get("MEMORY_OS_SERVER", "").rstrip("/")
 if not api:
-    api = "http://127.0.0.1:18081"
+    api = DEFAULT_MEMORY_OS_API_URL.rstrip("/")
 
 text = clean_text(extract_text(data, raw))
 if not text:
     sys.exit(0)
 
-git_root = git_value(cwd, "rev-parse", "--show-toplevel")
-git_remote = git_value(cwd, "remote", "get-url", "origin")
-git_branch = git_value(cwd, "branch", "--show-current")
-git_commit = git_value(cwd, "rev-parse", "HEAD")
 digest = hashlib.sha256((agent + "\n" + cwd + "\n" + text).encode("utf-8")).hexdigest()[:24]
 
 body = {
     "request_id": f"{agent}_hook_{digest}",
-    "workspace": {
-        "git_remote": git_remote,
-        "git_root": git_root,
-        "cwd": cwd,
-        "git_branch": git_branch,
-        "git_commit": git_commit,
-    },
+    "workspace": workspace_identity(cwd),
     "event": {
         "version": "v1",
         "event_id": f"event_{agent}_{digest}",
@@ -2474,6 +2486,7 @@ try:
 except (urllib.error.URLError, TimeoutError, OSError):
     sys.exit(0)
 '''
+    script = script.replace("__MEMORY_OS_API_URL__", json.dumps(config["api_url"]))
     atomic_text_write(hook_path, script)
     hook_path.chmod(0o700)
     return hook_path

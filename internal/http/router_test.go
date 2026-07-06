@@ -1472,6 +1472,16 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 			t.Fatalf("common hook script missing marker %q", marker)
 		}
 	}
+	for _, marker := range []string{
+		`DEFAULT_MEMORY_OS_API_URL = "` + server.URL + `"`,
+		"def workspace_identity(cwd):",
+		`"local/" + abs_cwd.lstrip("/")`,
+		`"workspace": workspace_identity(cwd)`,
+	} {
+		if !strings.Contains(string(hookBytes), marker) {
+			t.Fatalf("common hook script missing non-git workspace fallback marker %q", marker)
+		}
+	}
 
 	claudeSettingsBytes, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
 	if err != nil {

@@ -54,11 +54,11 @@ func (d GitDetector) Detect(ctx context.Context, cwd string) (Identity, error) {
 	}
 	root, err := d.required(ctx, absCWD, "git", "rev-parse", "--show-toplevel")
 	if err != nil {
-		return Identity{}, errors.New("git workspace root is required")
+		return localIdentity(absCWD), nil
 	}
 	remote, err := d.required(ctx, absCWD, "git", "config", "--get", "remote.origin.url")
 	if err != nil {
-		return Identity{}, errors.New("git origin remote is required")
+		return localIdentity(absCWD), nil
 	}
 	sourceKey, err := NormalizeGitRemote(remote)
 	if err != nil {
@@ -73,6 +73,18 @@ func (d GitDetector) Detect(ctx context.Context, cwd string) (Identity, error) {
 		GitBranch: branch,
 		GitCommit: commit,
 	}, nil
+}
+
+func localIdentity(absCWD string) Identity {
+	localPath := strings.TrimLeft(filepath.ToSlash(absCWD), "/")
+	if localPath == "" {
+		localPath = "workspace"
+	}
+	return Identity{
+		CWD:       absCWD,
+		GitRoot:   absCWD,
+		GitRemote: "local/" + localPath,
+	}
 }
 
 func (d GitDetector) required(ctx context.Context, dir string, name string, args ...string) (string, error) {

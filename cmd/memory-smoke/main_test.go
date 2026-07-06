@@ -403,8 +403,13 @@ func TestPipelineE2ESmokeCanProvisionActorFromPostgresDSN(t *testing.T) {
 	t.Setenv("SMOKE_POSTGRES_DSN", "postgres://memory-os-smoke")
 	t.Setenv("SMOKE_PIPELINE_E2E_MARKER", "pipeline-marker-provisioned")
 	originalProvisioner := provisionPipelineE2EActor
-	t.Cleanup(func() { provisionPipelineE2EActor = originalProvisioner })
+	originalCandidateWaiter := waitForPipelineCandidateJob
+	t.Cleanup(func() {
+		provisionPipelineE2EActor = originalProvisioner
+		waitForPipelineCandidateJob = originalCandidateWaiter
+	})
 	cleanupCalled := false
+	candidateWaitCalled := false
 	provisionPipelineE2EActor = func(ctx context.Context, dsn, marker string) (pipelineE2EActor, error) {
 		if dsn != "postgres://memory-os-smoke" || marker != "pipeline-marker-provisioned" {
 			t.Fatalf("provision args dsn=%q marker=%q", dsn, marker)
@@ -425,6 +430,13 @@ func TestPipelineE2ESmokeCanProvisionActorFromPostgresDSN(t *testing.T) {
 			},
 		}, nil
 	}
+	waitForPipelineCandidateJob = func(ctx context.Context, dsn string, eventID string, deadline time.Time) error {
+		candidateWaitCalled = true
+		if dsn != "postgres://memory-os-smoke" || eventID != "event_pipeline-marker-provisioned" {
+			t.Fatalf("candidate wait args dsn=%q eventID=%q", dsn, eventID)
+		}
+		return nil
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -440,11 +452,6 @@ func TestPipelineE2ESmokeCanProvisionActorFromPostgresDSN(t *testing.T) {
 				t.Fatalf("turn event Authorization = %q", r.Header.Get("Authorization"))
 			}
 			_, _ = w.Write([]byte(`{"event_id":"event_pipeline-marker-provisioned","status":"accepted","deduped":false}`))
-		case "/memory/search":
-			if r.Header.Get("Authorization") != "Bearer pat-provisioned-token" {
-				t.Fatalf("search Authorization = %q", r.Header.Get("Authorization"))
-			}
-			_, _ = w.Write([]byte(`{"request_id":"pipeline","context":"pipeline-marker-provisioned archived","results":[{"text":"pipeline-marker-provisioned archived","source":{"kind":"archive_chunk","archive_id":"archive_pipeline","chunk_id":"chunk_pipeline"}}],"rerank_degraded":true}`))
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
@@ -457,6 +464,9 @@ func TestPipelineE2ESmokeCanProvisionActorFromPostgresDSN(t *testing.T) {
 	if !cleanupCalled {
 		t.Fatal("pipelineE2ESmoke() did not cleanup provisioned actor")
 	}
+	if !candidateWaitCalled {
+		t.Fatal("pipelineE2ESmoke() did not wait for candidate job")
+	}
 }
 
 func TestPipelineE2ESmokeReturnsProvisionedActorCleanupError(t *testing.T) {
@@ -465,7 +475,11 @@ func TestPipelineE2ESmokeReturnsProvisionedActorCleanupError(t *testing.T) {
 	t.Setenv("SMOKE_POSTGRES_DSN", "postgres://memory-os-smoke")
 	t.Setenv("SMOKE_PIPELINE_E2E_MARKER", "pipeline-marker-cleanup")
 	originalProvisioner := provisionPipelineE2EActor
-	t.Cleanup(func() { provisionPipelineE2EActor = originalProvisioner })
+	originalCandidateWaiter := waitForPipelineCandidateJob
+	t.Cleanup(func() {
+		provisionPipelineE2EActor = originalProvisioner
+		waitForPipelineCandidateJob = originalCandidateWaiter
+	})
 	provisionPipelineE2EActor = func(ctx context.Context, dsn, marker string) (pipelineE2EActor, error) {
 		return pipelineE2EActor{
 			Token:       "adapter-provisioned-token",
@@ -482,13 +496,14 @@ func TestPipelineE2ESmokeReturnsProvisionedActorCleanupError(t *testing.T) {
 			},
 		}, nil
 	}
+	waitForPipelineCandidateJob = func(ctx context.Context, dsn string, eventID string, deadline time.Time) error {
+		return nil
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/memory/turn-event":
 			_, _ = w.Write([]byte(`{"event_id":"event_pipeline-marker-cleanup","status":"accepted","deduped":false}`))
-		case "/memory/search":
-			_, _ = w.Write([]byte(`{"request_id":"pipeline","context":"pipeline-marker-cleanup archived","results":[{"text":"pipeline-marker-cleanup archived","source":{"kind":"archive_chunk","archive_id":"archive_pipeline","chunk_id":"chunk_pipeline"}}],"rerank_degraded":true}`))
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
@@ -532,6 +547,12 @@ func TestPipelineE2ESmokeWritesTurnEventAndFindsArchiveChunk(t *testing.T) {
 			}
 			if !strings.Contains(fmtAny(payload), "user_pipeline") {
 				t.Fatalf("turn event did not use configured actor: %#v", payload)
+			}
+			if !strings.Contains(fmtAny(payload), "local/pipeline-e2e/pipeline-marker-test") {
+				t.Fatalf("turn event missing pipeline workspace identity: %#v", payload)
+			}
+			if !strings.Contains(fmtAny(payload), "assistant_final") {
+				t.Fatalf("turn event must use candidate-triggering event type: %#v", payload)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"event_id":"event_pipeline-marker-test","status":"accepted","deduped":false}`))
