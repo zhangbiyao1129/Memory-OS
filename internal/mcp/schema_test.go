@@ -32,6 +32,32 @@ func TestToolsContainRequiredMemoryTools(t *testing.T) {
 	}
 }
 
+func TestToolsExposeActionableInputSchemas(t *testing.T) {
+	search := findTool(t, "memory_search")
+	searchProperties := schemaProperties(t, search.InputSchema)
+	for _, name := range []string{"query", "workspace", "actor", "limit"} {
+		if _, ok := searchProperties[name]; !ok {
+			t.Fatalf("memory_search schema missing property %q: %#v", name, search.InputSchema)
+		}
+	}
+	searchRequired := stringSetFromAnySlice(t, search.InputSchema["required"])
+	if !searchRequired["query"] {
+		t.Fatalf("memory_search schema required = %#v, want query", search.InputSchema["required"])
+	}
+
+	appendEvent := findTool(t, "memory_append_event")
+	appendProperties := schemaProperties(t, appendEvent.InputSchema)
+	for _, name := range []string{"request_id", "workspace", "event"} {
+		if _, ok := appendProperties[name]; !ok {
+			t.Fatalf("memory_append_event schema missing property %q: %#v", name, appendEvent.InputSchema)
+		}
+	}
+	appendRequired := stringSetFromAnySlice(t, appendEvent.InputSchema["required"])
+	if !appendRequired["event"] || !appendRequired["workspace"] {
+		t.Fatalf("memory_append_event schema required = %#v, want event and workspace", appendEvent.InputSchema["required"])
+	}
+}
+
 func TestHandleToolRunsMemorySearch(t *testing.T) {
 	handler := NewHandler(HandlerOptions{Retrieval: fixtureRetrievalService()})
 	response := handler.HandleTool("memory_search", map[string]any{
@@ -70,6 +96,43 @@ func TestHandleToolRunsMemorySearch(t *testing.T) {
 	if strings.Contains(response.Search.Context, "cross_tenant_leaked") {
 		t.Fatalf("MCP search leaked cross-tenant context: %s", response.Search.Context)
 	}
+}
+
+func findTool(t *testing.T, name string) Tool {
+	t.Helper()
+	for _, tool := range Tools() {
+		if tool.Name == name {
+			return tool
+		}
+	}
+	t.Fatalf("tool %q not found", name)
+	return Tool{}
+}
+
+func schemaProperties(t *testing.T, schema map[string]any) map[string]any {
+	t.Helper()
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema properties = %#v, want object", schema["properties"])
+	}
+	return properties
+}
+
+func stringSetFromAnySlice(t *testing.T, value any) map[string]bool {
+	t.Helper()
+	items, ok := value.([]any)
+	if !ok {
+		t.Fatalf("required = %#v, want []any", value)
+	}
+	set := map[string]bool{}
+	for _, item := range items {
+		text, ok := item.(string)
+		if !ok {
+			t.Fatalf("required item = %#v, want string", item)
+		}
+		set[text] = true
+	}
+	return set
 }
 
 func TestHandleToolMemorySearchDefaultsToProjectScopeAndVisibility(t *testing.T) {

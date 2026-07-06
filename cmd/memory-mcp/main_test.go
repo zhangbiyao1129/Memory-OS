@@ -144,6 +144,9 @@ func TestMCPStreamableHTTPInitializeAndToolsList(t *testing.T) {
 			t.Fatalf("tools/list response missing %s: %s", want, toolsList.Body.String())
 		}
 	}
+	if !strings.Contains(toolsList.Body.String(), `"properties"`) || !strings.Contains(toolsList.Body.String(), `"workspace"`) {
+		t.Fatalf("tools/list response must expose actionable input schema: %s", toolsList.Body.String())
+	}
 }
 
 func TestMCPStreamableHTTPToolCallRunsMemorySearch(t *testing.T) {

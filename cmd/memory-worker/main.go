@@ -13,6 +13,7 @@ import (
 	"memory-os/internal/config"
 	"memory-os/internal/db"
 	"memory-os/internal/eventlog"
+	"memory-os/internal/hotmemory"
 	"memory-os/internal/jobs"
 	"memory-os/internal/llm"
 	"memory-os/internal/logger"
@@ -58,7 +59,22 @@ var newRAGIndexStore = func(ctx context.Context, cfg config.Config, pool *pgxpoo
 var newRAGIndexWorker = func(store rag.Store) *jobs.RAGIndexWorker {
 	return jobs.NewRAGIndexWorker(rag.NewService(store))
 }
+var newHotMemoryService = func(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (hotmemory.Service, error) {
+	qdrantClient, err := qdrant.NewClient(cfg.QdrantURL)
+	if err != nil {
+		return hotmemory.Service{}, err
+	}
+	if err := qdrantClient.EnsureCollectionSchema(ctx, qdrant.CollectionConfig{Name: qdrant.DefaultCollectionName, VectorSize: qdrant.DefaultVectorSize, Distance: qdrant.DefaultDistance}, qdrant.DefaultPayloadIndexConfigs()); err != nil {
+		return hotmemory.Service{}, err
+	}
+	embedder, err := llm.NewOpenAICompatible(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, EmbeddingModel: cfg.EmbeddingModel})
+	if err != nil {
+		return hotmemory.Service{}, err
+	}
+	return hotmemory.NewServiceWithVectorIndex(hotmemory.NewPGRepository(pool), hotmemory.NewQdrantIndex(pool, qdrantClient, embedder, qdrant.DefaultCollectionName)), nil
+}
 var newOpenAICompatibleClient = llm.NewOpenAICompatible
+var newCandidateMemoryWorker = jobs.NewCandidateMemoryWorker
 
 // eventlogCandidateLoader 把候选任务转换为提炼请求:从 eventlog 加载已保存(已脱敏)事件。
 type eventlogCandidateLoader struct {
@@ -165,10 +181,15 @@ func buildWorker(cfg config.Config) (*jobs.Runner, error) {
 		candidateRepo := candidatememory.NewPGRepository(pool)
 		candidateQueue = jobs.NewPGCandidateMemoryQueue(candidateRepo, jobs.PGCandidateMemoryQueueOptions{WorkerID: "memory-worker"})
 		if llmClient, llmErr := newOpenAICompatibleClient(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, LLMModel: cfg.LLMModel, EmbeddingModel: cfg.EmbeddingModel}); llmErr == nil {
+			hotMemoryService, err := newHotMemoryService(context.Background(), cfg, pool)
+			if err != nil {
+				closePostgresPool(pool)
+				return nil, err
+			}
 			extractor := candidatememory.NewLLMExtractor(llmClient).WithModel(cfg.LLMModel)
 			candidateService := candidatememory.NewService(candidateRepo, candidatememory.RuleScorer{})
 			eventLoader := eventlogCandidateLoader{eventlog: eventlog.NewService(eventlog.NewPGRepository(pool), eventlog.SanitizerOptions{MaxTurnEventBytes: 256 * 1024, MaxToolOutputBytes: 64 * 1024})}
-			worker := jobs.NewCandidateMemoryWorker(extractor, candidatememory.NewRouter(nil), candidateService, candidateRepo, eventLoader)
+			worker := newCandidateMemoryWorker(extractor, candidatememory.NewRouter(hotMemoryService), candidateService, candidateRepo, eventLoader)
 			candidateWorker = &worker
 		}
 	}

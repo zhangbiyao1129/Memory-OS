@@ -34,9 +34,9 @@ func NewHandler(options HandlerOptions) Handler {
 
 func Tools() []Tool {
 	return []Tool{
-		{Name: "memory_search", Description: "Search unified Memory OS memories", InputSchema: objectSchema()},
+		{Name: "memory_search", Description: "Search unified Memory OS memories", InputSchema: memorySearchSchema()},
 		{Name: "memory_archive", Description: "Archive current memory context", InputSchema: objectSchema()},
-		{Name: "memory_append_event", Description: "Append a TurnEvent v1", InputSchema: objectSchema()},
+		{Name: "memory_append_event", Description: "Append a TurnEvent v1", InputSchema: memoryAppendEventSchema()},
 		{Name: "memory_get_archive", Description: "Get a Markdown archive", InputSchema: objectSchema()},
 		{Name: "memory_mark_used", Description: "Mark memory result as used", InputSchema: objectSchema()},
 		{Name: "memory_stats", Description: "Get Memory OS statistics", InputSchema: objectSchema()},
@@ -72,6 +72,94 @@ func (h Handler) HandleTool(name string, args map[string]any) ToolResponse {
 
 func objectSchema() map[string]any {
 	return map[string]any{"type": "object"}
+}
+
+func memorySearchSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"request_id": map[string]any{"type": "string"},
+			"query":      map[string]any{"type": "string"},
+			"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 20},
+			"workspace":  workspaceSchema(),
+			"actor":      actorSchema(),
+			"scope": map[string]any{
+				"type": "string",
+				"enum": []any{"project", "user", "org"},
+			},
+			"visibility": map[string]any{
+				"type": "string",
+				"enum": []any{"project", "private", "org"},
+			},
+			"archive_index_generation": map[string]any{"type": "integer", "minimum": 0},
+			"max_context_bytes":        map[string]any{"type": "integer", "minimum": 1},
+		},
+		"required":             []any{"query"},
+		"additionalProperties": true,
+	}
+}
+
+func memoryAppendEventSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"request_id": map[string]any{"type": "string"},
+			"workspace":  workspaceSchema(),
+			"event": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"version":    map[string]any{"type": "string"},
+					"event_id":   map[string]any{"type": "string"},
+					"turn_id":    map[string]any{"type": "string"},
+					"thread_id":  map[string]any{"type": "string"},
+					"session_id": map[string]any{"type": "string"},
+					"type":       map[string]any{"type": "string"},
+					"created_at": map[string]any{"type": "string", "format": "date-time"},
+					"actor":      actorSchema(),
+					"source": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"platform": map[string]any{"type": "string"},
+							"host":     map[string]any{"type": "string"},
+						},
+						"additionalProperties": true,
+					},
+					"payload": map[string]any{"type": "object", "additionalProperties": true},
+				},
+				"required":             []any{"version", "event_id", "turn_id", "type", "created_at", "actor", "payload"},
+				"additionalProperties": true,
+			},
+		},
+		"required":             []any{"workspace", "event"},
+		"additionalProperties": true,
+	}
+}
+
+func workspaceSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"cwd":        map[string]any{"type": "string"},
+			"git_root":   map[string]any{"type": "string"},
+			"git_remote": map[string]any{"type": "string"},
+			"git_branch": map[string]any{"type": "string"},
+			"git_commit": map[string]any{"type": "string"},
+		},
+		"additionalProperties": true,
+	}
+}
+
+func actorSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"user_id":    map[string]any{"type": "string"},
+			"org_id":     map[string]any{"type": "string"},
+			"project_id": map[string]any{"type": "string"},
+			"agent_id":   map[string]any{"type": "string"},
+		},
+		"additionalProperties": true,
+	}
 }
 
 func memorySearchRequest(args map[string]any) (retrieval.SearchRequest, error) {

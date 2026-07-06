@@ -8,7 +8,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"memory-os/internal/archive"
+	"memory-os/internal/candidatememory"
 	"memory-os/internal/config"
+	"memory-os/internal/hotmemory"
 	"memory-os/internal/jobs"
 	"memory-os/internal/llm"
 	"memory-os/internal/rag"
@@ -76,6 +78,7 @@ func TestBuildWorkerPassesLLMModelToCandidateWorker(t *testing.T) {
 	originalNewRAGIndexQueue := newRAGIndexQueue
 	originalNewRAGIndexWorker := newRAGIndexWorker
 	originalNewRAGIndexStore := newRAGIndexStore
+	originalNewHotMemoryService := newHotMemoryService
 	originalNewOpenAICompatibleClient := newOpenAICompatibleClient
 	t.Cleanup(func() {
 		newPostgresPool = originalNewPool
@@ -86,6 +89,7 @@ func TestBuildWorkerPassesLLMModelToCandidateWorker(t *testing.T) {
 		newRAGIndexQueue = originalNewRAGIndexQueue
 		newRAGIndexWorker = originalNewRAGIndexWorker
 		newRAGIndexStore = originalNewRAGIndexStore
+		newHotMemoryService = originalNewHotMemoryService
 		newOpenAICompatibleClient = originalNewOpenAICompatibleClient
 	})
 
@@ -105,6 +109,9 @@ func TestBuildWorkerPassesLLMModelToCandidateWorker(t *testing.T) {
 	}
 	newRAGIndexWorker = func(store rag.Store) *jobs.RAGIndexWorker {
 		return jobs.NewRAGIndexWorker(rag.NewService(store))
+	}
+	newHotMemoryService = func(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (hotmemory.Service, error) {
+		return hotmemory.NewService(hotmemory.NewMemoryRepository()), nil
 	}
 	newOpenAICompatibleClient = func(cfg llm.OpenAICompatibleConfig) (*llm.OpenAICompatibleClient, error) {
 		capturedLLMConfig = cfg
@@ -140,6 +147,7 @@ func TestBuildWorkerRunsMigrationsWhenPostgresDSNExists(t *testing.T) {
 	originalNewRAGIndexQueue := newRAGIndexQueue
 	originalNewRAGIndexWorker := newRAGIndexWorker
 	originalNewRAGIndexStore := newRAGIndexStore
+	originalNewHotMemoryService := newHotMemoryService
 	t.Cleanup(func() {
 		newPostgresPool = originalNewPool
 		runWorkerMigrations = originalRunMigrations
@@ -149,6 +157,7 @@ func TestBuildWorkerRunsMigrationsWhenPostgresDSNExists(t *testing.T) {
 		newRAGIndexQueue = originalNewRAGIndexQueue
 		newRAGIndexWorker = originalNewRAGIndexWorker
 		newRAGIndexStore = originalNewRAGIndexStore
+		newHotMemoryService = originalNewHotMemoryService
 	})
 
 	newPoolCalled := false
@@ -186,6 +195,9 @@ func TestBuildWorkerRunsMigrationsWhenPostgresDSNExists(t *testing.T) {
 	newRAGIndexWorker = func(store rag.Store) *jobs.RAGIndexWorker {
 		ragIndexWorkerCalled = true
 		return jobs.NewRAGIndexWorker(rag.NewService(store))
+	}
+	newHotMemoryService = func(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (hotmemory.Service, error) {
+		return hotmemory.NewService(hotmemory.NewMemoryRepository()), nil
 	}
 
 	worker, err := buildWorker(config.Config{PostgresDSN: "postgres://memory_os:secret@postgres:5432/memory_os", ArchiveDir: "/data/memory-os", QdrantURL: "http://qdrant:6333", LLMBaseURL: "http://llm.local:8000", LLMAPIKey: "test-key", EmbeddingModel: "bge-m3"})
@@ -227,6 +239,88 @@ func TestBuildWorkerRunsMigrationsWhenPostgresDSNExists(t *testing.T) {
 	}
 	if !worker.RAGIndexQueueConfigured() {
 		t.Fatal("buildWorker() did not configure rag index queue")
+	}
+}
+
+func TestBuildWorkerInjectsHotMemoryIntoCandidateRouter(t *testing.T) {
+	originalNewPool := newPostgresPool
+	originalRunMigrations := runWorkerMigrations
+	originalClosePool := closePostgresPool
+	originalNewArchiveService := newArchiveService
+	originalNewArchiveQueue := newArchiveQueue
+	originalNewRAGIndexQueue := newRAGIndexQueue
+	originalNewRAGIndexWorker := newRAGIndexWorker
+	originalNewRAGIndexStore := newRAGIndexStore
+	originalNewHotMemoryService := newHotMemoryService
+	originalNewOpenAICompatibleClient := newOpenAICompatibleClient
+	originalNewCandidateMemoryWorker := newCandidateMemoryWorker
+	t.Cleanup(func() {
+		newPostgresPool = originalNewPool
+		runWorkerMigrations = originalRunMigrations
+		closePostgresPool = originalClosePool
+		newArchiveService = originalNewArchiveService
+		newArchiveQueue = originalNewArchiveQueue
+		newRAGIndexQueue = originalNewRAGIndexQueue
+		newRAGIndexWorker = originalNewRAGIndexWorker
+		newRAGIndexStore = originalNewRAGIndexStore
+		newHotMemoryService = originalNewHotMemoryService
+		newOpenAICompatibleClient = originalNewOpenAICompatibleClient
+		newCandidateMemoryWorker = originalNewCandidateMemoryWorker
+	})
+
+	newPostgresPool = func(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+		return &pgxpool.Pool{}, nil
+	}
+	runWorkerMigrations = func(ctx context.Context, pool *pgxpool.Pool) error { return nil }
+	closePostgresPool = func(pool *pgxpool.Pool) {}
+	newArchiveService = func(repo archive.Repository, root string) archive.Service {
+		return archive.NewService(archive.NewMemoryRepository(), t.TempDir())
+	}
+	newArchiveQueue = func(pool *pgxpool.Pool) jobs.ArchiveQueue { return fakeWorkerArchiveQueue{} }
+	newRAGIndexQueue = func(pool *pgxpool.Pool) jobs.RAGIndexQueue { return fakeWorkerRAGIndexQueue{} }
+	newRAGIndexStore = func(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (rag.Store, error) {
+		return rag.NewMemoryStore(), nil
+	}
+	newRAGIndexWorker = func(store rag.Store) *jobs.RAGIndexWorker {
+		return jobs.NewRAGIndexWorker(rag.NewService(store))
+	}
+	newHotMemoryService = func(ctx context.Context, cfg config.Config, pool *pgxpool.Pool) (hotmemory.Service, error) {
+		return hotmemory.NewService(hotmemory.NewMemoryRepository()), nil
+	}
+	newOpenAICompatibleClient = func(cfg llm.OpenAICompatibleConfig) (*llm.OpenAICompatibleClient, error) {
+		return llm.NewOpenAICompatible(cfg)
+	}
+	hotRouterObserved := false
+	newCandidateMemoryWorker = func(extractor candidatememory.Extractor, router candidatememory.Router, service *candidatememory.Service, repo candidatememory.Repository, eventLoader jobs.CandidateEventLoader) jobs.CandidateMemoryWorker {
+		candidate := candidatememory.Candidate{
+			CandidateID: "cand-worker-hot",
+			OrgID:       "org_1",
+			ProjectID:   "project_1",
+			UserID:      "user_1",
+			AgentID:     "codex",
+			SourceKey:   "local/workspace",
+			Content:     "用户默认使用 Go 开发后端服务",
+			MemoryType:  candidatememory.MemoryTypePreference,
+			RiskLevel:   candidatememory.RiskLow,
+			Confidence:  0.95,
+		}
+		routed, decision, err := router.ApplyRouting(candidate)
+		if err != nil {
+			t.Fatalf("ApplyRouting() error = %v", err)
+		}
+		hotRouterObserved = decision.Target == candidatememory.RoutingTargetHotMemory && routed.Status == candidatememory.StatusPromotedToHot
+		return jobs.NewCandidateMemoryWorker(extractor, router, service, repo, eventLoader)
+	}
+
+	worker, err := buildWorker(config.Config{PostgresDSN: "postgres://memory_os:secret@postgres:5432/memory_os", ArchiveDir: "/data/memory-os", QdrantURL: "http://qdrant:6333", LLMBaseURL: "http://llm.local:8000", LLMAPIKey: "test-key", EmbeddingModel: "bge-m3"})
+	if err != nil {
+		t.Fatalf("buildWorker() error = %v", err)
+	}
+	if worker == nil || !worker.CandidateWorkerConfigured() {
+		t.Fatal("buildWorker() did not configure candidate worker")
+	}
+	if !hotRouterObserved {
+		t.Fatal("buildWorker() did not inject hot memory into candidate router")
 	}
 }
 
