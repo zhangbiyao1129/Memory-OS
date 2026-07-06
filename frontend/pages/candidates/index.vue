@@ -38,6 +38,9 @@ const composing = ref(false)
 const composeForce = ref(false)
 const composeSourceKey = ref('')
 const composeThreadId = ref('')
+const cleaning = ref(false)
+const cleanSourceKey = ref('')
+const cleanThreadId = ref('')
 
 const hasProjectContext = computed(() => Boolean(context.orgId && context.projectId))
 
@@ -171,6 +174,31 @@ async function composeTopic() {
   }
 }
 
+async function runMaintenance() {
+  if (!hasProjectContext.value) {
+    error.value = '请先选择组织和项目'
+    return
+  }
+  cleaning.value = true
+  error.value = ''
+  success.value = ''
+  try {
+    const result = await request<{ run_id: string; processed: number; discarded: number; kept: number; composed: number; archive_id: string }>('/memory/candidates/maintenance/run', {
+      method: 'POST',
+      body: requestBody({
+        source_key: cleanSourceKey.value.trim(),
+        thread_id: cleanThreadId.value.trim()
+      })
+    })
+    success.value = `清洗完成：处理 ${result.processed} 条，丢弃 ${result.discarded} 条，保留 ${result.kept} 条，沉淀 ${result.composed} 条。`
+    await loadCandidates()
+  } catch (err: any) {
+    error.value = err.message || '清洗失败'
+  } finally {
+    cleaning.value = false
+  }
+}
+
 onMounted(async () => {
   auth.initFromStorage()
   context.initFromStorage()
@@ -249,6 +277,26 @@ watch(() => [context.orgId, context.projectId, statusFilter.value, riskFilter.va
       <p v-if="!hasProjectContext" class="mt-3 rounded-2xl bg-amber-50 p-3 text-sm text-amber-800">请先选择组织和项目。</p>
       <p v-if="error" class="mt-3 rounded-2xl bg-red-50 p-3 text-sm text-red-700">{{ error }}</p>
       <p v-if="success" class="mt-3 rounded-2xl bg-emerald-50 p-3 text-sm text-emerald-700">{{ success }}</p>
+    </section>
+
+    <!-- AI 清洗整合 -->
+    <section class="mt-4 rounded-3xl border bg-white p-5">
+      <h3 class="text-lg font-black">AI 清洗整合</h3>
+      <p class="mt-2 text-sm text-stone-600">AI 自动丢弃噪声、合并重复、保留高价值候选，并触发现有沉淀。</p>
+      <div class="mt-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto]">
+        <label class="text-sm font-bold text-stone-600">
+          source_key（可选）
+          <input v-model="cleanSourceKey" class="mt-2 w-full rounded-2xl border p-3 text-sm" placeholder="筛选 source_key">
+        </label>
+        <label class="text-sm font-bold text-stone-600">
+          thread_id（可选）
+          <input v-model="cleanThreadId" class="mt-2 w-full rounded-2xl border p-3 text-sm" placeholder="筛选 thread_id">
+        </label>
+        <button class="self-end rounded-2xl bg-orange-600 px-4 py-3 font-bold text-white disabled:cursor-not-allowed disabled:bg-stone-400" :disabled="cleaning || !hasProjectContext" @click="runMaintenance">
+          {{ cleaning ? '清洗中...' : 'AI 清洗' }}
+        </button>
+      </div>
+      <p v-if="!hasProjectContext" class="mt-3 rounded-2xl bg-amber-50 p-3 text-sm text-amber-800">请先选择组织和项目。</p>
     </section>
 
     <!-- 候选列表 -->

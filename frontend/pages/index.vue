@@ -7,7 +7,7 @@ const { stats, loading, error: statsError, hasProjectContext, loadStats } = useM
 const assetRows = computed(() => [
   { label: '归档库', value: stats.value?.archives.total || 0, tone: 'bg-sky-600' },
   { label: '热记忆', value: stats.value?.hot_memories.total || 0, tone: 'bg-orange-600' },
-  { label: '候选记忆', value: stats.value?.candidates.total || 0, tone: 'bg-amber-500' },
+  { label: '待处理候选', value: stats.value?.candidates.actionable_total ?? 0, tone: 'bg-amber-500' },
   { label: '主题沉淀', value: stats.value?.topics.total || 0, tone: 'bg-emerald-600' }
 ])
 
@@ -49,7 +49,7 @@ onMounted(async () => {
       <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <MetricTile label="归档库" :value="stats?.archives.total || 0" detail="长期沉淀" />
         <MetricTile label="热记忆" :value="stats?.hot_memories.total || 0" detail="工作记忆" />
-        <MetricTile label="候选记忆" :value="stats?.candidates.total || 0" detail="提炼结果" />
+        <MetricTile label="待处理候选" :value="stats?.candidates.actionable_total ?? 0" detail="需确认/沉淀" />
         <MetricTile label="主题沉淀" :value="stats?.topics.total || 0" detail="主题进度" />
       </section>
       <section class="grid gap-4 lg:grid-cols-2">

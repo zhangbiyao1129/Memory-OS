@@ -4,7 +4,7 @@ const { stats, loading, error, hasProjectContext, loadStats } = useMemoryLifecyc
 const lifecycleRows = computed(() => [
   { label: '归档库', value: stats.value?.archives.total || 0, tone: 'bg-sky-600' },
   { label: '热记忆', value: stats.value?.hot_memories.total || 0, tone: 'bg-orange-600' },
-  { label: '候选记忆', value: stats.value?.candidates.total || 0, tone: 'bg-amber-500' },
+  { label: '待处理候选', value: stats.value?.candidates.actionable_total ?? 0, tone: 'bg-amber-500' },
   { label: '主题沉淀', value: stats.value?.topics.total || 0, tone: 'bg-emerald-600' }
 ])
 
@@ -40,7 +40,7 @@ onMounted(loadStats)
     <section class="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
       <MetricTile label="归档库" :value="stats?.archives.total || 0" detail="长期沉淀" />
       <MetricTile label="热记忆" :value="stats?.hot_memories.total || 0" detail="工作记忆" />
-      <MetricTile label="候选记忆" :value="stats?.candidates.total || 0" detail="提炼结果" />
+      <MetricTile label="待处理候选" :value="stats?.candidates.actionable_total ?? 0" detail="需确认/沉淀" />
       <MetricTile label="主题沉淀" :value="stats?.topics.total || 0" detail="主题进度" />
     </section>
 
@@ -49,6 +49,45 @@ onMounted(loadStats)
       <BarChart title="候选风险" :rows="riskRows" />
       <RingMeter title="主题沉淀" :value="stats?.topics.composed || 0" :total="stats?.topics.total || 0" label="已沉淀" />
       <StackedBar title="候选状态" :segments="Object.entries(stats?.candidates.by_status || {}).map(([label, value]) => ({ label, value, className: 'bg-amber-400' }))" />
+    </section>
+
+    <!-- 候选提炼健康 -->
+    <section class="mt-6 rounded-3xl border border-stone-200 bg-white p-6">
+      <h3 class="text-xl font-black">候选提炼健康</h3>
+      <div class="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div class="rounded-2xl bg-stone-50 p-4">
+          <p class="text-sm text-stone-500">Pending</p>
+          <p class="mt-1 text-2xl font-bold">{{ stats?.candidate_jobs?.pending ?? 0 }}</p>
+        </div>
+        <div class="rounded-2xl bg-stone-50 p-4">
+          <p class="text-sm text-stone-500">Running</p>
+          <p class="mt-1 text-2xl font-bold">{{ stats?.candidate_jobs?.running ?? 0 }}</p>
+        </div>
+        <div class="rounded-2xl bg-stone-50 p-4">
+          <p class="text-sm text-stone-500">Failed</p>
+          <p class="mt-1 text-2xl font-bold" :class="stats?.candidate_jobs?.failed ? 'text-red-600' : ''">{{ stats?.candidate_jobs?.failed ?? 0 }}</p>
+        </div>
+        <div class="rounded-2xl bg-stone-50 p-4">
+          <p class="text-sm text-stone-500">Done</p>
+          <p class="mt-1 text-2xl font-bold">{{ stats?.candidate_jobs?.done ?? 0 }}</p>
+        </div>
+      </div>
+      <div class="mt-4 grid gap-4 sm:grid-cols-3">
+        <div>
+          <p class="text-sm text-stone-500">最近完成时间</p>
+          <p class="mt-1 text-sm">{{ stats?.candidate_jobs?.last_completed_at || '暂无' }}</p>
+        </div>
+        <div>
+          <p class="text-sm text-stone-500">最早积压时间</p>
+          <p class="mt-1 text-sm">{{ stats?.candidate_jobs?.oldest_pending_at || '暂无' }}</p>
+        </div>
+        <div>
+          <p class="text-sm text-stone-500">最近错误</p>
+          <p class="mt-1 text-sm" :class="stats?.candidate_jobs?.latest_error ? 'text-red-600' : 'text-stone-400'">
+            {{ stats?.candidate_jobs?.latest_error || '暂无错误' }}
+          </p>
+        </div>
+      </div>
     </section>
 
     <section class="mt-6 grid gap-4 md:grid-cols-2">

@@ -5,10 +5,22 @@ export type LifecycleStats = {
   hot_memories: { total: number; by_status: CountMap }
   candidates: {
     total: number
+    actionable_total?: number
     by_status: CountMap
     by_risk: CountMap
     hot_score_buckets: ScoreBucket[]
     compose_score_buckets: ScoreBucket[]
+  }
+  candidate_jobs?: {
+    total: number
+    by_status: CountMap
+    pending: number
+    running: number
+    failed: number
+    done: number
+    latest_error: string
+    oldest_pending_at: string
+    last_completed_at: string
   }
   topics: { total: number; ready_to_compose: number; composed: number; open: number }
 }
