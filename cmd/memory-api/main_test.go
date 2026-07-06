@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"memory-os/internal/candidatememory"
 	"memory-os/internal/config"
 	"memory-os/internal/health"
 	"memory-os/internal/hotmemory"
@@ -132,6 +134,33 @@ func TestRouterOptionsConfiguresCoreServicesWhenPostgresPoolExists(t *testing.T)
 	}
 	if options.AppEnv != "production" {
 		t.Fatalf("AppEnv = %q, want production", options.AppEnv)
+	}
+	if !restoreProductionArchiveRAG.called {
+		t.Fatal("production Archive RAG was not configured")
+	}
+	if !restoreProductionHotMemory.called {
+		t.Fatal("production Hot Memory vector index was not configured")
+	}
+}
+
+func TestRouterOptionsConfiguresMaintenanceServiceWhenLLMConfigured(t *testing.T) {
+	restoreProductionArchiveRAG := stubProductionArchiveRAG(t)
+	restoreProductionHotMemory := stubProductionHotMemory(t)
+	old := newProductionMaintenanceService
+	newProductionMaintenanceService = func(cfg config.Config, pool *pgxpool.Pool, candidateRepo candidatememory.Repository, composer *candidatememory.TopicComposer) (*candidatememory.MaintenanceService, error) {
+		maintRepo := maintenanceRepoStub{}
+		cleaner := maintenanceCleanerStub{}
+		return candidatememory.NewMaintenanceService(maintRepo, candidateRepo, composer, cleaner), nil
+	}
+	t.Cleanup(func() { newProductionMaintenanceService = old })
+
+	options, err := routerOptions(productionAPIConfig(), health.NewService(nil), &pgxpool.Pool{})
+	if err != nil {
+		t.Fatalf("routerOptions() error = %v", err)
+	}
+
+	if options.MaintenanceService == nil {
+		t.Fatal("MaintenanceService not configured")
 	}
 	if !restoreProductionArchiveRAG.called {
 		t.Fatal("production Archive RAG was not configured")
@@ -279,6 +308,30 @@ func productionAPIConfig() config.Config {
 		SecretVaultKeyID: "key-test",
 		SecretVaultKey:   bytes.Repeat([]byte{7}, 32),
 	}
+}
+
+type maintenanceCleanerStub struct{}
+
+func (maintenanceCleanerStub) Clean(ctx context.Context, candidates []candidatememory.Candidate) (candidatememory.CleanResult, error) {
+	return candidatememory.CleanResult{Summary: "ok"}, nil
+}
+
+type maintenanceRepoStub struct{}
+
+func (maintenanceRepoStub) CreateRun(ctx context.Context, run candidatememory.MaintenanceRun) (candidatememory.MaintenanceRun, error) {
+	return run, nil
+}
+
+func (maintenanceRepoStub) GetRun(ctx context.Context, runID string) (candidatememory.MaintenanceRun, error) {
+	return candidatememory.MaintenanceRun{}, nil
+}
+
+func (maintenanceRepoStub) UpdateRun(ctx context.Context, runID string, status candidatememory.MaintenanceRunStatus, update candidatememory.MaintenanceRunUpdate) error {
+	return nil
+}
+
+func (maintenanceRepoStub) GetRunningRun(ctx context.Context, orgID, projectID string) (*candidatememory.MaintenanceRun, error) {
+	return nil, nil
 }
 
 func secretVaultTestConfig() config.Config {

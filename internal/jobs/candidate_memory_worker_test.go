@@ -40,6 +40,9 @@ func newTestCandidateWorker(t *testing.T, extractor candidatememory.Extractor) (
 	req := candidatememory.ExtractionRequest{
 		OrgID: "org-1", ProjectID: "proj-1", SourceKey: "github.com/acme/web",
 		UserID: "u", AgentID: "a", ThreadID: "thread-1", SessionID: "s",
+		Events: []candidatememory.ExtractionEvent{
+			{EventID: "e1", Type: "manual_archive_request", Payload: []byte(`{"topic":"test"}`)},
+		},
 	}
 	loader := fakeEventLoader{req: req}
 	return NewCandidateMemoryWorker(extractor, router, service, repo, loader), repo, req
@@ -107,4 +110,128 @@ func TestCandidateMemoryWorkerEventLoaderFailureReturnsError(t *testing.T) {
 	if _, err := worker.Handle(candidatememory.Job{OrgID: "o", SourceEventID: "e1"}); err == nil {
 		t.Fatal("事件加载失败应返回 error")
 	}
+}
+
+// 门控:低价值 assistant_final 时 extractor 不应被调用,返回空 candidate ids。
+func TestCandidateMemoryWorkerGateSkipsLowValueEvents(t *testing.T) {
+	extractorCalled := false
+	extractor := &trackingExtractor{
+		candidates: []candidatememory.Candidate{},
+		called:     &extractorCalled,
+	}
+	loader := fakeEventLoader{
+		req: candidatememory.ExtractionRequest{
+			OrgID: "org-1", ProjectID: "proj-1", SourceKey: "sk",
+			Events: []candidatememory.ExtractionEvent{
+				{EventID: "e1", Type: "assistant_final", Payload: []byte(`{"text":"命令完成，测试通过"}`)},
+			},
+		},
+	}
+	worker := NewCandidateMemoryWorker(extractor, candidatememory.NewRouter(nil), candidatememory.NewService(candidatememory.NewInMemoryRepository(), candidatememory.RuleScorer{}), candidatememory.NewInMemoryRepository(), loader)
+
+	result, err := worker.Handle(candidatememory.Job{OrgID: "org-1", ProjectID: "proj-1", SourceEventID: "e1"})
+	if err != nil {
+		t.Fatalf("不应返回 error: %v", err)
+	}
+	if len(result.CandidateIDs) != 0 {
+		t.Fatalf("低价值事件应返回空 candidate ids,得到 %v", result.CandidateIDs)
+	}
+	if extractorCalled {
+		t.Fatal("低价值事件不应调用 extractor")
+	}
+}
+
+// 门控:manual_archive_request 时 extractor 必须被调用。
+func TestCandidateMemoryWorkerGateAllowsManualArchive(t *testing.T) {
+	extractorCalled := false
+	extractor := &trackingExtractor{
+		candidates: []candidatememory.Candidate{
+			{CandidateID: "cand-m", MemoryType: candidatememory.MemoryTypeFact, Content: "manual", Confidence: 0.9, RiskLevel: candidatememory.RiskLow},
+		},
+		called: &extractorCalled,
+	}
+	loader := fakeEventLoader{
+		req: candidatememory.ExtractionRequest{
+			OrgID: "org-1", ProjectID: "proj-1", SourceKey: "sk",
+			Events: []candidatememory.ExtractionEvent{
+				{EventID: "e1", Type: "manual_archive_request", Payload: []byte(`{"topic":"short"}`)},
+			},
+		},
+	}
+	worker := NewCandidateMemoryWorker(extractor, candidatememory.NewRouter(nil), candidatememory.NewService(candidatememory.NewInMemoryRepository(), candidatememory.RuleScorer{}), candidatememory.NewInMemoryRepository(), loader)
+
+	result, err := worker.Handle(candidatememory.Job{OrgID: "org-1", ProjectID: "proj-1", SourceEventID: "e1"})
+	if err != nil {
+		t.Fatalf("不应返回 error: %v", err)
+	}
+	if len(result.CandidateIDs) != 1 {
+		t.Fatalf("manual archive 应产出 1 个候选,得到 %d", len(result.CandidateIDs))
+	}
+	if !extractorCalled {
+		t.Fatal("manual archive 必须调用 extractor")
+	}
+}
+
+// 门控:高价值 assistant_final 时 extractor 必须被调用。
+func TestCandidateMemoryWorkerGateAllowsHighValueEvents(t *testing.T) {
+	extractorCalled := false
+	extractor := &trackingExtractor{
+		candidates: []candidatememory.Candidate{
+			{CandidateID: "cand-h", MemoryType: candidatememory.MemoryTypePreference, Content: "偏好", Confidence: 0.9, RiskLevel: candidatememory.RiskLow},
+		},
+		called: &extractorCalled,
+	}
+	loader := fakeEventLoader{
+		req: candidatememory.ExtractionRequest{
+			OrgID: "org-1", ProjectID: "proj-1", SourceKey: "sk",
+			Events: []candidatememory.ExtractionEvent{
+				{EventID: "e1", Type: "assistant_final", Payload: []byte(`{"text":"我希望以后都用 Go"}`)},
+			},
+		},
+	}
+	worker := NewCandidateMemoryWorker(extractor, candidatememory.NewRouter(nil), candidatememory.NewService(candidatememory.NewInMemoryRepository(), candidatememory.RuleScorer{}), candidatememory.NewInMemoryRepository(), loader)
+
+	result, err := worker.Handle(candidatememory.Job{OrgID: "org-1", ProjectID: "proj-1", SourceEventID: "e1"})
+	if err != nil {
+		t.Fatalf("不应返回 error: %v", err)
+	}
+	if len(result.CandidateIDs) != 1 {
+		t.Fatalf("高价值事件应产出 1 个候选,得到 %d", len(result.CandidateIDs))
+	}
+	if !extractorCalled {
+		t.Fatal("高价值事件必须调用 extractor")
+	}
+}
+
+// extractor 失败仍返回 error,让 queue Fail 逻辑保持原语义。
+func TestCandidateMemoryWorkerExtractorFailureReturnsErrorWithGate(t *testing.T) {
+	loader := fakeEventLoader{
+		req: candidatememory.ExtractionRequest{
+			OrgID: "org-1", ProjectID: "proj-1", SourceKey: "sk",
+			Events: []candidatememory.ExtractionEvent{
+				{EventID: "e1", Type: "manual_archive_request", Payload: []byte(`{"topic":"t"}`)},
+			},
+		},
+	}
+	worker := NewCandidateMemoryWorker(fakeExtractor{err: errors.New("llm timeout")}, candidatememory.NewRouter(nil), candidatememory.NewService(candidatememory.NewInMemoryRepository(), candidatememory.RuleScorer{}), candidatememory.NewInMemoryRepository(), loader)
+	if _, err := worker.Handle(candidatememory.Job{OrgID: "org-1", ProjectID: "proj-1", SourceEventID: "e1"}); err == nil {
+		t.Fatal("提炼失败应返回 error")
+	}
+}
+
+// trackingExtractor 追踪是否被调用。
+type trackingExtractor struct {
+	candidates []candidatememory.Candidate
+	err        error
+	called     *bool
+}
+
+func (e *trackingExtractor) Extract(ctx context.Context, req candidatememory.ExtractionRequest) (candidatememory.ExtractionResult, error) {
+	if e.called != nil {
+		*e.called = true
+	}
+	if e.err != nil {
+		return candidatememory.ExtractionResult{}, e.err
+	}
+	return candidatememory.ExtractionResult{Candidates: e.candidates}, nil
 }

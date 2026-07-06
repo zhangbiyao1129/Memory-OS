@@ -73,6 +73,32 @@ func TestLLMExtractorParsesCandidatesAndFillsOwnership(t *testing.T) {
 	}
 }
 
+func TestLLMExtractorLimitsCandidatesPerEvent(t *testing.T) {
+	resp := `{"candidates":[
+		{"memory_type":"fact","content":"事实一","summary":"","confidence":0.9},
+		{"memory_type":"decision","content":"决策二","summary":"","confidence":0.9},
+		{"memory_type":"bugfix","content":"修复三","summary":"","confidence":0.9},
+		{"memory_type":"risk","content":"风险四","summary":"","confidence":0.9},
+		{"memory_type":"follow_up","content":"后续五","summary":"","confidence":0.9}
+	]}`
+	e := NewLLMExtractor(fakeChatClient{text: resp})
+	result, err := e.Extract(context.Background(), ExtractionRequest{
+		OrgID: "o", ProjectID: "p", SourceKey: "github.com/acme/web",
+		Events: []ExtractionEvent{{EventID: "e1", Type: "assistant_final", Payload: []byte("{}")}},
+	})
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if len(result.Candidates) != 3 {
+		t.Fatalf("单事件最多应保留 3 个候选,得到 %d", len(result.Candidates))
+	}
+	for _, c := range result.Candidates {
+		if c.Content == "风险四" || c.Content == "后续五" {
+			t.Fatalf("超出预算的候选不应保留: %+v", c)
+		}
+	}
+}
+
 func TestLLMExtractorSanitizesSecrets(t *testing.T) {
 	resp := `{"candidates":[{"memory_type":"fact","content":"使用 token sk-abcd1234567890 鉴权","summary":"","confidence":0.9}]}`
 	e := NewLLMExtractor(fakeChatClient{text: resp})

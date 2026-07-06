@@ -157,12 +157,12 @@ func (r *PGRepository) UpsertJob(ctx context.Context, job Job) (Job, error) {
 		status = string(JobPending)
 	}
 	query := `INSERT INTO candidate_memory_jobs (
-		idempotency_key, org_id, project_id, source_key, source_event_id, status, max_attempts
-	) VALUES ($1,$2,$3,$4,$5,$6,$7)
+		idempotency_key, org_id, project_id, source_key, source_event_id, status, max_attempts, candidate_ids
+	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 	ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
 	RETURNING ` + jobColumns
 	row := r.pool.QueryRow(ctx, query,
-		job.IdempotencyKey, job.OrgID, job.ProjectID, job.SourceKey, job.SourceEventID, status, maxAttempts,
+		job.IdempotencyKey, job.OrgID, job.ProjectID, job.SourceKey, job.SourceEventID, status, maxAttempts, []string{},
 	)
 	return scanJob(row)
 }
@@ -198,6 +198,9 @@ func (r *PGRepository) LeaseJob(ctx context.Context, now time.Time, lockedBy str
 func (r *PGRepository) CompleteJob(ctx context.Context, id int64, candidateIDs []string) error {
 	if err := r.check(); err != nil {
 		return err
+	}
+	if candidateIDs == nil {
+		candidateIDs = []string{}
 	}
 	_, err := r.pool.Exec(ctx, `UPDATE candidate_memory_jobs
 		SET status='done', candidate_ids=$1, completed_at=now(), last_error='', updated_at=now()

@@ -51,6 +51,7 @@ func TestPGRepositorySnapshotCountsLifecycleStatsWithPermissionFilter(t *testing
 		pool.Exec(ctx, "DELETE FROM archives WHERE org_id=$1 AND project_id=$2", orgID, projectID)
 		pool.Exec(ctx, "DELETE FROM hot_memories WHERE org_id=$1 AND project_id=$2", orgID, projectID)
 		pool.Exec(ctx, "DELETE FROM candidate_memories WHERE org_id=$1 AND project_id=$2", orgID, projectID)
+		pool.Exec(ctx, "DELETE FROM candidate_memory_jobs WHERE org_id=$1 AND project_id=$2", orgID, projectID)
 		pool.Exec(ctx, "DELETE FROM topic_memory_states WHERE org_id=$1 AND project_id=$2", orgID, projectID)
 	})
 
@@ -76,13 +77,25 @@ func TestPGRepositorySnapshotCountsLifecycleStatsWithPermissionFilter(t *testing
 	}
 
 	// 插入 candidate_memories: 覆盖不同 status, risk_level, scores
-	_, err = pool.Exec(ctx, `INSERT INTO candidate_memories (candidate_id, user_id, org_id, project_id, content, status, risk_level, scores, created_at, updated_at)
-		VALUES ($1, $2, $3, $3, 'c1', 'pending', 'low', '{"hot_memory_score": 0.2, "compose_score": 0.3}', NOW(), NOW()),
-			   ($4, $2, $3, $3, 'c2', 'composed', 'medium', '{"hot_memory_score": 0.6, "compose_score": 0.8}', NOW(), NOW()),
-			   ($5, $2, $3, $3, 'c3', 'discarded', 'high', '{"hot_memory_score": 0.9, "compose_score": 0.1}', NOW(), NOW())`,
-		"cand_a_"+suffix, userID, orgID, "cand_b_"+suffix, "cand_c_"+suffix)
+	_, err = pool.Exec(ctx, `INSERT INTO candidate_memories (candidate_id, user_id, org_id, project_id, source_key, agent_id, thread_id, content, status, risk_level, scores, created_at, updated_at)
+		VALUES ($1, $2, $3, $3, 'sk1', 'agent1', 'thread1', 'c1', 'pending', 'low', '{"hot_memory_score": 0.2, "compose_score": 0.3}', NOW(), NOW()),
+			   ($4, $2, $3, $3, 'sk1', 'agent1', 'thread1', 'c2', 'in_compose_pool', 'low', '{"hot_memory_score": 0.6, "compose_score": 0.8}', NOW(), NOW()),
+			   ($5, $2, $3, $3, 'sk1', 'agent1', 'thread1', 'c3', 'composed', 'medium', '{"hot_memory_score": 0.6, "compose_score": 0.8}', NOW(), NOW()),
+			   ($6, $2, $3, $3, 'sk1', 'agent1', 'thread1', 'c4', 'discarded', 'high', '{"hot_memory_score": 0.9, "compose_score": 0.1}', NOW(), NOW())`,
+		"cand_a_"+suffix, userID, orgID, "cand_b_"+suffix, "cand_c_"+suffix, "cand_d_"+suffix)
 	if err != nil {
 		t.Fatalf("insert candidate_memories: %v", err)
+	}
+
+	// 插入 candidate_memory_jobs: 覆盖不同 status
+	_, err = pool.Exec(ctx, `INSERT INTO candidate_memory_jobs (idempotency_key, org_id, project_id, source_key, source_event_id, status, attempts, last_error, created_at, updated_at, completed_at)
+		VALUES ($1, $2, $3, 'sk1', 'e1', 'pending', 0, '', NOW(), NOW(), NULL),
+			   ($4, $2, $3, 'sk1', 'e2', 'running', 1, '', NOW(), NOW(), NULL),
+			   ($5, $2, $3, 'sk1', 'e3', 'done', 1, '', NOW() - INTERVAL '1 hour', NOW(), NOW()),
+			   ($6, $2, $3, 'sk1', 'e4', 'failed', 3, 'llm timeout', NOW() - INTERVAL '2 hours', NOW(), NULL)`,
+		"job_a_"+suffix, orgID, projectID, "job_b_"+suffix, "job_c_"+suffix, "job_d_"+suffix)
+	if err != nil {
+		t.Fatalf("insert candidate_memory_jobs: %v", err)
 	}
 
 	// 插入 topic_memory_states: ready, composed, open
@@ -132,11 +145,17 @@ func TestPGRepositorySnapshotCountsLifecycleStatsWithPermissionFilter(t *testing
 	}
 
 	// 验证 candidates
-	if snapshot.Candidates.Total != 3 {
-		t.Fatalf("candidates total = %d, want 3", snapshot.Candidates.Total)
+	if snapshot.Candidates.Total != 4 {
+		t.Fatalf("candidates total = %d, want 4", snapshot.Candidates.Total)
+	}
+	if snapshot.Candidates.ActionableTotal != 2 {
+		t.Fatalf("candidates actionable_total = %d, want 2 (pending + in_compose_pool)", snapshot.Candidates.ActionableTotal)
 	}
 	if snapshot.Candidates.ByStatus["pending"] != 1 {
 		t.Fatalf("candidates by_status[pending] = %d, want 1", snapshot.Candidates.ByStatus["pending"])
+	}
+	if snapshot.Candidates.ByStatus["in_compose_pool"] != 1 {
+		t.Fatalf("candidates by_status[in_compose_pool] = %d, want 1", snapshot.Candidates.ByStatus["in_compose_pool"])
 	}
 	if snapshot.Candidates.ByStatus["composed"] != 1 {
 		t.Fatalf("candidates by_status[composed] = %d, want 1", snapshot.Candidates.ByStatus["composed"])
@@ -144,14 +163,46 @@ func TestPGRepositorySnapshotCountsLifecycleStatsWithPermissionFilter(t *testing
 	if snapshot.Candidates.ByStatus["discarded"] != 1 {
 		t.Fatalf("candidates by_status[discarded] = %d, want 1", snapshot.Candidates.ByStatus["discarded"])
 	}
-	if snapshot.Candidates.ByRisk["low"] != 1 {
-		t.Fatalf("candidates by_risk[low] = %d, want 1", snapshot.Candidates.ByRisk["low"])
+	if snapshot.Candidates.ByRisk["low"] != 2 {
+		t.Fatalf("candidates by_risk[low] = %d, want 2", snapshot.Candidates.ByRisk["low"])
 	}
 	if snapshot.Candidates.ByRisk["medium"] != 1 {
 		t.Fatalf("candidates by_risk[medium] = %d, want 1", snapshot.Candidates.ByRisk["medium"])
 	}
 	if snapshot.Candidates.ByRisk["high"] != 1 {
 		t.Fatalf("candidates by_risk[high] = %d, want 1", snapshot.Candidates.ByRisk["high"])
+	}
+
+	// 验证 candidate_jobs
+	if snapshot.CandidateJobs.Total != 4 {
+		t.Fatalf("candidate_jobs total = %d, want 4", snapshot.CandidateJobs.Total)
+	}
+	if snapshot.CandidateJobs.Pending != 1 {
+		t.Fatalf("candidate_jobs pending = %d, want 1", snapshot.CandidateJobs.Pending)
+	}
+	if snapshot.CandidateJobs.Running != 1 {
+		t.Fatalf("candidate_jobs running = %d, want 1", snapshot.CandidateJobs.Running)
+	}
+	if snapshot.CandidateJobs.Done != 1 {
+		t.Fatalf("candidate_jobs done = %d, want 1", snapshot.CandidateJobs.Done)
+	}
+	if snapshot.CandidateJobs.Failed != 1 {
+		t.Fatalf("candidate_jobs failed = %d, want 1", snapshot.CandidateJobs.Failed)
+	}
+	if snapshot.CandidateJobs.ByStatus["pending"] != 1 {
+		t.Fatalf("candidate_jobs by_status[pending] = %d, want 1", snapshot.CandidateJobs.ByStatus["pending"])
+	}
+	if snapshot.CandidateJobs.ByStatus["done"] != 1 {
+		t.Fatalf("candidate_jobs by_status[done] = %d, want 1", snapshot.CandidateJobs.ByStatus["done"])
+	}
+	if !strings.Contains(snapshot.CandidateJobs.LatestError, "llm timeout") {
+		t.Fatalf("candidate_jobs latest_error should contain 'llm timeout', got: %s", snapshot.CandidateJobs.LatestError)
+	}
+	if snapshot.CandidateJobs.OldestPendingAt == "" {
+		t.Fatal("candidate_jobs oldest_pending_at should not be empty")
+	}
+	if snapshot.CandidateJobs.LastCompletedAt == "" {
+		t.Fatal("candidate_jobs last_completed_at should not be empty")
 	}
 
 	// 验证 topics

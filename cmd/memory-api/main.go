@@ -175,6 +175,18 @@ var newProductionHotMemory = func(cfg config.Config, pool *pgxpool.Pool) (hotmem
 	return hotmemory.NewServiceWithVectorIndex(hotmemory.NewPGRepository(pool), hotmemory.NewQdrantIndex(pool, qdrantClient, embedder, qdrant.DefaultCollectionName)), nil
 }
 
+var newProductionMaintenanceService = func(cfg config.Config, pool *pgxpool.Pool, candidateRepo candidatememory.Repository, composer *candidatememory.TopicComposer) (*candidatememory.MaintenanceService, error) {
+	if strings.TrimSpace(cfg.LLMBaseURL) == "" || strings.TrimSpace(cfg.LLMAPIKey) == "" || strings.TrimSpace(cfg.EmbeddingModel) == "" {
+		return nil, nil
+	}
+	client, err := llm.NewOpenAICompatible(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, EmbeddingModel: cfg.EmbeddingModel})
+	if err != nil {
+		return nil, err
+	}
+	cleaner := candidatememory.NewLLMMaintenanceCleaner(client)
+	return candidatememory.NewMaintenanceService(candidatememory.NewPGMaintenanceRepository(pool), candidateRepo, composer, cleaner), nil
+}
+
 func routerOptions(cfg config.Config, healthService health.Service, pool *pgxpool.Pool) (httpapi.RouterOptions, error) {
 	options := httpapi.RouterOptions{HealthService: healthService, AppEnv: cfg.AppEnv, EnableDevEndpoints: cfg.EnableDevEndpoints, LegacyTurnEventArchive: cfg.LegacyTurnEventArchive}
 	if pool == nil {
@@ -215,6 +227,11 @@ func routerOptions(cfg config.Config, healthService health.Service, pool *pgxpoo
 	archiveCreator := jobs.NewProductionArchiveCreator(options.ArchiveService, archiveIndexQueue)
 	composer := candidatememory.NewTopicComposer(candidateRepo, archiveCreator)
 	options.TopicComposer = &composer
+	maintenanceService, err := newProductionMaintenanceService(cfg, pool, candidateRepo, &composer)
+	if err != nil {
+		return httpapi.RouterOptions{}, err
+	}
+	options.MaintenanceService = maintenanceService
 	qdrantClient, err := qdrant.NewClient(cfg.QdrantURL)
 	if err != nil {
 		return httpapi.RouterOptions{}, err

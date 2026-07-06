@@ -46,7 +46,10 @@ type Extractor interface {
 	Extract(ctx context.Context, request ExtractionRequest) (ExtractionResult, error)
 }
 
-const maxExtractionEventBytes = 48 * 1024
+const (
+	maxExtractionEventBytes    = 48 * 1024
+	maxCandidatesPerExtraction = 3
+)
 
 // LLMExtractor 基于 LLM 的候选提炼器。
 type LLMExtractor struct {
@@ -87,6 +90,9 @@ func (e LLMExtractor) Extract(ctx context.Context, request ExtractionRequest) (E
 		return ExtractionResult{}, err
 	}
 	eventIDs := eventIDsFrom(request.Events)
+	if len(raw) > maxCandidatesPerExtraction {
+		raw = raw[:maxCandidatesPerExtraction]
+	}
 	for i := range raw {
 		c := &raw[i]
 		c.OrgID = request.OrgID
@@ -188,8 +194,9 @@ func extractionSystemPrompt() string {
 - memory_type 必须是其中之一:fact、decision、bugfix、preference、risk、follow_up
 - content 为简体中文一句话事实;summary 为更短摘要(可空)
 - confidence ∈ [0,1]:事实确定程度
+- 每次最多输出 3 条候选;只保留长期有用的用户偏好、稳定事实、关键决策、明确风险或待办
 - 不得在 content/summary 中保留任何 API key、token、密码、私钥、cookie 明文
-- 忽略测试 marker、临时验证词、重复日志等噪声`)
+- 忽略测试 marker、临时验证词、重复日志、文件路径访问记录、命令输出流水账、模型名、权限模式、内部状态和调试过程噪声`)
 }
 
 func extractionUserPrompt(payload string) string {

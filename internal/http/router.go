@@ -58,6 +58,7 @@ type RouterOptions struct {
 	ArchiveIndexQueue      archiveIndexQueue
 	QdrantStatusService    qdrant.StatusService
 	MemoryStatsService     memorystats.Service
+	MaintenanceService     *candidatememory.MaintenanceService
 }
 
 type archiveEnqueuer interface {
@@ -131,6 +132,9 @@ func RegisterRoutes(engine *route.Engine, options RouterOptions) {
 	}
 	if options.TopicRepository != nil {
 		engine.POST("/memory/topics/list", TopicListHandler(options.TopicRepository, options.AuthService, options.TenantService))
+	}
+	if options.MaintenanceService != nil {
+		engine.POST("/memory/candidates/maintenance/run", MaintenanceRunHandler(options.MaintenanceService, options.AuthService, options.TenantService))
 	}
 	engine.POST("/memory/secrets/create", SecretCreateHandler(options.SecretVault, options.AuthService, options.TenantService))
 	engine.POST("/memory/secrets/list", SecretListHandler(options.SecretVault, options.AuthService, options.TenantService))
@@ -508,6 +512,14 @@ func OpenAPIHandler() app.HandlerFunc {
 						"summary": "Compose topic candidates into a Markdown archive",
 						"responses": map[string]any{
 							"200": map[string]any{"description": "Compose result"},
+						},
+					},
+				},
+				"/memory/candidates/maintenance/run": map[string]any{
+					"post": map[string]any{
+						"summary": "Run AI maintenance to clean and consolidate candidates",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Maintenance result"},
 						},
 					},
 				},
@@ -1015,10 +1027,10 @@ func archiveJobFromTurnEvent(requestID string, event eventlog.TurnEvent) jobs.Ar
 }
 
 // shouldEnqueueCandidate 判断事件类型是否触发候选提炼。
-// 触发类型:assistant_final / turn_completed / turn_failed / manual_archive_request。
+// 只对真正含用户可读结论的事件提炼候选,避免状态事件反复触发 LLM。
 func shouldEnqueueCandidate(eventType eventlog.EventType) bool {
 	switch eventType {
-	case eventlog.EventAssistantFinal, eventlog.EventTurnCompleted, eventlog.EventTurnFailed, eventlog.EventManualArchive:
+	case eventlog.EventAssistantFinal, eventlog.EventManualArchive:
 		return true
 	}
 	return false
@@ -4298,5 +4310,41 @@ func DevHotMemorySmokeHandler() app.HandlerFunc {
 			"hot_score":   used.HotScore,
 			"memory_type": "hot_memory",
 		})
+	}
+}
+
+// --- 候选记忆清洗整合 API ---
+
+type maintenanceRunRequest struct {
+	OrgID     string `json:"org_id"`
+	ProjectID string `json:"project_id"`
+	SourceKey string `json:"source_key"`
+	ThreadID  string `json:"thread_id"`
+}
+
+func MaintenanceRunHandler(service *candidatememory.MaintenanceService, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		var request maintenanceRunRequest
+		if err := c.BindAndValidate(&request); err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_maintenance_run_request"})
+			return
+		}
+		permissions, ok := authorizeProjectScope(c, authService, tenantService, request.OrgID, request.ProjectID, "memory:write", "project:"+request.ProjectID+":write", "maintenance_forbidden")
+		if !ok {
+			return
+		}
+		_ = permissions
+		result, err := service.Run(ctx, candidatememory.MaintenanceRequest{
+			OrgID:     request.OrgID,
+			ProjectID: request.ProjectID,
+			SourceKey: request.SourceKey,
+			ThreadID:  request.ThreadID,
+			Trigger:   candidatememory.MaintenanceTriggerManual,
+		})
+		if err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "maintenance_run_rejected", "message": err.Error()})
+			return
+		}
+		c.JSON(consts.StatusOK, result)
 	}
 }

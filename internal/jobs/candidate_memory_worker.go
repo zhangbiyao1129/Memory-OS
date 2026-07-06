@@ -52,7 +52,7 @@ func (w CandidateMemoryWorker) Handle(job candidatememory.Job) (CandidateMemoryJ
 	return w.defaultHandle(job)
 }
 
-// defaultHandle 默认提炼链路:加载事件 → LLM 提炼(脱敏)→ 分流 → 持久化候选 → 更新 topic state。
+// defaultHandle 默认提炼链路:加载事件 → 门控 → LLM 提炼(脱敏)→ 分流 → 持久化候选 → 更新 topic state。
 // 重复候选(ErrConflict)跳过(去重由 hotmemory + candidate_id 哈希保证)。
 func (w CandidateMemoryWorker) defaultHandle(job candidatememory.Job) (CandidateMemoryJobResult, error) {
 	ctx := context.Background()
@@ -60,6 +60,13 @@ func (w CandidateMemoryWorker) defaultHandle(job candidatememory.Job) (Candidate
 	if err != nil {
 		return CandidateMemoryJobResult{}, err
 	}
+
+	// 门控:低价值事件不触发 LLM 提炼
+	decision := candidatememory.ShouldExtract(request)
+	if !decision.Allow {
+		return CandidateMemoryJobResult{CandidateIDs: nil}, nil
+	}
+
 	extracted, err := w.extractor.Extract(ctx, request)
 	if err != nil {
 		return CandidateMemoryJobResult{}, err

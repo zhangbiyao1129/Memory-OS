@@ -491,12 +491,31 @@ func TestTurnEventEndpointDoesNotEnqueueDuplicateCandidateJob(t *testing.T) {
 	eventService := eventlog.NewService(eventlog.NewMemoryRepository(), eventlog.SanitizerOptions{})
 	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), EventLogService: eventService, CandidateQueue: candidateQueue})
 
-	body := `{"request_id":"r3","workspace":{"source_key":"github.com/acme/web"},"event":{"version":"v1","event_id":"e3","turn_id":"t3","thread_id":"th3","session_id":"s3","type":"turn_completed","created_at":"2026-07-01T00:00:00Z","actor":{"user_id":"u1","org_id":"org_1","project_id":"project_1","agent_id":"codex"},"payload":{"text":"done"}}}`
+	body := `{"request_id":"r3","workspace":{"source_key":"github.com/acme/web"},"event":{"version":"v1","event_id":"e3","turn_id":"t3","thread_id":"th3","session_id":"s3","type":"assistant_final","created_at":"2026-07-01T00:00:00Z","actor":{"user_id":"u1","org_id":"org_1","project_id":"project_1","agent_id":"codex"},"payload":{"text":"done"}}}`
 	ut.PerformRequest(h.Engine, "POST", "/memory/turn-event", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"})
 	ut.PerformRequest(h.Engine, "POST", "/memory/turn-event", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"})
 
 	if len(candidateQueue.jobs) != 1 {
 		t.Fatalf("重复 event 不应重复 enqueue candidate,得到 %d", len(candidateQueue.jobs))
+	}
+}
+
+func TestTurnEventEndpointSkipsCandidateForLifecycleStatusEvents(t *testing.T) {
+	for _, eventType := range []string{"turn_completed", "turn_failed"} {
+		t.Run(eventType, func(t *testing.T) {
+			h := server.New(server.WithHostPorts("127.0.0.1:0"))
+			candidateQueue := &fakeCandidateQueue{}
+			eventService := eventlog.NewService(eventlog.NewMemoryRepository(), eventlog.SanitizerOptions{})
+			RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), EventLogService: eventService, CandidateQueue: candidateQueue})
+
+			body := `{"request_id":"r_lifecycle","workspace":{"source_key":"github.com/acme/web"},"event":{"version":"v1","event_id":"e_lifecycle_` + eventType + `","turn_id":"t_lifecycle","thread_id":"th_lifecycle","session_id":"s_lifecycle","type":"` + eventType + `","created_at":"2026-07-01T00:00:00Z","actor":{"user_id":"u1","org_id":"org_1","project_id":"project_1","agent_id":"codex"},"payload":{"text":"status only"}}}`
+			response := ut.PerformRequest(h.Engine, "POST", "/memory/turn-event", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"})
+
+			assert.DeepEqual(t, 200, response.Code)
+			if len(candidateQueue.jobs) != 0 {
+				t.Fatalf("%s 不应 enqueue candidate,得到 %d", eventType, len(candidateQueue.jobs))
+			}
+		})
 	}
 }
 

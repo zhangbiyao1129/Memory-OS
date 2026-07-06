@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -31,11 +32,15 @@ func (r *PGRepository) Snapshot(ctx context.Context, filter Filter) (Snapshot, e
 	if err != nil {
 		return Snapshot{}, err
 	}
+	candidateJobs, err := r.candidateJobStats(ctx, filter)
+	if err != nil {
+		return Snapshot{}, err
+	}
 	topics, err := r.topicStats(ctx, filter)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	return Snapshot{Archives: archives, HotMemories: hot, Candidates: candidates, Topics: topics}, nil
+	return Snapshot{Archives: archives, HotMemories: hot, Candidates: candidates, CandidateJobs: candidateJobs, Topics: topics}, nil
 }
 
 func (r *PGRepository) archiveStats(ctx context.Context, filter Filter) (AssetStats, error) {
@@ -132,6 +137,9 @@ func (r *PGRepository) candidateStats(ctx context.Context, filter Filter) (Candi
 		stats.Total += count
 	}
 
+	// 计算待处理总数(pending + in_compose_pool)
+	stats.ActionableTotal = stats.ByStatus["pending"] + stats.ByStatus["in_compose_pool"]
+
 	return stats, nil
 }
 
@@ -156,6 +164,73 @@ func (r *PGRepository) scoreBuckets(ctx context.Context, filter Filter, scoreKey
 		{Label: "0.75-1", Count: c4},
 	}
 	return nil
+}
+
+// candidateJobStats 候选提炼任务健康统计。
+func (r *PGRepository) candidateJobStats(ctx context.Context, filter Filter) (CandidateJobStats, error) {
+	stats := CandidateJobStats{ByStatus: make(map[string]int64)}
+
+	// 按状态统计
+	rows, err := r.pool.Query(ctx, `SELECT status, count(*) FROM candidate_memory_jobs WHERE org_id=$1 AND project_id=$2 GROUP BY status`, filter.OrgID, filter.ProjectID)
+	if err != nil {
+		return stats, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var status string
+		var count int64
+		if err := rows.Scan(&status, &count); err != nil {
+			return stats, err
+		}
+		stats.ByStatus[status] = count
+		stats.Total += count
+	}
+	if err := rows.Err(); err != nil {
+		return stats, err
+	}
+
+	// 派生各状态计数
+	stats.Pending = stats.ByStatus["pending"]
+	stats.Running = stats.ByStatus["running"]
+	stats.Failed = stats.ByStatus["failed"]
+	stats.Done = stats.ByStatus["done"]
+
+	// 最近错误(截断到500字符,不含 secret)
+	var latestError string
+	err = r.pool.QueryRow(ctx, `SELECT last_error FROM candidate_memory_jobs WHERE org_id=$1 AND project_id=$2 AND last_error <> '' ORDER BY updated_at DESC LIMIT 1`, filter.OrgID, filter.ProjectID).Scan(&latestError)
+	if err == nil {
+		// 截断到 500 字符
+		if len(latestError) > 500 {
+			latestError = latestError[:500]
+		}
+		stats.LatestError = latestError
+	} else if err != pgx.ErrNoRows {
+		return stats, err
+	}
+
+	// 最早 pending 时间
+	var oldestPendingAt interface{}
+	err = r.pool.QueryRow(ctx, `SELECT MIN(created_at) FROM candidate_memory_jobs WHERE org_id=$1 AND project_id=$2 AND status='pending'`, filter.OrgID, filter.ProjectID).Scan(&oldestPendingAt)
+	if err == nil && oldestPendingAt != nil {
+		if t, ok := oldestPendingAt.(interface{ Format(string) string }); ok {
+			stats.OldestPendingAt = t.Format("2006-01-02T15:04:05Z07:00")
+		}
+	} else if err != nil && err != pgx.ErrNoRows {
+		return stats, err
+	}
+
+	// 最近完成时间
+	var lastCompletedAt interface{}
+	err = r.pool.QueryRow(ctx, `SELECT MAX(completed_at) FROM candidate_memory_jobs WHERE org_id=$1 AND project_id=$2 AND status='done'`, filter.OrgID, filter.ProjectID).Scan(&lastCompletedAt)
+	if err == nil && lastCompletedAt != nil {
+		if t, ok := lastCompletedAt.(interface{ Format(string) string }); ok {
+			stats.LastCompletedAt = t.Format("2006-01-02T15:04:05Z07:00")
+		}
+	} else if err != nil && err != pgx.ErrNoRows {
+		return stats, err
+	}
+
+	return stats, nil
 }
 
 func (r *PGRepository) topicStats(ctx context.Context, filter Filter) (TopicStats, error) {
