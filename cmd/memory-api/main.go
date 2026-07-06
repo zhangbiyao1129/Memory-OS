@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -183,7 +184,7 @@ var newProductionMaintenanceService = func(cfg config.Config, pool *pgxpool.Pool
 	if strings.TrimSpace(cfg.LLMBaseURL) == "" || strings.TrimSpace(cfg.LLMAPIKey) == "" || strings.TrimSpace(model) == "" {
 		return nil, nil
 	}
-	client, err := llm.NewOpenAICompatible(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, LLMModel: model, EmbeddingModel: cfg.EmbeddingModel})
+	client, err := llm.NewOpenAICompatible(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, LLMModel: model, EmbeddingModel: cfg.EmbeddingModel, Timeout: 5 * time.Minute})
 	if err != nil {
 		return nil, err
 	}

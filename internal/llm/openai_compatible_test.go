@@ -7,12 +7,27 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewOpenAICompatibleRejectsMissingBaseURL(t *testing.T) {
 	_, err := NewOpenAICompatible(OpenAICompatibleConfig{APIKey: "secret"})
 	if err == nil {
 		t.Fatal("NewOpenAICompatible() error = nil, want missing base url error")
+	}
+}
+
+func TestNewOpenAICompatibleUsesConfiguredTimeout(t *testing.T) {
+	client, err := NewOpenAICompatible(OpenAICompatibleConfig{
+		BaseURL: "http://example.local:8000",
+		APIKey:  "secret-key",
+		Timeout: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("NewOpenAICompatible() error = %v", err)
+	}
+	if client.httpClient.Timeout != 2*time.Minute {
+		t.Fatalf("timeout = %s, want 2m0s", client.httpClient.Timeout)
 	}
 }
 
@@ -244,8 +259,8 @@ func TestChatReturnsErrorOnNon2xxStatus(t *testing.T) {
 	defer server.Close()
 
 	client, err := NewOpenAICompatible(OpenAICompatibleConfig{
-		BaseURL: server.URL,
-		APIKey:  "secret-key",
+		BaseURL:  server.URL,
+		APIKey:   "secret-key",
 		LLMModel: "test-model",
 	})
 	if err != nil {
@@ -271,8 +286,8 @@ func TestChatReturnsErrorOnEmptyChoices(t *testing.T) {
 	defer server.Close()
 
 	client, err := NewOpenAICompatible(OpenAICompatibleConfig{
-		BaseURL: server.URL,
-		APIKey:  "secret-key",
+		BaseURL:  server.URL,
+		APIKey:   "secret-key",
 		LLMModel: "test-model",
 	})
 	if err != nil {

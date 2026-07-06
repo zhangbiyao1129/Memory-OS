@@ -41,6 +41,7 @@ const composeThreadId = ref('')
 const cleaning = ref(false)
 const cleanSourceKey = ref('')
 const cleanThreadId = ref('')
+const { stats: lifecycleStats, loadStats: loadLifecycleStats } = useMemoryLifecycleStats()
 
 const hasProjectContext = computed(() => Boolean(context.orgId && context.projectId))
 
@@ -202,7 +203,7 @@ async function runMaintenance() {
 onMounted(async () => {
   auth.initFromStorage()
   context.initFromStorage()
-  await loadCandidates()
+  await Promise.all([loadCandidates(), loadLifecycleStats()])
 })
 
 watch(() => [context.orgId, context.projectId, statusFilter.value, riskFilter.value], () => {
@@ -301,7 +302,10 @@ watch(() => [context.orgId, context.projectId, statusFilter.value, riskFilter.va
 
     <!-- 候选列表 -->
     <section class="mt-6 rounded-3xl border bg-white p-5">
-      <h3 class="text-xl font-black">候选列表（{{ candidates.length }}）</h3>
+      <h3 class="text-xl font-black">候选列表（当前页 {{ candidates.length }} 条）</h3>
+      <p class="mt-2 text-sm text-stone-500">
+        当前页显示 {{ candidates.length }} 条，当前项目待处理候选 {{ lifecycleStats?.candidates.actionable_total ?? 0 }} 条。
+      </p>
       <div v-if="loading" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">正在加载候选记忆...</div>
       <div v-else-if="candidates.length === 0" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">当前过滤条件下暂无候选记忆。</div>
       <div v-else class="mt-4 grid gap-4">

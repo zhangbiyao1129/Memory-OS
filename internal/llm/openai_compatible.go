@@ -24,6 +24,7 @@ type OpenAICompatibleConfig struct {
 	LLMModel       string
 	EmbeddingModel string
 	RerankModel    string
+	Timeout        time.Duration
 }
 
 type OpenAICompatibleClient struct {
@@ -39,7 +40,11 @@ func NewOpenAICompatible(cfg OpenAICompatibleConfig) (*OpenAICompatibleClient, e
 	if _, err := url.ParseRequestURI(cfg.BaseURL); err != nil {
 		return nil, fmt.Errorf("llm base url invalid: %w", err)
 	}
-	return &OpenAICompatibleClient{cfg: cfg, httpClient: &http.Client{Timeout: 30 * time.Second}}, nil
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	return &OpenAICompatibleClient{cfg: cfg, httpClient: &http.Client{Timeout: timeout}}, nil
 }
 
 func (c *OpenAICompatibleClient) Chat(ctx context.Context, request ChatRequest) (ChatResponse, error) {
