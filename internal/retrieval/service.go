@@ -13,6 +13,8 @@ import (
 
 type HotMemory interface {
 	Search(hotmemory.SearchRequest) ([]hotmemory.SearchResult, error)
+	MarkAccessed(string) (hotmemory.Memory, error)
+	MarkReturned(string) (hotmemory.Memory, error)
 	MarkUsed(string) (hotmemory.Memory, error)
 }
 
@@ -109,8 +111,10 @@ func (s Service) collect(request SearchRequest) ([]candidate, int, error) {
 		for _, result := range results {
 			memory := result.Memory
 			candidates = append(candidates, candidate{id: "hot_memory:" + memory.MemoryID, text: memory.Fact, score: result.Score, source: SourceRef{Kind: SourceHotMemory, MemoryID: memory.MemoryID}})
-			if _, err := s.hotMemory.MarkUsed(memory.MemoryID); err == nil {
-				markedUsed++
+			if _, err := s.hotMemory.MarkAccessed(memory.MemoryID); err == nil {
+				if _, err := s.hotMemory.MarkReturned(memory.MemoryID); err == nil {
+					markedUsed++
+				}
 			}
 		}
 		if request.Scope != hotmemory.ScopeAgentSpecific {
@@ -125,8 +129,10 @@ func (s Service) collect(request SearchRequest) ([]candidate, int, error) {
 			for _, result := range agentResults {
 				memory := result.Memory
 				candidates = append(candidates, candidate{id: "hot_memory:" + memory.MemoryID, text: memory.Fact, score: result.Score, source: SourceRef{Kind: SourceHotMemory, MemoryID: memory.MemoryID}})
-				if _, err := s.hotMemory.MarkUsed(memory.MemoryID); err == nil {
-					markedUsed++
+				if _, err := s.hotMemory.MarkAccessed(memory.MemoryID); err == nil {
+					if _, err := s.hotMemory.MarkReturned(memory.MemoryID); err == nil {
+						markedUsed++
+					}
 				}
 			}
 		}

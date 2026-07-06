@@ -118,10 +118,12 @@ func RegisterRoutes(engine *route.Engine, options RouterOptions) {
 	engine.POST("/memory/hot-memory/create", HotMemoryCreateHandler(options.HotMemoryService, options.AuthService, options.TenantService))
 	engine.POST("/memory/hot-memory/list", HotMemoryListHandler(options.HotMemoryService, options.AuthService, options.TenantService))
 	engine.POST("/memory/hot-memory/edit", HotMemoryEditHandler(options.HotMemoryService, options.AuthService, options.TenantService))
-	engine.POST("/memory/hot-memory/promote", HotMemoryPromoteHandler(options.HotMemoryService, options.AuthService, options.TenantService))
-	engine.POST("/memory/hot-memory/demote", HotMemoryDemoteHandler(options.HotMemoryService, options.AuthService, options.TenantService))
-	engine.POST("/memory/hot-memory/mark-used", HotMemoryMarkUsedHandler(options.HotMemoryService, options.AuthService, options.TenantService))
-	engine.POST("/memory/hot-memory/delete", HotMemoryDeleteHandler(options.HotMemoryService, options.AuthService, options.TenantService))
+	engine.POST("/memory/hot-memory/promote", HotMemoryPromoteHandler(options.HotMemoryService, options.AuthService, options.TenantService, options.AuditService))
+	engine.POST("/memory/hot-memory/demote", HotMemoryDemoteHandler(options.HotMemoryService, options.AuthService, options.TenantService, options.AuditService))
+	engine.POST("/memory/hot-memory/mark-used", HotMemoryMarkUsedHandler(options.HotMemoryService, options.AuthService, options.TenantService, options.AuditService))
+	engine.POST("/memory/hot-memory/delete", HotMemoryDeleteHandler(options.HotMemoryService, options.AuthService, options.TenantService, options.AuditService))
+	engine.POST("/memory/hot-memory/pin", HotMemoryPinHandler(options.HotMemoryService, options.AuthService, options.TenantService, options.AuditService))
+	engine.POST("/memory/hot-memory/unpin", HotMemoryUnpinHandler(options.HotMemoryService, options.AuthService, options.TenantService, options.AuditService))
 	if options.CandidateService != nil {
 		engine.POST("/memory/candidates/list", CandidateListHandler(options.CandidateService, options.AuthService, options.TenantService))
 		engine.POST("/memory/candidates/accept", CandidateAcceptHandler(options.CandidateService, options.AuthService, options.TenantService))
@@ -479,6 +481,22 @@ func OpenAPIHandler() app.HandlerFunc {
 				"/memory/hot-memory/delete": map[string]any{
 					"post": map[string]any{
 						"summary": "Soft delete a Hot Memory fact",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Hot Memory metadata"},
+						},
+					},
+				},
+				"/memory/hot-memory/pin": map[string]any{
+					"post": map[string]any{
+						"summary": "Pin a Hot Memory fact (manual override)",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Hot Memory metadata"},
+						},
+					},
+				},
+				"/memory/hot-memory/unpin": map[string]any{
+					"post": map[string]any{
+						"summary": "Unpin a Hot Memory fact",
 						"responses": map[string]any{
 							"200": map[string]any{"description": "Hot Memory metadata"},
 						},
@@ -1546,26 +1564,26 @@ func HotMemoryEditHandler(service hotmemory.Service, authService auth.Service, t
 	}
 }
 
-func HotMemoryPromoteHandler(service hotmemory.Service, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
-	return hotMemoryActionHandler(service, authService, tenantService, "memory:write", "project:%s:write", func(memoryID string) (hotmemory.Memory, error) {
+func HotMemoryPromoteHandler(service hotmemory.Service, authService auth.Service, tenantService tenant.Service, auditService audit.Service) app.HandlerFunc {
+	return hotMemoryActionHandler(service, authService, tenantService, auditService, "memory:write", "project:%s:write", "hot_memory.promote", func(memoryID string) (hotmemory.Memory, error) {
 		return service.Promote(memoryID)
 	})
 }
 
-func HotMemoryDemoteHandler(service hotmemory.Service, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
-	return hotMemoryActionHandler(service, authService, tenantService, "memory:write", "project:%s:write", func(memoryID string) (hotmemory.Memory, error) {
+func HotMemoryDemoteHandler(service hotmemory.Service, authService auth.Service, tenantService tenant.Service, auditService audit.Service) app.HandlerFunc {
+	return hotMemoryActionHandler(service, authService, tenantService, auditService, "memory:write", "project:%s:write", "hot_memory.demote", func(memoryID string) (hotmemory.Memory, error) {
 		return service.Demote(memoryID)
 	})
 }
 
-func HotMemoryMarkUsedHandler(service hotmemory.Service, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
-	return hotMemoryActionHandler(service, authService, tenantService, "memory:write", "project:%s:write", func(memoryID string) (hotmemory.Memory, error) {
+func HotMemoryMarkUsedHandler(service hotmemory.Service, authService auth.Service, tenantService tenant.Service, auditService audit.Service) app.HandlerFunc {
+	return hotMemoryActionHandler(service, authService, tenantService, auditService, "memory:write", "project:%s:write", "hot_memory.mark_used", func(memoryID string) (hotmemory.Memory, error) {
 		return service.MarkUsed(memoryID)
 	})
 }
 
-func HotMemoryDeleteHandler(service hotmemory.Service, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
-	return hotMemoryActionHandler(service, authService, tenantService, "memory:write", "project:%s:write", func(memoryID string) (hotmemory.Memory, error) {
+func HotMemoryDeleteHandler(service hotmemory.Service, authService auth.Service, tenantService tenant.Service, auditService audit.Service) app.HandlerFunc {
+	return hotMemoryActionHandler(service, authService, tenantService, auditService, "memory:write", "project:%s:write", "hot_memory.delete", func(memoryID string) (hotmemory.Memory, error) {
 		if err := service.Delete(memoryID); err != nil {
 			return hotmemory.Memory{}, err
 		}
@@ -1573,7 +1591,19 @@ func HotMemoryDeleteHandler(service hotmemory.Service, authService auth.Service,
 	})
 }
 
-func hotMemoryActionHandler(service hotmemory.Service, authService auth.Service, tenantService tenant.Service, patScope, permissionLabelFormat string, action func(string) (hotmemory.Memory, error)) app.HandlerFunc {
+func HotMemoryPinHandler(service hotmemory.Service, authService auth.Service, tenantService tenant.Service, auditService audit.Service) app.HandlerFunc {
+	return hotMemoryActionHandler(service, authService, tenantService, auditService, "memory:write", "project:%s:write", "hot_memory.pin", func(memoryID string) (hotmemory.Memory, error) {
+		return service.SetPinned(memoryID, true)
+	})
+}
+
+func HotMemoryUnpinHandler(service hotmemory.Service, authService auth.Service, tenantService tenant.Service, auditService audit.Service) app.HandlerFunc {
+	return hotMemoryActionHandler(service, authService, tenantService, auditService, "memory:write", "project:%s:write", "hot_memory.unpin", func(memoryID string) (hotmemory.Memory, error) {
+		return service.SetPinned(memoryID, false)
+	})
+}
+
+func hotMemoryActionHandler(service hotmemory.Service, authService auth.Service, tenantService tenant.Service, auditService audit.Service, patScope, permissionLabelFormat, auditAction string, action func(string) (hotmemory.Memory, error)) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		if !service.Configured() {
 			c.JSON(consts.StatusServiceUnavailable, map[string]string{"error": "hot_memory_not_configured"})
@@ -1602,6 +1632,21 @@ func hotMemoryActionHandler(service hotmemory.Service, authService auth.Service,
 			c.JSON(consts.StatusBadRequest, map[string]string{"error": "hot_memory_action_rejected", "message": err.Error()})
 			return
 		}
+		recordAudit(auditService, audit.Log{
+			ActorUserID:  permissions.UserID,
+			OrgID:        memory.OrgID,
+			ProjectID:    memory.ProjectID,
+			Action:       auditAction,
+			ResourceType: "hot_memory",
+			ResourceID:   updated.MemoryID,
+			RequestID:    auditRequestID(auditAction, updated.MemoryID),
+			Result:       "ok",
+			Metadata: map[string]string{
+				"used_count":     fmt.Sprintf("%d", updated.UsedCount),
+				"returned_count": fmt.Sprintf("%d", updated.ReturnedCount),
+				"access_count":   fmt.Sprintf("%d", updated.AccessCount),
+			},
+		})
 		c.JSON(consts.StatusOK, hotMemoryResponse(updated))
 	}
 }
@@ -3820,7 +3865,12 @@ func hotMemoryResponse(memory hotmemory.Memory) map[string]any {
 		"fact":              memory.Fact,
 		"confidence":        memory.Confidence,
 		"access_count":      memory.AccessCount,
+		"returned_count":    memory.ReturnedCount,
 		"used_count":        memory.UsedCount,
+		"last_accessed_at":  memory.LastAccessedAt,
+		"last_returned_at":  memory.LastReturnedAt,
+		"last_used_at":      memory.LastUsedAt,
+		"pinned":            memory.Pinned,
 		"hot_score":         memory.HotScore,
 		"status":            memory.Status,
 		"created_at":        memory.CreatedAt,

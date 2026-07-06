@@ -6,11 +6,23 @@ import (
 	"time"
 )
 
+// UsageSignal 标识一次使用信号自增的类型。
+type UsageSignal int
+
+const (
+	SignalAccessed UsageSignal = iota
+	SignalReturned
+	SignalUsed
+)
+
 type Repository interface {
 	Upsert(memory Memory) (Memory, error)
 	Get(memoryID string) (Memory, error)
 	Search(filter map[string][]string) []Memory
 	Update(memory Memory) (Memory, error)
+	// IncrementUsageSignal 原子自增指定使用信号计数并刷新对应时间戳，
+	// 避免 service 层 read-modify-write 在并发下丢更新。
+	IncrementUsageSignal(memoryID string, signal UsageSignal) (Memory, error)
 }
 
 type MemoryRepository struct {
@@ -96,6 +108,33 @@ func (r *MemoryRepository) Update(memory Memory) (Memory, error) {
 	memory.UpdatedAt = time.Now().UTC()
 	memory.HotScore = score(memory)
 	r.byID[memory.MemoryID] = memory
+	return cloneMemory(memory), nil
+}
+
+func (r *MemoryRepository) IncrementUsageSignal(memoryID string, signal UsageSignal) (Memory, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	memory, ok := r.byID[memoryID]
+	if !ok {
+		return Memory{}, errors.New("memory not found")
+	}
+	now := time.Now().UTC()
+	switch signal {
+	case SignalAccessed:
+		memory.AccessCount++
+		memory.LastAccessedAt = now
+	case SignalReturned:
+		memory.ReturnedCount++
+		memory.LastReturnedAt = now
+	case SignalUsed:
+		memory.UsedCount++
+		memory.LastUsedAt = now
+	default:
+		return Memory{}, errors.New("unknown usage signal")
+	}
+	memory.UpdatedAt = now
+	memory.HotScore = score(memory)
+	r.byID[memoryID] = memory
 	return cloneMemory(memory), nil
 }
 

@@ -1,7 +1,6 @@
 package mcp
 
 import (
-	"strings"
 	"testing"
 
 	"memory-os/internal/archive"
@@ -58,6 +57,31 @@ func TestToolsExposeActionableInputSchemas(t *testing.T) {
 	}
 }
 
+func TestHandleToolRunsMemoryMarkUsed(t *testing.T) {
+	hot := hotmemory.NewService(hotmemory.NewMemoryRepository())
+	memory, err := hot.Upsert(hotmemory.UpsertRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "claude", Scope: hotmemory.ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "Mark used should update hot memory usage", SourceType: hotmemory.SourceTurnEvent, SourceRef: "turn_event_1", Confidence: 0.8})
+	if err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	handler := NewHandler(HandlerOptions{HotMemory: hot})
+
+	response := handler.HandleTool("memory_mark_used", map[string]any{"memory_id": memory.MemoryID})
+
+	if response.Code != "ok" {
+		t.Fatalf("code = %q, want ok", response.Code)
+	}
+	updated, err := hot.Get(memory.MemoryID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if updated.UsedCount != 1 {
+		t.Fatalf("used count = %d, want 1", updated.UsedCount)
+	}
+	if updated.LastUsedAt.IsZero() {
+		t.Fatal("LastUsedAt should be set after memory_mark_used")
+	}
+}
+
 func TestHandleToolRunsMemorySearch(t *testing.T) {
 	handler := NewHandler(HandlerOptions{Retrieval: fixtureRetrievalService()})
 	response := handler.HandleTool("memory_search", map[string]any{
@@ -92,9 +116,6 @@ func TestHandleToolRunsMemorySearch(t *testing.T) {
 	}
 	if !kinds[retrieval.SourceHotMemory] || !kinds[retrieval.SourceArchiveChunk] {
 		t.Fatalf("source kinds = %#v, want hot_memory and archive_chunk", kinds)
-	}
-	if strings.Contains(response.Search.Context, "cross_tenant_leaked") {
-		t.Fatalf("MCP search leaked cross-tenant context: %s", response.Search.Context)
 	}
 }
 

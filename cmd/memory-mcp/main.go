@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"memory-os/internal/audit"
 	"memory-os/internal/auth"
 	"memory-os/internal/config"
 	"memory-os/internal/db"
@@ -37,6 +39,7 @@ type Server struct {
 	Handler       mcp.Handler
 	AuthService   auth.Service
 	TenantService tenant.Service
+	AuditService  audit.Service
 	RequireAuth   bool
 }
 
@@ -127,16 +130,18 @@ func buildServerWithPool(cfg config.Config, pool *pgxpool.Pool) (*Server, error)
 	handler := mcp.NewHandler(mcp.HandlerOptions{})
 	var authService auth.Service
 	var tenantService tenant.Service
+	var auditService audit.Service
 	if pool != nil && !(cfg.AppEnv == "development" && cfg.EnableDevEndpoints) {
-		service, err := newProductionRetrieval(cfg, pool)
+		service, hot, err := newProductionRetrieval(cfg, pool)
 		if err != nil {
 			return nil, err
 		}
-		handler = mcp.NewHandler(mcp.HandlerOptions{Retrieval: service})
+		handler = mcp.NewHandler(mcp.HandlerOptions{Retrieval: service, HotMemory: hot})
 		authService = auth.NewService(auth.NewPGRepository(pool))
 		tenantService = tenant.NewService(tenant.NewPGRepository(pool))
+		auditService = audit.NewService(audit.NewPGRepository(pool))
 	}
-	return &Server{Addr: cfg.MCPAddr, Tools: mcp.Tools(), Handler: handler, AuthService: authService, TenantService: tenantService, RequireAuth: cfg.AppEnv == "production"}, nil
+	return &Server{Addr: cfg.MCPAddr, Tools: mcp.Tools(), Handler: handler, AuthService: authService, TenantService: tenantService, AuditService: auditService, RequireAuth: cfg.AppEnv == "production"}, nil
 }
 
 func validateProductionConfig(cfg config.Config) error {
@@ -162,22 +167,23 @@ func validateProductionEmbeddingConfig(cfg config.Config) error {
 	return nil
 }
 
-var newProductionRetrieval = func(cfg config.Config, pool *pgxpool.Pool) (retrieval.Service, error) {
+var newProductionRetrieval = func(cfg config.Config, pool *pgxpool.Pool) (retrieval.Service, hotmemory.Service, error) {
 	qdrantClient, err := qdrant.NewClient(cfg.QdrantURL)
 	if err != nil {
-		return retrieval.Service{}, err
+		return retrieval.Service{}, hotmemory.Service{}, err
 	}
 	if err := qdrantClient.EnsureCollectionSchema(context.Background(), qdrant.CollectionConfig{Name: qdrant.DefaultCollectionName, VectorSize: qdrant.DefaultVectorSize, Distance: qdrant.DefaultDistance}, qdrant.DefaultPayloadIndexConfigs()); err != nil {
-		return retrieval.Service{}, err
+		return retrieval.Service{}, hotmemory.Service{}, err
 	}
 	embedder, err := llm.NewOpenAICompatible(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, EmbeddingModel: cfg.EmbeddingModel})
 	if err != nil {
-		return retrieval.Service{}, err
+		return retrieval.Service{}, hotmemory.Service{}, err
 	}
 	hot := hotmemory.NewServiceWithVectorIndex(hotmemory.NewPGRepository(pool), hotmemory.NewQdrantIndex(pool, qdrantClient, embedder, qdrant.DefaultCollectionName))
 	archiveRAG := rag.NewService(rag.NewQdrantStore(pool, qdrantClient, embedder, qdrant.DefaultCollectionName))
 	accessLog := retrieval.NewPGAccessLog(pool)
-	return retrieval.NewService(retrieval.Options{HotMemory: hot, ArchiveRAG: archiveRAG, ArchiveGenerationResolver: retrieval.NewPGArchiveGenerationResolver(pool), Reranker: retrieval.FailingReranker{}, AccessLog: accessLog}), nil
+	service := retrieval.NewService(retrieval.Options{HotMemory: hot, ArchiveRAG: archiveRAG, ArchiveGenerationResolver: retrieval.NewPGArchiveGenerationResolver(pool), Reranker: retrieval.FailingReranker{}, AccessLog: accessLog})
+	return service, hot, nil
 }
 
 func (s *Server) ListenAndServe() error {
@@ -214,6 +220,7 @@ func (s *Server) routes() http.Handler {
 			return
 		}
 		response := s.Handler.HandleTool(request.Name, request.Arguments)
+		s.recordMarkUsedAudit(r, request.Name, response)
 		if response.Code != "ok" {
 			w.WriteHeader(http.StatusBadRequest)
 		}
@@ -289,13 +296,20 @@ func (s *Server) handleMCPToolCall(r *http.Request, params json.RawMessage) map[
 		return mcpToolContent(true, "mcp_forbidden")
 	}
 	response := s.Handler.HandleTool(request.Name, request.Arguments)
+	s.recordMarkUsedAudit(r, request.Name, response)
 	if response.Code != "ok" {
 		if response.Error != "" {
 			return mcpToolContent(true, response.Error)
 		}
 		return mcpToolContent(true, response.Code)
 	}
-	body, err := json.Marshal(response.Search)
+	var payload any
+	if response.Search != nil {
+		payload = response.Search
+	} else {
+		payload = response.Result
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return mcpToolContent(true, "failed to encode tool response")
 	}
@@ -324,6 +338,36 @@ func mcpToolContent(isError bool, text string) map[string]any {
 	}
 }
 
+// recordMarkUsedAudit 在 MCP memory_mark_used 成功后写审计,
+// 让"显式标记使用"这一唯一提升 used_count 的动作可追溯到 actor/memory。
+func (s *Server) recordMarkUsedAudit(r *http.Request, name string, response mcp.ToolResponse) {
+	if name != "memory_mark_used" || response.Code != "ok" || !s.AuditService.Configured() {
+		return
+	}
+	memory, ok := response.Result.(hotmemory.Memory)
+	if !ok {
+		return
+	}
+	actorUserID := ""
+	if s.AuthService.Configured() {
+		if record, err := s.AuthService.ValidatePAT(bearerToken(r), time.Now()); err == nil {
+			actorUserID = record.SubjectID
+		}
+	}
+	action := "hot_memory.mark_used"
+	_ = s.AuditService.Record(audit.Log{
+		ActorUserID:  actorUserID,
+		OrgID:        memory.OrgID,
+		ProjectID:    memory.ProjectID,
+		Action:       action,
+		ResourceType: "hot_memory",
+		ResourceID:   memory.MemoryID,
+		RequestID:    fmt.Sprintf("%s:%s:%d", action, memory.MemoryID, time.Now().UTC().UnixNano()),
+		Result:       "ok",
+		Metadata:     map[string]string{"used_count": fmt.Sprintf("%d", memory.UsedCount), "source": "mcp"},
+	})
+}
+
 func convertHTTPTools(tools []mcp.Tool) []mcpHTTPTool {
 	converted := make([]mcpHTTPTool, 0, len(tools))
 	for _, tool := range tools {
@@ -339,6 +383,15 @@ func (s *Server) authorizeToolCall(w http.ResponseWriter, r *http.Request, name 
 	record, ok := s.authorizePATRecord(w, r, "memory:read")
 	if !ok {
 		return false
+	}
+	// memory_mark_used 是写操作,必须持有 memory:write。
+	if name == "memory_mark_used" {
+		if !mcpPATScopeAllows(record.Scopes, "memory:write") {
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "mcp_forbidden"})
+			return false
+		}
+		return true
 	}
 	if name != "memory_search" {
 		return true

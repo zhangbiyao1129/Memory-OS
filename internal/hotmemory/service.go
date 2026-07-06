@@ -119,13 +119,26 @@ func (s Service) Demote(memoryID string) (Memory, error) {
 	return s.repository.Update(memory)
 }
 
+func (s Service) MarkAccessed(memoryID string) (Memory, error) {
+	return s.repository.IncrementUsageSignal(memoryID, SignalAccessed)
+}
+
+func (s Service) MarkReturned(memoryID string) (Memory, error) {
+	return s.repository.IncrementUsageSignal(memoryID, SignalReturned)
+}
+
 func (s Service) MarkUsed(memoryID string) (Memory, error) {
+	return s.repository.IncrementUsageSignal(memoryID, SignalUsed)
+}
+
+// SetPinned 是人工 override 入口：pin 后热度获得固定加成且不因降级淘汰，
+// unpin 恢复常规热度计算。pin 是幂等设值，无并发自增语义。
+func (s Service) SetPinned(memoryID string, pinned bool) (Memory, error) {
 	memory, err := s.repository.Get(memoryID)
 	if err != nil {
 		return Memory{}, err
 	}
-	memory.AccessCount++
-	memory.UsedCount++
+	memory.Pinned = pinned
 	return s.repository.Update(memory)
 }
 
@@ -200,16 +213,49 @@ func validateUpsert(request UpsertRequest) error {
 }
 
 func score(memory Memory) float64 {
-	base := memory.Confidence * 10
-	base += float64(memory.AccessCount)
-	base += float64(memory.UsedCount * 2)
+	base := 1.0
+	base += float64(memory.AccessCount) * 0.5
+	base += float64(memory.ReturnedCount) * 2
+	base += float64(memory.UsedCount) * 5
+	if memory.Pinned {
+		base += 20
+	}
 	switch memory.Status {
 	case StatusPromoted:
 		base += 10
 	case StatusDemoted:
 		base -= 10
 	}
+	if bonus := recencyBonus(memory.LastAccessedAt, memory.LastReturnedAt, memory.LastUsedAt); bonus > 0 {
+		base += bonus
+	}
 	return base
+}
+
+func recencyBonus(values ...time.Time) float64 {
+	var latest time.Time
+	for _, value := range values {
+		if value.IsZero() {
+			continue
+		}
+		if value.After(latest) {
+			latest = value
+		}
+	}
+	if latest.IsZero() {
+		return 0
+	}
+	age := time.Since(latest)
+	switch {
+	case age <= time.Minute:
+		return 3
+	case age <= 10*time.Minute:
+		return 2
+	case age <= time.Hour:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func dedupeKey(memory Memory) string {

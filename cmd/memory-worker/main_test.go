@@ -290,7 +290,7 @@ func TestBuildWorkerInjectsHotMemoryIntoCandidateRouter(t *testing.T) {
 	newOpenAICompatibleClient = func(cfg llm.OpenAICompatibleConfig) (*llm.OpenAICompatibleClient, error) {
 		return llm.NewOpenAICompatible(cfg)
 	}
-	hotRouterObserved := false
+	candidateObserved := false
 	newCandidateMemoryWorker = func(extractor candidatememory.Extractor, router candidatememory.Router, service *candidatememory.Service, repo candidatememory.Repository, eventLoader jobs.CandidateEventLoader) jobs.CandidateMemoryWorker {
 		candidate := candidatememory.Candidate{
 			CandidateID: "cand-worker-hot",
@@ -308,7 +308,7 @@ func TestBuildWorkerInjectsHotMemoryIntoCandidateRouter(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ApplyRouting() error = %v", err)
 		}
-		hotRouterObserved = decision.Target == candidatememory.RoutingTargetHotMemory && routed.Status == candidatememory.StatusPromotedToHot
+		candidateObserved = decision.Target == candidatememory.RoutingTargetPending && routed.Status == candidatememory.StatusPending
 		return jobs.NewCandidateMemoryWorker(extractor, router, service, repo, eventLoader)
 	}
 
@@ -319,8 +319,8 @@ func TestBuildWorkerInjectsHotMemoryIntoCandidateRouter(t *testing.T) {
 	if worker == nil || !worker.CandidateWorkerConfigured() {
 		t.Fatal("buildWorker() did not configure candidate worker")
 	}
-	if !hotRouterObserved {
-		t.Fatal("buildWorker() did not inject hot memory into candidate router")
+	if !candidateObserved {
+		t.Fatal("buildWorker() still auto-promotes candidates into hot memory")
 	}
 }
 

@@ -1,12 +1,76 @@
 package hotmemory
 
 import (
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"memory-os/internal/eventlog"
 )
+
+func TestSetPinnedTogglesPinAndBoostsHotScore(t *testing.T) {
+	service := NewService(NewMemoryRepository())
+	memory, err := service.Upsert(UpsertRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "Pinned memory must survive demotion", SourceType: SourceTurnEvent, SourceRef: "event_pin", Confidence: 0.2})
+	if err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	if memory.Pinned {
+		t.Fatal("memory should not be pinned by default")
+	}
+
+	pinned, err := service.SetPinned(memory.MemoryID, true)
+	if err != nil {
+		t.Fatalf("SetPinned(true) error = %v", err)
+	}
+	if !pinned.Pinned {
+		t.Fatal("memory should be pinned after SetPinned(true)")
+	}
+	if pinned.HotScore <= memory.HotScore {
+		t.Fatalf("pinned hot score = %f, want > %f", pinned.HotScore, memory.HotScore)
+	}
+
+	unpinned, err := service.SetPinned(memory.MemoryID, false)
+	if err != nil {
+		t.Fatalf("SetPinned(false) error = %v", err)
+	}
+	if unpinned.Pinned {
+		t.Fatal("memory should be unpinned after SetPinned(false)")
+	}
+}
+
+func TestUsageSignalsAreAtomicUnderConcurrency(t *testing.T) {
+	service := NewService(NewMemoryRepository())
+	memory, err := service.Upsert(UpsertRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "Concurrent usage signal increments must not be lost", SourceType: SourceTurnEvent, SourceRef: "event_concurrent", Confidence: 0.2})
+	if err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	const workers = 50
+	var wg sync.WaitGroup
+	wg.Add(workers * 3)
+	for i := 0; i < workers; i++ {
+		go func() { defer wg.Done(); service.MarkAccessed(memory.MemoryID) }()
+		go func() { defer wg.Done(); service.MarkReturned(memory.MemoryID) }()
+		go func() { defer wg.Done(); service.MarkUsed(memory.MemoryID) }()
+	}
+	wg.Wait()
+
+	got, err := service.Get(memory.MemoryID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got.AccessCount != workers {
+		t.Fatalf("access count = %d, want %d (lost updates under concurrency)", got.AccessCount, workers)
+	}
+	if got.ReturnedCount != workers {
+		t.Fatalf("returned count = %d, want %d (lost updates under concurrency)", got.ReturnedCount, workers)
+	}
+	if got.UsedCount != workers {
+		t.Fatalf("used count = %d, want %d (lost updates under concurrency)", got.UsedCount, workers)
+	}
+}
 
 func TestServiceUpsertsAndDeduplicatesFactWithinScope(t *testing.T) {
 	service := NewService(NewMemoryRepository())
@@ -103,8 +167,11 @@ func TestPromoteDemoteAndMarkUsedUpdateStateAndScore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarkUsed() error = %v", err)
 	}
-	if used.UsedCount != 1 || used.AccessCount != 1 {
-		t.Fatalf("used counts = %d/%d, want 1/1", used.UsedCount, used.AccessCount)
+	if used.UsedCount != 1 || used.AccessCount != 0 {
+		t.Fatalf("used counts = %d/%d, want 1/0", used.UsedCount, used.AccessCount)
+	}
+	if got := readTimeField(t, used, "LastUsedAt"); got.IsZero() {
+		t.Fatal("LastUsedAt should be set after MarkUsed")
 	}
 	demoted, err := service.Demote(memory.MemoryID)
 	if err != nil {
@@ -112,6 +179,50 @@ func TestPromoteDemoteAndMarkUsedUpdateStateAndScore(t *testing.T) {
 	}
 	if demoted.Status != StatusDemoted || demoted.HotScore >= promoted.HotScore {
 		t.Fatalf("demoted = %#v, promoted = %#v", demoted, promoted)
+	}
+}
+
+func TestServiceAccessedReturnedAndUsedUpdateUsageSignals(t *testing.T) {
+	service := NewService(NewMemoryRepository())
+	memory, err := service.Upsert(UpsertRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "Hot memory should track usage signals", SourceType: SourceTurnEvent, SourceRef: "event_usage", Confidence: 0.2})
+	if err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	accessed := callUsageSignal(t, service, "MarkAccessed", memory.MemoryID)
+	if accessed.AccessCount != 1 || accessed.UsedCount != 0 {
+		t.Fatalf("accessed counts = %d/%d, want 1/0", accessed.AccessCount, accessed.UsedCount)
+	}
+	if got := readTimeField(t, accessed, "LastAccessedAt"); got.IsZero() {
+		t.Fatal("LastAccessedAt should be set after MarkAccessed")
+	}
+	if got := readIntField(t, accessed, "ReturnedCount"); got != 0 {
+		t.Fatalf("returned count after access = %d, want 0", got)
+	}
+
+	returned := callUsageSignal(t, service, "MarkReturned", memory.MemoryID)
+	if returned.AccessCount != 1 || returned.UsedCount != 0 {
+		t.Fatalf("returned counts = %d/%d, want 1/0", returned.AccessCount, returned.UsedCount)
+	}
+	if got := readIntField(t, returned, "ReturnedCount"); got != 1 {
+		t.Fatalf("returned count after MarkReturned = %d, want 1", got)
+	}
+	if got := readTimeField(t, returned, "LastReturnedAt"); got.IsZero() {
+		t.Fatal("LastReturnedAt should be set after MarkReturned")
+	}
+	if returned.HotScore <= accessed.HotScore {
+		t.Fatalf("returned hot score = %f, want > accessed %f", returned.HotScore, accessed.HotScore)
+	}
+
+	used := callUsageSignal(t, service, "MarkUsed", memory.MemoryID)
+	if used.UsedCount != 1 {
+		t.Fatalf("used count after MarkUsed = %d, want 1", used.UsedCount)
+	}
+	if got := readTimeField(t, used, "LastUsedAt"); got.IsZero() {
+		t.Fatal("LastUsedAt should be set after MarkUsed")
+	}
+	if used.HotScore <= returned.HotScore {
+		t.Fatalf("used hot score = %f, want > returned %f", used.HotScore, returned.HotScore)
 	}
 }
 
@@ -251,6 +362,67 @@ func mustFilter(t *testing.T, ctx FilterContext) PayloadFilter {
 	return filter
 }
 
+func callUsageSignal(t *testing.T, service any, method string, memoryID string) Memory {
+	t.Helper()
+	switch method {
+	case "MarkAccessed":
+		marker, ok := service.(interface{ MarkAccessed(string) (Memory, error) })
+		if !ok {
+			t.Fatalf("service does not implement MarkAccessed")
+		}
+		memory, err := marker.MarkAccessed(memoryID)
+		if err != nil {
+			t.Fatalf("MarkAccessed() error = %v", err)
+		}
+		return memory
+	case "MarkReturned":
+		marker, ok := service.(interface{ MarkReturned(string) (Memory, error) })
+		if !ok {
+			t.Fatalf("service does not implement MarkReturned")
+		}
+		memory, err := marker.MarkReturned(memoryID)
+		if err != nil {
+			t.Fatalf("MarkReturned() error = %v", err)
+		}
+		return memory
+	case "MarkUsed":
+		marker, ok := service.(interface{ MarkUsed(string) (Memory, error) })
+		if !ok {
+			t.Fatalf("service does not implement MarkUsed")
+		}
+		memory, err := marker.MarkUsed(memoryID)
+		if err != nil {
+			t.Fatalf("MarkUsed() error = %v", err)
+		}
+		return memory
+	default:
+		t.Fatalf("unsupported method %s", method)
+		return Memory{}
+	}
+}
+
+func readIntField(t *testing.T, memory Memory, name string) int {
+	t.Helper()
+	field := reflect.ValueOf(memory).FieldByName(name)
+	if !field.IsValid() {
+		t.Fatalf("memory missing field %s", name)
+	}
+	return int(field.Int())
+}
+
+func readTimeField(t *testing.T, memory Memory, name string) time.Time {
+	t.Helper()
+	field := reflect.ValueOf(memory).FieldByName(name)
+	if !field.IsValid() {
+		t.Fatalf("memory missing field %s", name)
+	}
+	value, ok := field.Interface().(time.Time)
+	if !ok {
+		t.Fatalf("field %s is not time.Time", name)
+	}
+	return value
+}
+
 type capturingRepository struct {
 	upserted Memory
 }
@@ -270,6 +442,10 @@ func (r *capturingRepository) Search(filter map[string][]string) []Memory {
 
 func (r *capturingRepository) Update(memory Memory) (Memory, error) {
 	return memory, nil
+}
+
+func (r *capturingRepository) IncrementUsageSignal(memoryID string, signal UsageSignal) (Memory, error) {
+	return Memory{}, nil
 }
 
 type fakeVectorIndex struct {

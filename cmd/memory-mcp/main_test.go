@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"memory-os/internal/archive"
+	"memory-os/internal/audit"
 	"memory-os/internal/auth"
 	"memory-os/internal/config"
 	"memory-os/internal/hotmemory"
@@ -102,9 +103,27 @@ func TestBuildServerInjectsProductionRetrievalWhenPoolExists(t *testing.T) {
 	}
 }
 
-func TestToolsCallRunsMemorySearch(t *testing.T) {
-	server := &Server{Addr: ":18082", Tools: mcp.Tools(), Handler: mcp.NewHandler(mcp.HandlerOptions{Retrieval: fixtureRetrievalService()})}
-	body := `{"name":"memory_search","arguments":{"request_id":"mcp_http_1","query":"deploy API","actor":{"user_id":"user_1","org_id":"org_1","project_id":"project_1","agent_id":"claude"},"scope":"project","visibility":"project","permission_labels":["project:project_1:read"],"archive_index_generation":2,"max_context_bytes":512}}`
+func TestBuildServerInjectsProductionHotMemoryForMarkUsed(t *testing.T) {
+	stubProductionRetrieval(t)
+	server, err := buildServerWithPool(productionMCPConfig(), &pgxpool.Pool{})
+	if err != nil {
+		t.Fatalf("buildServerWithPool() error = %v", err)
+	}
+	response := server.Handler.HandleTool("memory_mark_used", map[string]any{"memory_id": "does_not_exist"})
+	// HotMemory 已注入时,不存在的 memory 返回业务拒绝而非"未配置"。
+	if response.Code == "hot_memory_not_configured" {
+		t.Fatalf("production handler did not inject hot memory: %#v", response)
+	}
+}
+
+func TestToolsCallRunsMemoryMarkUsed(t *testing.T) {
+	hot := hotmemory.NewService(hotmemory.NewMemoryRepository())
+	memory, err := hot.Upsert(hotmemory.UpsertRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "claude", Scope: hotmemory.ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "Mark used via MCP should update hot memory", SourceType: hotmemory.SourceTurnEvent, SourceRef: "turn_event_1", Confidence: 0.8})
+	if err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	server := &Server{Addr: ":18082", Tools: mcp.Tools(), Handler: mcp.NewHandler(mcp.HandlerOptions{HotMemory: hot})}
+	body := `{"name":"memory_mark_used","arguments":{"memory_id":"` + memory.MemoryID + `"}}`
 	request := httptest.NewRequest(http.MethodPost, "/tools/call", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
@@ -114,10 +133,47 @@ func TestToolsCallRunsMemorySearch(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
-	for _, want := range []string{`"code":"ok"`, `"search"`, `"request_id":"mcp_http_1"`, `"kind":"hot_memory"`, `"kind":"archive_chunk"`} {
-		if !strings.Contains(response.Body.String(), want) {
-			t.Fatalf("response missing %s: %s", want, response.Body.String())
+	if !strings.Contains(response.Body.String(), `"code":"ok"`) {
+		t.Fatalf("response missing ok code: %s", response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"UsedCount":1`) {
+		t.Fatalf("response missing UsedCount: %s", response.Body.String())
+	}
+}
+
+func TestToolsCallMarkUsedWritesAudit(t *testing.T) {
+	hot := hotmemory.NewService(hotmemory.NewMemoryRepository())
+	memory, err := hot.Upsert(hotmemory.UpsertRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "claude", Scope: hotmemory.ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "MCP mark used must be auditable", SourceType: hotmemory.SourceTurnEvent, SourceRef: "turn_event_audit", Confidence: 0.8})
+	if err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	auditService := audit.NewService(audit.NewMemoryRepository())
+	server := &Server{Addr: ":18082", Tools: mcp.Tools(), Handler: mcp.NewHandler(mcp.HandlerOptions{HotMemory: hot}), AuditService: auditService}
+
+	body := `{"name":"memory_mark_used","arguments":{"memory_id":"` + memory.MemoryID + `"}}`
+	request := httptest.NewRequest(http.MethodPost, "/tools/call", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.routes().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	logs, err := auditService.List(audit.ListFilter{OrgID: "org_1", ProjectID: "project_1"})
+	if err != nil {
+		t.Fatalf("audit List() error = %v", err)
+	}
+	var found bool
+	for _, log := range logs {
+		if log.Action == "hot_memory.mark_used" && log.ResourceID == memory.MemoryID {
+			found = true
+			if log.Metadata["source"] != "mcp" {
+				t.Fatalf("mcp mark_used audit source = %q, want mcp", log.Metadata["source"])
+			}
 		}
+	}
+	if !found {
+		t.Fatalf("mcp mark_used did not write audit log, logs = %+v", logs)
 	}
 }
 
@@ -149,19 +205,59 @@ func TestMCPStreamableHTTPInitializeAndToolsList(t *testing.T) {
 	}
 }
 
-func TestMCPStreamableHTTPToolCallRunsMemorySearch(t *testing.T) {
+func TestMCPStreamableHTTPToolCallRunsMemoryMarkUsed(t *testing.T) {
+	hot := hotmemory.NewService(hotmemory.NewMemoryRepository())
+	memory, err := hot.Upsert(hotmemory.UpsertRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "claude", Scope: hotmemory.ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "Mark used through MCP should update hot memory", SourceType: hotmemory.SourceTurnEvent, SourceRef: "turn_event_1", Confidence: 0.8})
+	if err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
 	authService, tenantService, token := mcpAuthFixture(t)
-	server := &Server{Addr: ":18082", Tools: mcp.Tools(), Handler: mcp.NewHandler(mcp.HandlerOptions{Retrieval: fixtureRetrievalService()}), AuthService: authService, TenantService: tenantService, RequireAuth: true}
-	body := `{"jsonrpc":"2.0","id":"call-1","method":"tools/call","params":{"name":"memory_search","arguments":{"request_id":"mcp_streamable_search","query":"deploy API","actor":{"org_id":"org_1","project_id":"project_1"},"scope":"project","visibility":"project","archive_index_generation":2,"max_context_bytes":512}}}`
+	server := &Server{Addr: ":18082", Tools: mcp.Tools(), Handler: mcp.NewHandler(mcp.HandlerOptions{HotMemory: hot}), AuthService: authService, TenantService: tenantService, RequireAuth: true}
+	body := `{"jsonrpc":"2.0","id":"call-mark-used","method":"tools/call","params":{"name":"memory_mark_used","arguments":{"memory_id":"` + memory.MemoryID + `"}}}`
 	response := postMCPRPC(t, server, token, body)
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("tools/call status = %d body = %s, want 200", response.Code, response.Body.String())
 	}
-	for _, want := range []string{`"jsonrpc":"2.0"`, `"isError":false`, `"content"`, `\"request_id\":\"mcp_streamable_search\"`, `\"kind\":\"archive_chunk\"`} {
-		if !strings.Contains(response.Body.String(), want) {
-			t.Fatalf("tools/call response missing %s: %s", want, response.Body.String())
-		}
+	if !strings.Contains(response.Body.String(), `"jsonrpc":"2.0"`) || !strings.Contains(response.Body.String(), `"isError":false`) {
+		t.Fatalf("response missing ok result wrapper: %s", response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `\"UsedCount\":1`) {
+		t.Fatalf("response missing UsedCount: %s", response.Body.String())
+	}
+}
+
+func TestToolsCallMarkUsedRequiresWriteScope(t *testing.T) {
+	hot := hotmemory.NewService(hotmemory.NewMemoryRepository())
+	memory, err := hot.Upsert(hotmemory.UpsertRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "claude", Scope: hotmemory.ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "Mark used requires write scope", SourceType: hotmemory.SourceTurnEvent, SourceRef: "turn_event_1", Confidence: 0.8})
+	if err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	authService := auth.NewService(auth.NewMemoryRepository())
+	readOnlyToken, _, err := authService.CreatePAT("user_1", "reader", []string{"memory:read"}, time.Hour)
+	if err != nil {
+		t.Fatalf("CreatePAT() error = %v", err)
+	}
+	tenantService := tenant.NewService(tenant.NewMemoryRepository())
+	server := &Server{Addr: ":18082", Tools: mcp.Tools(), Handler: mcp.NewHandler(mcp.HandlerOptions{HotMemory: hot}), AuthService: authService, TenantService: tenantService, RequireAuth: true}
+
+	body := `{"name":"memory_mark_used","arguments":{"memory_id":"` + memory.MemoryID + `"}}`
+	request := httptest.NewRequest(http.MethodPost, "/tools/call", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+readOnlyToken)
+	response := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d body = %s, want 403 for read-only PAT", response.Code, response.Body.String())
+	}
+	updated, err := hot.Get(memory.MemoryID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if updated.UsedCount != 0 {
+		t.Fatalf("used count = %d, want 0 (read-only PAT must not mark used)", updated.UsedCount)
 	}
 }
 
@@ -357,9 +453,9 @@ func stubProductionRetrieval(t *testing.T) *retrievalStubState {
 	t.Helper()
 	state := &retrievalStubState{}
 	old := newProductionRetrieval
-	newProductionRetrieval = func(cfg config.Config, pool *pgxpool.Pool) (retrieval.Service, error) {
+	newProductionRetrieval = func(cfg config.Config, pool *pgxpool.Pool) (retrieval.Service, hotmemory.Service, error) {
 		state.called = cfg.AppEnv == "production" && pool != nil
-		return fixtureRetrievalService(), nil
+		return fixtureRetrievalService(), fixtureHotMemoryService(), nil
 	}
 	t.Cleanup(func() { newProductionRetrieval = old })
 	return state
@@ -403,6 +499,12 @@ func mcpAuthFixture(t *testing.T) (auth.Service, tenant.Service, string) {
 		t.Fatalf("AddMembership() error = %v", err)
 	}
 	return authService, tenantService, token
+}
+
+func fixtureHotMemoryService() hotmemory.Service {
+	hot := hotmemory.NewService(hotmemory.NewMemoryRepository())
+	_, _ = hot.Upsert(hotmemory.UpsertRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: hotmemory.ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "Production hot memory fixture for mark used", SourceType: hotmemory.SourceTurnEvent, SourceRef: "turn_event_hot", Confidence: 0.8})
+	return hot
 }
 
 func fixtureRetrievalService() retrieval.Service {

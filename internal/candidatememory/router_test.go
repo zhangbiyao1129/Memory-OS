@@ -40,8 +40,8 @@ func TestRouterHighRiskGoesPendingReview(t *testing.T) {
 	}
 }
 
-// 低风险短事实 + confidence>=0.7 → 自动 hotmemory.Upsert + StatusPromotedToHot。
-func TestRouterLowRiskShortFactPromotesToHotMemory(t *testing.T) {
+// 阶段 A: 低风险短事实不再自动进入 hot memory,而是停留在候选态。
+func TestRouterLowRiskShortFactDoesNotPromoteToHotMemory(t *testing.T) {
 	fake := &fakeHotMemory{}
 	r := NewRouter(fake)
 	c := Candidate{
@@ -55,14 +55,14 @@ func TestRouterLowRiskShortFactPromotesToHotMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply routing: %v", err)
 	}
-	if got.Status != StatusPromotedToHot {
-		t.Fatalf("低风险短事实应提升为热记忆: %s", got.Status)
+	if got.Status == StatusPromotedToHot {
+		t.Fatalf("阶段 A 不应自动提升为热记忆: %s", got.Status)
 	}
-	if !decision.Promoted || len(fake.upserts) != 1 {
-		t.Fatalf("应触发一次 hotmemory.Upsert: promoted=%v upserts=%d", decision.Promoted, len(fake.upserts))
+	if decision.Target == RoutingTargetHotMemory || decision.Promoted {
+		t.Fatalf("阶段 A 不应返回热记忆提升决策: %+v", decision)
 	}
-	if fake.upserts[0].Fact != c.Content || fake.upserts[0].SourceRef != c.SourceKey {
-		t.Fatalf("upsert 字段不正确: %+v", fake.upserts[0])
+	if len(fake.upserts) != 0 {
+		t.Fatalf("阶段 A 不应触发 hotmemory.Upsert: %d", len(fake.upserts))
 	}
 }
 

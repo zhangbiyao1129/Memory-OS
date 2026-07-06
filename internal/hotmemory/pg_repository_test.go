@@ -42,6 +42,33 @@ func TestPGRepositoryRequiresPool(t *testing.T) {
 	}
 }
 
+func TestBuildUpsertSQLIncludesUsageSignalColumns(t *testing.T) {
+	query, args := buildUpsertSQL(Memory{MemoryID: "hm_1", OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "fact", FactHash: "hash", Sources: []Source{{SourceType: SourceArchive, SourceRef: "archive_1", Confidence: 0.9}}, Confidence: 0.9, AccessCount: 2, ReturnedCount: 3, UsedCount: 4, Pinned: true, HotScore: 7, Status: StatusPromoted})
+
+	for _, want := range []string{"returned_count", "last_accessed_at", "last_returned_at", "last_used_at", "pinned"} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("buildUpsertSQL query missing %q: %s", want, query)
+		}
+	}
+	if len(args) < 23 {
+		t.Fatalf("buildUpsertSQL args len = %d, want usage-signal args included", len(args))
+	}
+}
+
+func TestBuildUpdateSQLIncludesUsageSignalColumns(t *testing.T) {
+	now := time.Now().UTC()
+	query, args := buildUpdateSQL(Memory{MemoryID: "hm_1", Fact: "fact", FactHash: "hash", Confidence: 0.8, AccessCount: 2, ReturnedCount: 3, UsedCount: 4, LastAccessedAt: now, LastReturnedAt: now, LastUsedAt: now, Pinned: true, HotScore: 12, Status: StatusPromoted})
+
+	for _, want := range []string{"returned_count", "last_accessed_at", "last_returned_at", "last_used_at", "pinned"} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("buildUpdateSQL query missing %q: %s", want, query)
+		}
+	}
+	if len(args) < 14 {
+		t.Fatalf("buildUpdateSQL args len = %d, want usage-signal args included", len(args))
+	}
+}
+
 func TestPGRepositoryUpsertReturnsPersistedTimestamps(t *testing.T) {
 	pool := hotMemoryPGTestPool(t)
 	repo := NewPGRepository(pool)

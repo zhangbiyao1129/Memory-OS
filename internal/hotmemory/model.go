@@ -41,7 +41,12 @@ type Memory struct {
 	Sources          []Source
 	Confidence       float64
 	AccessCount      int
+	ReturnedCount    int
 	UsedCount        int
+	LastAccessedAt   time.Time
+	LastReturnedAt   time.Time
+	LastUsedAt       time.Time
+	Pinned           bool
 	HotScore         float64
 	Status           Status
 	CreatedAt        time.Time

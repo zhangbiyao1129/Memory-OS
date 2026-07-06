@@ -23,6 +23,51 @@ func TestSearchRejectsInvalidRequest(t *testing.T) {
 	}
 }
 
+func TestSearchMarksAccessedReturnedAndDoesNotMarkUsedOnHotResults(t *testing.T) {
+	hot := &trackingHotMemory{results: []hotmemory.SearchResult{{Memory: hotmemory.Memory{MemoryID: "hm_1", Fact: "deploy api note"}, Score: 0.9}}}
+	service := NewService(Options{HotMemory: hot})
+
+	response, err := service.Search(SearchRequest{RequestID: "req_1", Query: "deploy api", Actor: Actor{UserID: "user_1", OrgID: "org_1", ProjectID: "project_1", AgentID: "codex"}, Visibility: "project", Scope: hotmemory.ScopeProject, PermissionLabels: []string{"project:project_1:read"}})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(response.Results) != 1 {
+		t.Fatalf("results len = %d, want 1", len(response.Results))
+	}
+	if hot.accessed != 2 || hot.returned != 2 {
+		t.Fatalf("usage signals = accessed:%d returned:%d, want 2/2", hot.accessed, hot.returned)
+	}
+	if hot.used != 0 {
+		t.Fatalf("used count = %d, want 0", hot.used)
+	}
+}
+
+type trackingHotMemory struct {
+	results  []hotmemory.SearchResult
+	accessed int
+	returned int
+	used     int
+}
+
+func (h *trackingHotMemory) Search(request hotmemory.SearchRequest) ([]hotmemory.SearchResult, error) {
+	return append([]hotmemory.SearchResult(nil), h.results...), nil
+}
+
+func (h *trackingHotMemory) MarkAccessed(string) (hotmemory.Memory, error) {
+	h.accessed++
+	return hotmemory.Memory{}, nil
+}
+
+func (h *trackingHotMemory) MarkReturned(string) (hotmemory.Memory, error) {
+	h.returned++
+	return hotmemory.Memory{}, nil
+}
+
+func (h *trackingHotMemory) MarkUsed(string) (hotmemory.Memory, error) {
+	h.used++
+	return hotmemory.Memory{}, nil
+}
+
 func TestSearchMergesHotMemoryAndArchiveWithTraceableSources(t *testing.T) {
 	hot := hotmemory.NewService(hotmemory.NewMemoryRepository())
 	shared, err := hot.Upsert(hotmemory.UpsertRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: hotmemory.ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "Project deploys API with docker compose", SourceType: hotmemory.SourceTurnEvent, SourceRef: "turn_event_1", Confidence: 0.8})
@@ -65,8 +110,8 @@ func TestSearchMergesHotMemoryAndArchiveWithTraceableSources(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarkUsed verification error = %v", err)
 	}
-	if updated.UsedCount != 2 {
-		t.Fatalf("used count after verification mark = %d, want 2", updated.UsedCount)
+	if updated.UsedCount != 1 {
+		t.Fatalf("used count after verification mark = %d, want 1", updated.UsedCount)
 	}
 }
 
@@ -245,4 +290,46 @@ type fakeArchiveGenerationResolver struct {
 func (r *fakeArchiveGenerationResolver) CurrentGeneration(context ArchiveGenerationContext) (int, error) {
 	r.context = context
 	return r.generation, r.err
+}
+
+// TestSearchThenMarkUsedDrivesUsageSignalChain 是阶段 F2 的最小冒烟:
+// 一次真实检索命中只驱动 access+returned,只有显式 mark_used 才增加 used,
+// 且 hot_score 按 access -> returned -> used 单调递增。
+func TestSearchThenMarkUsedDrivesUsageSignalChain(t *testing.T) {
+	hot := hotmemory.NewService(hotmemory.NewMemoryRepository())
+	created, err := hot.Upsert(hotmemory.UpsertRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: hotmemory.ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "Deploy pipeline runs on T480", SourceType: hotmemory.SourceTurnEvent, SourceRef: "turn_event_1", Confidence: 0.8})
+	if err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+	initialScore := created.HotScore
+
+	service := NewService(Options{HotMemory: hot})
+	if _, err := service.Search(SearchRequest{RequestID: "req_smoke", Query: "Deploy", Actor: Actor{UserID: "user_1", OrgID: "org_1", ProjectID: "project_1", AgentID: "codex"}, Visibility: "project", Scope: hotmemory.ScopeProject, PermissionLabels: []string{"project:project_1:read"}}); err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+
+	afterSearch, err := hot.Get(created.MemoryID)
+	if err != nil {
+		t.Fatalf("Get() after search error = %v", err)
+	}
+	if afterSearch.AccessCount != 1 || afterSearch.ReturnedCount != 1 {
+		t.Fatalf("after search access/returned = %d/%d, want 1/1", afterSearch.AccessCount, afterSearch.ReturnedCount)
+	}
+	if afterSearch.UsedCount != 0 {
+		t.Fatalf("after search used = %d, want 0 (search must not mark used)", afterSearch.UsedCount)
+	}
+	if afterSearch.HotScore <= initialScore {
+		t.Fatalf("after search hot_score = %f, want > initial %f", afterSearch.HotScore, initialScore)
+	}
+
+	afterUsed, err := hot.MarkUsed(created.MemoryID)
+	if err != nil {
+		t.Fatalf("MarkUsed() error = %v", err)
+	}
+	if afterUsed.UsedCount != 1 {
+		t.Fatalf("after mark_used used = %d, want 1", afterUsed.UsedCount)
+	}
+	if afterUsed.HotScore <= afterSearch.HotScore {
+		t.Fatalf("after mark_used hot_score = %f, want > after search %f", afterUsed.HotScore, afterSearch.HotScore)
+	}
 }

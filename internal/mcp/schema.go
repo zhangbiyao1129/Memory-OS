@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"fmt"
+	"strings"
 
 	"memory-os/internal/hotmemory"
 	"memory-os/internal/retrieval"
@@ -18,18 +19,21 @@ type ToolResponse struct {
 	Code   string                    `json:"code"`
 	Error  string                    `json:"error,omitempty"`
 	Search *retrieval.SearchResponse `json:"search,omitempty"`
+	Result any                       `json:"result,omitempty"`
 }
 
 type HandlerOptions struct {
 	Retrieval retrieval.Service
+	HotMemory hotmemory.Service
 }
 
 type Handler struct {
 	retrieval retrieval.Service
+	hotMemory hotmemory.Service
 }
 
 func NewHandler(options HandlerOptions) Handler {
-	return Handler{retrieval: options.Retrieval}
+	return Handler{retrieval: options.Retrieval, hotMemory: options.HotMemory}
 }
 
 func Tools() []Tool {
@@ -63,6 +67,20 @@ func (h Handler) HandleTool(name string, args map[string]any) ToolResponse {
 					return ToolResponse{Code: "memory_search_rejected", Error: err.Error()}
 				}
 				return ToolResponse{Code: "ok", Search: &response}
+			}
+			if name == "memory_mark_used" {
+				if !h.hotMemory.Configured() {
+					return ToolResponse{Code: "hot_memory_not_configured", Error: "hot memory service is not configured"}
+				}
+				memoryID, err := stringArg(args["memory_id"])
+				if err != nil {
+					return ToolResponse{Code: "invalid_request", Error: err.Error()}
+				}
+				updated, err := h.hotMemory.MarkUsed(strings.TrimSpace(memoryID))
+				if err != nil {
+					return ToolResponse{Code: "hot_memory_mark_used_rejected", Error: err.Error()}
+				}
+				return ToolResponse{Code: "ok", Result: updated}
 			}
 			return ToolResponse{Code: "not_implemented", Error: "MCP tool is not implemented in phase 1"}
 		}
@@ -209,6 +227,14 @@ func actorFromArgs(value any) (retrieval.Actor, error) {
 		ProjectID: stringValue(raw["project_id"]),
 		AgentID:   stringValue(raw["agent_id"]),
 	}, nil
+}
+
+func stringArg(value any) (string, error) {
+	text, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("memory_id is required")
+	}
+	return text, nil
 }
 
 func stringValue(value any) string {

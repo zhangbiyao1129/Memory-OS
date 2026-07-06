@@ -2437,6 +2437,99 @@ func TestHotMemoryCreateListAndLifecycleUsePATSubject(t *testing.T) {
 	}
 }
 
+func TestHotMemoryPinAndUnpinOverrideWithAudit(t *testing.T) {
+	h := server.New(server.WithHostPorts("127.0.0.1:0"))
+	authService := auth.NewService(auth.NewMemoryRepository())
+	token, _, err := authService.CreatePAT("user_1", "writer", []string{"memory:read", "memory:write"}, time.Hour)
+	if err != nil {
+		t.Fatalf("CreatePAT() error = %v", err)
+	}
+	tenantService := archiveTenantService(t, tenant.RoleOwner)
+	auditService := audit.NewService(audit.NewMemoryRepository())
+	hotService := hotmemory.NewService(hotmemory.NewMemoryRepository())
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), AuthService: authService, TenantService: tenantService, HotMemoryService: hotService, AuditService: auditService})
+
+	createBody := `{"org_id":"org_1","project_id":"project_1","user_id":"user_2","agent_id":"codex","scope":"project","visibility":"project","fact":"Pinned override must have an explicit entry","source_type":"archive","source_ref":"archive_1","confidence":0.8}`
+	createResponse := ut.PerformRequest(h.Engine, "POST", "/memory/hot-memory/create", &ut.Body{Body: strings.NewReader(createBody), Len: len(createBody)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + token})
+	assert.DeepEqual(t, 200, createResponse.Code)
+	memoryID := jsonStringField(t, createResponse.Body.String(), "memory_id")
+
+	body := `{"memory_id":"` + memoryID + `"}`
+	pinResponse := ut.PerformRequest(h.Engine, "POST", "/memory/hot-memory/pin", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + token})
+	assert.DeepEqual(t, 200, pinResponse.Code)
+	if !strings.Contains(pinResponse.Body.String(), `"pinned":true`) {
+		t.Fatalf("pin response should mark pinned=true: %s", pinResponse.Body.String())
+	}
+
+	unpinResponse := ut.PerformRequest(h.Engine, "POST", "/memory/hot-memory/unpin", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + token})
+	assert.DeepEqual(t, 200, unpinResponse.Code)
+	if !strings.Contains(unpinResponse.Body.String(), `"pinned":false`) {
+		t.Fatalf("unpin response should mark pinned=false: %s", unpinResponse.Body.String())
+	}
+
+	logs, err := auditService.List(audit.ListFilter{OrgID: "org_1", ProjectID: "project_1"})
+	if err != nil {
+		t.Fatalf("audit List() error = %v", err)
+	}
+	var pinned, unpinned bool
+	for _, log := range logs {
+		if log.ResourceID != memoryID {
+			continue
+		}
+		switch log.Action {
+		case "hot_memory.pin":
+			pinned = true
+		case "hot_memory.unpin":
+			unpinned = true
+		}
+	}
+	if !pinned || !unpinned {
+		t.Fatalf("pin/unpin audit missing: pinned=%v unpinned=%v logs=%+v", pinned, unpinned, logs)
+	}
+}
+
+func TestHotMemoryMarkUsedWritesAuditLog(t *testing.T) {
+	h := server.New(server.WithHostPorts("127.0.0.1:0"))
+	authService := auth.NewService(auth.NewMemoryRepository())
+	token, _, err := authService.CreatePAT("user_1", "writer", []string{"memory:read", "memory:write"}, time.Hour)
+	if err != nil {
+		t.Fatalf("CreatePAT() error = %v", err)
+	}
+	tenantService := archiveTenantService(t, tenant.RoleOwner)
+	auditService := audit.NewService(audit.NewMemoryRepository())
+	hotService := hotmemory.NewService(hotmemory.NewMemoryRepository())
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), AuthService: authService, TenantService: tenantService, HotMemoryService: hotService, AuditService: auditService})
+
+	createBody := `{"org_id":"org_1","project_id":"project_1","user_id":"user_2","agent_id":"codex","scope":"project","visibility":"project","fact":"Audit trail must record explicit mark used","source_type":"archive","source_ref":"archive_1","confidence":0.8}`
+	createResponse := ut.PerformRequest(h.Engine, "POST", "/memory/hot-memory/create", &ut.Body{Body: strings.NewReader(createBody), Len: len(createBody)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + token})
+	assert.DeepEqual(t, 200, createResponse.Code)
+	memoryID := jsonStringField(t, createResponse.Body.String(), "memory_id")
+
+	markBody := `{"memory_id":"` + memoryID + `"}`
+	markResponse := ut.PerformRequest(h.Engine, "POST", "/memory/hot-memory/mark-used", &ut.Body{Body: strings.NewReader(markBody), Len: len(markBody)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + token})
+	assert.DeepEqual(t, 200, markResponse.Code)
+
+	logs, err := auditService.List(audit.ListFilter{OrgID: "org_1", ProjectID: "project_1"})
+	if err != nil {
+		t.Fatalf("audit List() error = %v", err)
+	}
+	var found bool
+	for _, log := range logs {
+		if log.Action == "hot_memory.mark_used" && log.ResourceID == memoryID {
+			found = true
+			if log.ActorUserID != "user_1" {
+				t.Fatalf("mark_used audit actor = %q, want user_1", log.ActorUserID)
+			}
+			if log.Result != "ok" {
+				t.Fatalf("mark_used audit result = %q, want ok", log.Result)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("mark_used did not write audit log, logs = %+v", logs)
+	}
+}
+
 func TestMemorySearchReturnsServiceUnavailableWithoutRetrievalService(t *testing.T) {
 	h := server.New(server.WithHostPorts("127.0.0.1:0"))
 	tenantService := seededTenantService(t)
@@ -2701,5 +2794,38 @@ func TestMemoryLifecycleStatsReturnsSnapshotForCurrentProject(t *testing.T) {
 	}
 	if len(repo.LastFilter.PermissionLabels) == 0 {
 		t.Fatalf("repo filter permission labels empty: %#v", repo.LastFilter)
+	}
+}
+
+func TestHotMemoryResponseExposesUsageSignals(t *testing.T) {
+	now := time.Now().UTC()
+	memory := hotmemory.Memory{
+		MemoryID:       "hm_signals",
+		AccessCount:    3,
+		ReturnedCount:  2,
+		UsedCount:      1,
+		LastAccessedAt: now,
+		LastReturnedAt: now,
+		LastUsedAt:     now,
+		Pinned:         true,
+		HotScore:       9.5,
+		Status:         hotmemory.StatusActive,
+	}
+
+	response := hotMemoryResponse(memory)
+
+	if response["returned_count"] != 2 {
+		t.Fatalf("returned_count = %v, want 2", response["returned_count"])
+	}
+	if response["access_count"] != 3 || response["used_count"] != 1 {
+		t.Fatalf("access/used = %v/%v, want 3/1", response["access_count"], response["used_count"])
+	}
+	if response["pinned"] != true {
+		t.Fatalf("pinned = %v, want true", response["pinned"])
+	}
+	for _, key := range []string{"last_accessed_at", "last_returned_at", "last_used_at"} {
+		if _, ok := response[key]; !ok {
+			t.Fatalf("hotMemoryResponse missing %q: %#v", key, response)
+		}
 	}
 }

@@ -70,6 +70,52 @@ func (r *PGRepository) Update(memory Memory) (Memory, error) {
 	return scanMemory(row)
 }
 
+// IncrementUsageSignal 在单个事务内用 SELECT ... FOR UPDATE 锁住目标行，
+// 自增使用信号计数并重算 hot_score，避免并发下丢更新。
+func (r *PGRepository) IncrementUsageSignal(memoryID string, signal UsageSignal) (Memory, error) {
+	if r == nil || r.pool == nil {
+		return Memory{}, errors.New("hot memory postgres repository is not configured")
+	}
+	ctx := context.Background()
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return Memory{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	row := tx.QueryRow(ctx, selectMemoryColumns()+" WHERE memory_id = $1 FOR UPDATE", memoryID)
+	memory, err := scanMemory(row)
+	if err != nil {
+		return Memory{}, err
+	}
+
+	now := time.Now().UTC()
+	switch signal {
+	case SignalAccessed:
+		memory.AccessCount++
+		memory.LastAccessedAt = now
+	case SignalReturned:
+		memory.ReturnedCount++
+		memory.LastReturnedAt = now
+	case SignalUsed:
+		memory.UsedCount++
+		memory.LastUsedAt = now
+	default:
+		return Memory{}, errors.New("unknown usage signal")
+	}
+	memory.HotScore = score(memory)
+
+	query, args := buildUpdateSQL(memory)
+	updated, err := scanMemory(tx.QueryRow(ctx, query, args...))
+	if err != nil {
+		return Memory{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Memory{}, err
+	}
+	return updated, nil
+}
+
 func buildUpsertSQL(memory Memory) (string, []any) {
 	source := Source{}
 	if len(memory.Sources) > 0 {
@@ -79,21 +125,22 @@ func buildUpsertSQL(memory Memory) (string, []any) {
 WITH upserted AS (
     INSERT INTO hot_memories (
         memory_id, org_id, project_id, user_id, agent_id, scope, visibility,
-        permission_labels, fact, fact_hash, confidence, access_count, used_count, hot_score, status
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+        permission_labels, fact, fact_hash, confidence, access_count, returned_count,
+        used_count, last_accessed_at, last_returned_at, last_used_at, pinned, hot_score, status
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
     ON CONFLICT (org_id, project_id, user_id, agent_id, scope, fact_hash) WHERE deleted_at IS NULL
     DO UPDATE SET
         confidence = GREATEST(hot_memories.confidence, EXCLUDED.confidence),
         hot_score = EXCLUDED.hot_score,
         updated_at = now()
-    RETURNING memory_id, org_id, project_id, user_id, agent_id, scope, visibility, permission_labels, fact, fact_hash, confidence, access_count, used_count, hot_score, status, created_at, updated_at, deleted_at
+    RETURNING memory_id, org_id, project_id, user_id, agent_id, scope, visibility, permission_labels, fact, fact_hash, confidence, access_count, returned_count, used_count, last_accessed_at, last_returned_at, last_used_at, pinned, hot_score, status, created_at, updated_at, deleted_at
 )
 , source_upsert AS (
     INSERT INTO hot_memory_sources (memory_id, source_type, source_ref, confidence)
-    SELECT memory_id, $16, $17, $18 FROM upserted
+    SELECT memory_id, $21, $22, $23 FROM upserted
     ON CONFLICT DO NOTHING
 )
-SELECT memory_id, org_id, project_id, user_id, agent_id, scope, visibility, permission_labels, fact, fact_hash, confidence, access_count, used_count, hot_score, status, created_at, updated_at, deleted_at
+SELECT memory_id, org_id, project_id, user_id, agent_id, scope, visibility, permission_labels, fact, fact_hash, confidence, access_count, returned_count, used_count, last_accessed_at, last_returned_at, last_used_at, pinned, hot_score, status, created_at, updated_at, deleted_at
 FROM upserted`
 	args := []any{
 		memory.MemoryID,
@@ -108,7 +155,12 @@ FROM upserted`
 		memory.FactHash,
 		memory.Confidence,
 		memory.AccessCount,
+		memory.ReturnedCount,
 		memory.UsedCount,
+		memory.LastAccessedAt,
+		memory.LastReturnedAt,
+		memory.LastUsedAt,
+		memory.Pinned,
 		memory.HotScore,
 		string(memory.Status),
 		string(source.SourceType),
@@ -156,18 +208,23 @@ SET fact = $1,
     fact_hash = $2,
     confidence = $3,
     access_count = $4,
-    used_count = $5,
-    hot_score = $6,
-    status = $7,
+    returned_count = $5,
+    used_count = $6,
+    last_accessed_at = $7,
+    last_returned_at = $8,
+    last_used_at = $9,
+    pinned = $10,
+    hot_score = $11,
+    status = $12,
     updated_at = now(),
-    deleted_at = $8
-WHERE memory_id = $9
-RETURNING memory_id, org_id, project_id, user_id, agent_id, scope, visibility, permission_labels, fact, fact_hash, confidence, access_count, used_count, hot_score, status, created_at, updated_at, deleted_at`
-	return query, []any{memory.Fact, memory.FactHash, memory.Confidence, memory.AccessCount, memory.UsedCount, memory.HotScore, string(memory.Status), memory.DeletedAt, memory.MemoryID}
+    deleted_at = $13
+WHERE memory_id = $14
+RETURNING memory_id, org_id, project_id, user_id, agent_id, scope, visibility, permission_labels, fact, fact_hash, confidence, access_count, returned_count, used_count, last_accessed_at, last_returned_at, last_used_at, pinned, hot_score, status, created_at, updated_at, deleted_at`
+	return query, []any{memory.Fact, memory.FactHash, memory.Confidence, memory.AccessCount, memory.ReturnedCount, memory.UsedCount, memory.LastAccessedAt, memory.LastReturnedAt, memory.LastUsedAt, memory.Pinned, memory.HotScore, string(memory.Status), memory.DeletedAt, memory.MemoryID}
 }
 
 func selectMemoryColumns() string {
-	return "SELECT memory_id, org_id, project_id, user_id, agent_id, scope, visibility, permission_labels, fact, fact_hash, confidence, access_count, used_count, hot_score, status, created_at, updated_at, deleted_at FROM hot_memories"
+	return "SELECT memory_id, org_id, project_id, user_id, agent_id, scope, visibility, permission_labels, fact, fact_hash, confidence, access_count, returned_count, used_count, last_accessed_at, last_returned_at, last_used_at, pinned, hot_score, status, created_at, updated_at, deleted_at FROM hot_memories"
 }
 
 type memoryScanner interface {
@@ -192,7 +249,12 @@ func scanMemory(row memoryScanner) (Memory, error) {
 		&memory.FactHash,
 		&memory.Confidence,
 		&memory.AccessCount,
+		&memory.ReturnedCount,
 		&memory.UsedCount,
+		&memory.LastAccessedAt,
+		&memory.LastReturnedAt,
+		&memory.LastUsedAt,
+		&memory.Pinned,
 		&memory.HotScore,
 		&status,
 		&memory.CreatedAt,

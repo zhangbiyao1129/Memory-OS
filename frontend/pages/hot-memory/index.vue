@@ -15,7 +15,12 @@ type HotMemory = {
   fact: string
   confidence: number
   access_count: number
+  returned_count: number
   used_count: number
+  last_accessed_at?: string
+  last_returned_at?: string
+  last_used_at?: string
+  pinned?: boolean
   hot_score: number
   status: 'active' | 'promoted' | 'demoted' | 'deleted'
   created_at: string
@@ -220,6 +225,7 @@ watch(() => [context.orgId, context.projectId, context.agentId, scope.value, sta
       <div>
         <h2 class="text-3xl font-black">热记忆</h2>
         <p class="mt-2 text-stone-600">连接真实 <code>/memory/hot-memory/*</code> API，支持创建、提升、降权、标记使用和软删除。</p>
+        <p class="mt-2 rounded-2xl bg-stone-100 p-3 text-sm text-stone-600">热记忆是<strong>可重建的快速召回索引快照</strong>，不是权威记忆源（权威内容在 Archive Markdown）。热度由真实使用行为驱动：<strong>召回 → 返回 → 使用</strong> 三段信号逐层递进，<code>used</code> 只由显式 <code>mark-used</code> 或上下文注入触发，检索命中本身不增加 <code>used</code>。</p>
       </div>
       <button class="rounded-2xl border bg-white px-4 py-2 font-bold" :disabled="loading" @click="loadMemories">{{ loading ? '刷新中...' : '刷新' }}</button>
     </div>
@@ -276,8 +282,14 @@ watch(() => [context.orgId, context.projectId, context.agentId, scope.value, sta
                 </label>
               </template>
               <p v-else class="text-lg font-black text-stone-950">{{ memory.fact }}</p>
-              <p class="mt-2 break-all text-sm text-stone-600">{{ memory.memory_id }} · {{ statusText(memory.status) }} · hot_score {{ memory.hot_score.toFixed(2) }}</p>
-              <p class="mt-1 text-sm text-stone-500">scope {{ memory.scope }} · agent {{ memory.agent_id }} · used {{ memory.used_count }} · access {{ memory.access_count }}</p>
+              <p class="mt-2 break-all text-sm text-stone-600">{{ memory.memory_id }} · {{ statusText(memory.status) }} · hot_score {{ memory.hot_score.toFixed(2) }}<span v-if="memory.pinned" class="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-900">已固定</span></p>
+              <div class="mt-2 flex flex-wrap gap-2 text-xs">
+                <span class="rounded-full bg-stone-200 px-2 py-1 font-bold text-stone-700" title="被检索召回的次数（access_count）：记忆进入候选集">召回 {{ memory.access_count }}</span>
+                <span class="rounded-full bg-sky-100 px-2 py-1 font-bold text-sky-800" title="实际返回给调用方的次数（returned_count）：通过重排后进入最终结果">返回 {{ memory.returned_count }}</span>
+                <span class="rounded-full bg-emerald-100 px-2 py-1 font-bold text-emerald-800" title="被显式使用/上下文注入的次数（used_count）：只由 mark-used 显式触发，检索命中不计入">使用 {{ memory.used_count }}</span>
+              </div>
+              <p class="mt-1 text-sm text-stone-500">scope {{ memory.scope }} · agent {{ memory.agent_id }}</p>
+              <p class="mt-1 text-xs text-stone-500">最近召回 {{ formatDate(memory.last_accessed_at) }} · 最近返回 {{ formatDate(memory.last_returned_at) }} · 最近使用 {{ formatDate(memory.last_used_at) }}</p>
               <p class="mt-1 text-xs text-stone-500">更新于 {{ formatDate(memory.updated_at) }}</p>
             </div>
             <div class="flex flex-wrap gap-2">
