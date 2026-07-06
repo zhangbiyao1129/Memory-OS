@@ -176,14 +176,18 @@ var newProductionHotMemory = func(cfg config.Config, pool *pgxpool.Pool) (hotmem
 }
 
 var newProductionMaintenanceService = func(cfg config.Config, pool *pgxpool.Pool, candidateRepo candidatememory.Repository, composer *candidatememory.TopicComposer) (*candidatememory.MaintenanceService, error) {
-	if strings.TrimSpace(cfg.LLMBaseURL) == "" || strings.TrimSpace(cfg.LLMAPIKey) == "" || strings.TrimSpace(cfg.EmbeddingModel) == "" {
+	model := strings.TrimSpace(cfg.LLMModel)
+	if model == "" {
+		model = "MiniMax-M2.7"
+	}
+	if strings.TrimSpace(cfg.LLMBaseURL) == "" || strings.TrimSpace(cfg.LLMAPIKey) == "" || strings.TrimSpace(model) == "" {
 		return nil, nil
 	}
-	client, err := llm.NewOpenAICompatible(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, EmbeddingModel: cfg.EmbeddingModel})
+	client, err := llm.NewOpenAICompatible(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, LLMModel: model, EmbeddingModel: cfg.EmbeddingModel})
 	if err != nil {
 		return nil, err
 	}
-	cleaner := candidatememory.NewLLMMaintenanceCleaner(client)
+	cleaner := candidatememory.NewLLMMaintenanceCleaner(client).WithModel(model)
 	return candidatememory.NewMaintenanceService(candidatememory.NewPGMaintenanceRepository(pool), candidateRepo, composer, cleaner), nil
 }
 
