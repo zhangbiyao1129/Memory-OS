@@ -37,13 +37,6 @@ onMounted(loadStats)
     <p v-if="!hasProjectContext" class="mt-6 rounded-2xl bg-amber-50 p-4 text-sm text-amber-800">请先选择组织和项目。</p>
     <p v-if="error" class="mt-6 rounded-2xl bg-red-50 p-4 text-sm text-red-700">{{ error }}</p>
 
-    <section class="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-      <MetricTile label="归档库" :value="stats?.archives.total || 0" detail="长期沉淀" />
-      <MetricTile label="热记忆" :value="stats?.hot_memories.total || 0" detail="工作记忆" />
-      <MetricTile label="待处理候选" :value="stats?.candidates.actionable_total ?? 0" detail="需确认/沉淀" />
-      <MetricTile label="主题沉淀" :value="stats?.topics.total || 0" detail="主题进度" />
-    </section>
-
     <section class="mt-6 grid gap-4 lg:grid-cols-2">
       <BarChart title="生命周期" :rows="lifecycleRows" />
       <BarChart title="候选风险" :rows="riskRows" />
