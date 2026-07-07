@@ -19,4 +19,13 @@ describe('candidates page', () => {
     expect(pageSource).not.toContain('指定主题沉淀')
     expect(pageSource).not.toContain('强制沉淀')
   })
+
+  it('loads only actionable candidates by default', () => {
+    expect(pageSource).toContain("ACTIONABLE_CANDIDATE_STATUSES = ['pending', 'in_compose_pool']")
+    expect(pageSource).toContain('ACTIONABLE_CANDIDATE_STATUSES.map')
+    expect(pageSource).toContain('status')
+    expect(pageSource).toContain('待处理候选列表')
+    expect(pageSource).toContain('refreshCandidateView()')
+    expect(pageSource).not.toContain('<h3 class="text-xl font-black">候选列表（当前页')
+  })
 })

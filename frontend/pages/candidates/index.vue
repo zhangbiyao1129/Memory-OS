@@ -28,6 +28,8 @@ type Candidate = {
 
 type CandidateListResponse = { candidates: Candidate[] }
 
+const ACTIONABLE_CANDIDATE_STATUSES = ['pending', 'in_compose_pool']
+
 type MaintenanceStatus = {
   active: boolean
   run_id: string
@@ -171,8 +173,7 @@ function startPolling(runID?: string) {
         clearRunID()
         success.value = ''
         cleaning.value = false
-        await loadCandidates()
-        await loadLifecycleStats()
+        await refreshCandidateView()
       } else if (status.status === 'failed') {
         stopPolling()
         clearRunID()
@@ -229,17 +230,26 @@ async function loadCandidates() {
   loading.value = true
   error.value = ''
   try {
-    const body: Record<string, unknown> = { limit: 50 }
-    const response = await request<CandidateListResponse>('/memory/candidates/list', {
-      method: 'POST',
-      body: requestBody(body)
-    })
-    candidates.value = response.candidates || []
+    const responses = await Promise.all(ACTIONABLE_CANDIDATE_STATUSES.map((status) => {
+      const body: Record<string, unknown> = { limit: 50, status }
+      return request<CandidateListResponse>('/memory/candidates/list', {
+        method: 'POST',
+        body: requestBody(body)
+      })
+    }))
+    candidates.value = responses
+      .flatMap((response) => response.candidates || [])
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .slice(0, 50)
   } catch (err: any) {
     error.value = err.message || '候选记忆加载失败'
   } finally {
     loading.value = false
   }
+}
+
+async function refreshCandidateView() {
+  await Promise.all([loadCandidates(), loadLifecycleStats()])
 }
 
 async function acceptCandidate(candidateID: string) {
@@ -251,7 +261,7 @@ async function acceptCandidate(candidateID: string) {
       body: requestBody({ candidate_id: candidateID })
     })
     success.value = '候选已接受。'
-    await loadCandidates()
+    await refreshCandidateView()
   } catch (err: any) {
     error.value = err.message || '接受失败'
   }
@@ -266,7 +276,7 @@ async function discardCandidate(candidateID: string) {
       body: requestBody({ candidate_id: candidateID })
     })
     success.value = '候选已丢弃。'
-    await loadCandidates()
+    await refreshCandidateView()
   } catch (err: any) {
     error.value = err.message || '丢弃失败'
   }
@@ -295,7 +305,7 @@ async function runMaintenance() {
       // 已有完成的任务直接返回
       cleaning.value = false
       maintenanceStatus.value = result
-      await loadCandidates()
+      await refreshCandidateView()
     } else {
       cleaning.value = false
     }
@@ -380,9 +390,9 @@ onBeforeUnmount(() => {
 
     <!-- 候选列表 -->
     <section class="mt-6 rounded-3xl border bg-white p-5">
-      <h3 class="text-xl font-black">候选列表（当前页 {{ candidates.length }} 条）</h3>
+      <h3 class="text-xl font-black">待处理候选列表（当前页 {{ candidates.length }} 条）</h3>
       <p class="mt-2 text-sm text-stone-500">
-        当前页显示 {{ candidates.length }} 条，当前项目待处理候选 {{ n(lifecycleStats?.candidates?.actionable_total) }} 条。
+        仅显示待处理和沉淀池候选；已沉淀、已丢弃和已提升热记忆不会出现在这里。当前项目待处理候选 {{ n(lifecycleStats?.candidates?.actionable_total) }} 条。
       </p>
       <div v-if="loading" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">正在加载候选记忆...</div>
       <div v-else-if="candidates.length === 0" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">当前暂无候选记忆。</div>
