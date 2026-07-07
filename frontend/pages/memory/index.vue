@@ -1,5 +1,5 @@
 <script setup lang="ts">
-const { stats, loading, error, hasProjectContext, loadStats } = useMemoryLifecycleStats()
+const { stats, loading, error, loadStats } = useMemoryLifecycleStats({ userScoped: true })
 
 const lifecycleRows = computed(() => [
   { label: '归档库', value: stats.value?.archives.total || 0, tone: 'bg-sky-600' },
@@ -29,12 +29,11 @@ onMounted(loadStats)
     <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div>
         <h2 class="text-3xl font-black">记忆</h2>
-        <p class="mt-2 text-stone-600">围绕候选、热记忆、主题沉淀和归档库查看当前项目的记忆生命周期。</p>
+        <p class="mt-2 text-stone-600">围绕候选、热记忆、主题沉淀和归档库查看当前用户全部记忆生命周期。</p>
       </div>
       <button class="rounded-2xl border bg-white px-4 py-2 font-bold" :disabled="loading" @click="loadStats">{{ loading ? '刷新中...' : '刷新' }}</button>
     </div>
 
-    <p v-if="!hasProjectContext" class="mt-6 rounded-2xl bg-amber-50 p-4 text-sm text-amber-800">请先选择组织和项目。</p>
     <p v-if="error" class="mt-6 rounded-2xl bg-red-50 p-4 text-sm text-red-700">{{ error }}</p>
 
     <section class="mt-6 grid gap-4 lg:grid-cols-2">
