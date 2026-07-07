@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -18,8 +17,6 @@ func TestRunRuntimeSecretAuditUsesEnvConfig(t *testing.T) {
 		runRuntimeSecretAudit = restore
 	})
 
-	t.Setenv("SECRET_VAULT_KEY_ID", "vault-key-1")
-	t.Setenv("SECRET_VAULT_KEY_B64", base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
 	t.Setenv("SECRET_AUDIT_PROBE_VALUE", "runtime-secret-audit-probe")
 
 	runRuntimeSecretAudit = func(_ context.Context, request runtimeAuditRequest) (runtimeAuditResult, error) {
@@ -32,20 +29,13 @@ func TestRunRuntimeSecretAuditUsesEnvConfig(t *testing.T) {
 		if request.QdrantURL != "http://qdrant:6333" {
 			t.Fatalf("request.QdrantURL = %q, want http://qdrant:6333", request.QdrantURL)
 		}
-		if request.SecretVaultKeyID != "vault-key-1" {
-			t.Fatalf("request.SecretVaultKeyID = %q", request.SecretVaultKeyID)
-		}
-		if string(request.SecretVaultKey) != "0123456789abcdef0123456789abcdef" {
-			t.Fatalf("request.SecretVaultKey = %q", string(request.SecretVaultKey))
-		}
 		if request.ProbeValue != "runtime-secret-audit-probe" {
 			t.Fatalf("request.ProbeValue = %q", request.ProbeValue)
 		}
 		return runtimeAuditResult{
-			Status:        "pass",
-			RequestID:     "req_1",
-			SecretRef:     "secret_ref_1",
-			AuditLogCount: 1,
+			Status:    "pass",
+			RequestID: "req_1",
+			SecretRef: "secret_ref_1",
 		}, nil
 	}
 
@@ -53,30 +43,10 @@ func TestRunRuntimeSecretAuditUsesEnvConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run runtime error = %v", err)
 	}
-	for _, want := range []string{`"status": "pass"`, `"request_id": "req_1"`, `"audit_log_count": 1`} {
+	for _, want := range []string{`"status": "pass"`, `"request_id": "req_1"`, `"secret_ref": "secret_ref_1"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
 		}
-	}
-}
-
-func TestRunRuntimeSecretAuditRequiresVaultEnv(t *testing.T) {
-	restore := runRuntimeSecretAudit
-	t.Cleanup(func() {
-		runRuntimeSecretAudit = restore
-	})
-
-	runRuntimeSecretAudit = func(context.Context, runtimeAuditRequest) (runtimeAuditResult, error) {
-		t.Fatal("runRuntimeSecretAudit should not be called when vault env is missing")
-		return runtimeAuditResult{}, nil
-	}
-
-	_, err := run([]string{"runtime", "--dsn", "postgres://memory-os", "--archive-dir", "/tmp/archive", "--qdrant-url", "http://qdrant:6333"})
-	if err == nil {
-		t.Fatal("run runtime error = nil, want missing vault env")
-	}
-	if !strings.Contains(err.Error(), "SECRET_VAULT_KEY_ID") {
-		t.Fatalf("error = %v, want missing SECRET_VAULT_KEY_ID", err)
 	}
 }
 
@@ -137,12 +107,10 @@ func TestRuntimeSecretAuditPassesAgainstPostgresAndFakeQdrant(t *testing.T) {
 	defer server.Close()
 
 	result, err := runtimeSecretAudit(context.Background(), runtimeAuditRequest{
-		DSN:              dsn,
-		ArchiveDir:       archiveDir,
-		QdrantURL:        server.URL,
-		SecretVaultKeyID: "vault-key-test",
-		SecretVaultKey:   []byte("0123456789abcdef0123456789abcdef"),
-		ProbeValue:       "runtime-secret-audit-probe",
+		DSN:        dsn,
+		ArchiveDir: archiveDir,
+		QdrantURL:  server.URL,
+		ProbeValue: "runtime-secret-audit-probe",
 	})
 	if err != nil {
 		t.Fatalf("runtimeSecretAudit() error = %v", err)
@@ -150,16 +118,14 @@ func TestRuntimeSecretAuditPassesAgainstPostgresAndFakeQdrant(t *testing.T) {
 	if result.Status != "pass" {
 		t.Fatalf("status = %q, want pass", result.Status)
 	}
-	if result.AuditLogCount != 1 {
-		t.Fatalf("audit_log_count = %d, want 1", result.AuditLogCount)
-	}
 	if result.RuntimeLeakCounts.AuditMetadataHits != 0 ||
 		result.RuntimeLeakCounts.ArchiveMarkdownHits != 0 ||
 		result.RuntimeLeakCounts.ArchiveChunkHits != 0 ||
 		result.RuntimeLeakCounts.HotMemoryHits != 0 ||
 		result.RuntimeLeakCounts.ArchiveQdrantPayloadHits != 0 ||
 		result.RuntimeLeakCounts.HotMemoryQdrantPayloadHits != 0 ||
-		result.RuntimeLeakCounts.QdrantLivePayloadHits != 0 {
+		result.RuntimeLeakCounts.QdrantLivePayloadHits != 0 ||
+		result.RuntimeLeakCounts.SecretCiphertextHits != 0 {
 		t.Fatalf("runtime leak counts = %#v, want all zero", result.RuntimeLeakCounts)
 	}
 	if !result.Cleanup.SecretDisabled || !result.Cleanup.ProjectDeleted || !result.Cleanup.OrgDeleted || !result.Cleanup.UserDisabled {

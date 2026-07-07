@@ -45,18 +45,11 @@ memory_os_load_env_from_running_containers() {
   export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(memory_os_container_env deploy-postgres-1 POSTGRES_PASSWORD)}"
   export LLM_BASE_URL="${LLM_BASE_URL:-$(memory_os_container_env deploy-memory-api-1 LLM_BASE_URL)}"
   export LLM_API_KEY="${LLM_API_KEY:-$(memory_os_container_env deploy-memory-api-1 LLM_API_KEY)}"
-  export SECRET_VAULT_KEY_ID="${SECRET_VAULT_KEY_ID:-$(memory_os_container_env deploy-memory-api-1 SECRET_VAULT_KEY_ID)}"
-  export SECRET_VAULT_KEY_B64="${SECRET_VAULT_KEY_B64:-$(memory_os_container_env deploy-memory-api-1 SECRET_VAULT_KEY_B64)}"
-
-  if [[ -n "${SECRET_VAULT_KEY_B64:-}" ]]; then
-    SECRET_VAULT_KEY_B64="$(python3 -c 'import os; v=os.environ["SECRET_VAULT_KEY_B64"]; print(v + ("=" * ((4 - len(v) % 4) % 4)))')"
-    export SECRET_VAULT_KEY_B64
-  fi
 }
 
 memory_os_require_prod_env() {
   local missing=()
-  for key in POSTGRES_PASSWORD LLM_BASE_URL LLM_API_KEY SECRET_VAULT_KEY_ID SECRET_VAULT_KEY_B64; do
+  for key in POSTGRES_PASSWORD LLM_BASE_URL LLM_API_KEY; do
     if [[ -z "${!key:-}" ]]; then
       missing+=("$key")
     fi

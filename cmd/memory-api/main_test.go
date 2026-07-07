@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -77,17 +76,6 @@ func TestBuildServerRejectsPlaceholderLLMConfigInProduction(t *testing.T) {
 	}
 }
 
-func TestBuildServerRejectsMissingSecretVaultConfigInProduction(t *testing.T) {
-	cfg := productionAPIConfig()
-	cfg.SecretVaultKeyID = ""
-	cfg.SecretVaultKey = nil
-
-	_, err := buildServer(cfg)
-	if !errors.Is(err, errInvalidProductionSecretVaultConfig) {
-		t.Fatalf("buildServer() error = %v, want %v", err, errInvalidProductionSecretVaultConfig)
-	}
-}
-
 func TestRouterOptionsConfiguresCoreServicesWhenPostgresPoolExists(t *testing.T) {
 	restoreProductionArchiveRAG := stubProductionArchiveRAG(t)
 	restoreProductionHotMemory := stubProductionHotMemory(t)
@@ -115,8 +103,8 @@ func TestRouterOptionsConfiguresCoreServicesWhenPostgresPoolExists(t *testing.T)
 	if !options.AuditService.Configured() {
 		t.Fatal("AuditService not configured")
 	}
-	if !options.SecretVault.Configured() {
-		t.Fatal("SecretVault not configured")
+	if !options.SecretStore.Configured() {
+		t.Fatal("SecretStore not configured")
 	}
 	if !options.ArchiveService.Configured() {
 		t.Fatal("ArchiveService not configured")
@@ -195,8 +183,8 @@ func TestRouterOptionsLeavesAuthOpenForDevelopmentSmoke(t *testing.T) {
 	if options.AuditService.Configured() {
 		t.Fatal("AuditService configured in development smoke mode")
 	}
-	if options.SecretVault.Configured() {
-		t.Fatal("SecretVault configured in development smoke mode")
+	if options.SecretStore.Configured() {
+		t.Fatal("SecretStore configured in development smoke mode")
 	}
 	if options.ArchiveService.Configured() {
 		t.Fatal("ArchiveService configured in development smoke mode")
@@ -297,17 +285,15 @@ func (e *testError) Error() string {
 
 func productionAPIConfig() config.Config {
 	return config.Config{
-		APIAddr:          ":18081",
-		AppEnv:           "production",
-		PostgresDSN:      "postgres://memory_os:secret@postgres:5432/memory_os",
-		RedisAddr:        "redis:6379",
-		QdrantURL:        "http://qdrant:6333",
-		ArchiveDir:       "/data/memory-os",
-		LLMBaseURL:       "http://llm.local:8000",
-		LLMAPIKey:        "test-key",
-		EmbeddingModel:   "bge-m3",
-		SecretVaultKeyID: "key-test",
-		SecretVaultKey:   bytes.Repeat([]byte{7}, 32),
+		APIAddr:        ":18081",
+		AppEnv:         "production",
+		PostgresDSN:    "postgres://memory_os:secret@postgres:5432/memory_os",
+		RedisAddr:      "redis:6379",
+		QdrantURL:      "http://qdrant:6333",
+		ArchiveDir:     "/data/memory-os",
+		LLMBaseURL:     "http://llm.local:8000",
+		LLMAPIKey:      "test-key",
+		EmbeddingModel: "bge-m3",
 	}
 }
 
@@ -345,10 +331,8 @@ func (maintenanceRepoStub) MarkStaleRunningAsFailed(ctx context.Context, before 
 
 func secretVaultTestConfig() config.Config {
 	return config.Config{
-		AppEnv:           "production",
-		ArchiveDir:       "/data/memory-os",
-		QdrantURL:        "http://qdrant:6333",
-		SecretVaultKeyID: "key-test",
-		SecretVaultKey:   bytes.Repeat([]byte{7}, 32),
+		AppEnv:     "production",
+		ArchiveDir: "/data/memory-os",
+		QdrantURL:  "http://qdrant:6333",
 	}
 }

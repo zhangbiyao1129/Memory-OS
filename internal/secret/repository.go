@@ -3,14 +3,23 @@ package secret
 import (
 	"errors"
 	"sync"
+	"time"
 )
 
+// ErrForbidden 表示调用者不是该 secret 的 owner。
+var ErrForbidden = errors.New("secret forbidden")
+
+// Metadata 只包含服务端可见的元信息，绝不含明文。
 type Metadata struct {
 	SecretRef      string
 	OwnerUserID    string
 	OrgID          string
 	ProjectID      string
 	Name           string
+	EnvName        string
+	Site           string
+	Purpose        string
+	ExpiresAt      *time.Time
 	Status         string
 	CurrentVersion int
 }
@@ -23,10 +32,20 @@ type ListFilter struct {
 	Limit       int
 }
 
+// EncryptedBlob 是本机 MCP 加密后上传的密文与算法元信息。
+// 服务端只存储和回传，不持有任何解密材料。
+type EncryptedBlob struct {
+	Algorithm      string
+	DeviceKeyID    string
+	KeyFingerprint string
+	Nonce          []byte
+	Ciphertext     []byte
+}
+
 type Version struct {
 	SecretRef string
 	Version   int
-	Value     EncryptedValue
+	Blob      EncryptedBlob
 }
 
 type Repository interface {

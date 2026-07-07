@@ -354,21 +354,26 @@ func TestSecretsPageUsesRealAPIAndMetadataOnlyFlow(t *testing.T) {
 		"sk-live-",
 		"fake-secret-value",
 		"api-key-plaintext-demo",
+		// 本机 MCP 加解密改造后，Web 端不得提供明文创建入口。
+		"/memory/secrets/create",
+		"/memory/secrets/ciphertext",
+		"transientSecret",
+		"createSecret",
+		`type="password"`,
 	} {
 		if strings.Contains(page, forbidden) {
-			t.Fatalf("secrets page must not keep static or plaintext secret marker %q", forbidden)
+			t.Fatalf("secrets page must not keep plaintext-create or ciphertext marker %q", forbidden)
 		}
 	}
 	for _, required := range []string{
 		"/memory/secrets/list",
-		"/memory/secrets/create",
 		"/memory/secrets/disable",
-		"SecretValueGuard",
-		"页面只保留 metadata",
+		"secret_create_local",
+		"服务端只保存密文和元信息",
 		"已禁用 ${metadata.secret_ref}，并切换到 disabled 筛选。",
 	} {
 		if !strings.Contains(page, required) {
-			t.Fatalf("secrets page must use real API and safe metadata marker %q", required)
+			t.Fatalf("secrets page must use real metadata-only API and local-MCP guidance marker %q", required)
 		}
 	}
 }
@@ -1089,18 +1094,19 @@ func TestComposeRequiresLLMConfigForAPIAndWorker(t *testing.T) {
 	}
 }
 
-func TestComposeRequiresSecretVaultConfigForAPI(t *testing.T) {
+func TestComposeDoesNotRequireServerSideSecretVaultKey(t *testing.T) {
+	// 本机 MCP 加解密改造后，服务端不再持有解密 key，compose 不应再注入 SECRET_VAULT_KEY_*。
 	content, err := os.ReadFile("../../deploy/docker-compose.yml")
 	if err != nil {
 		t.Fatalf("read docker-compose.yml: %v", err)
 	}
 	compose := string(content)
-	for _, marker := range []string{
-		"SECRET_VAULT_KEY_ID: ${SECRET_VAULT_KEY_ID:?SECRET_VAULT_KEY_ID is required}",
-		"SECRET_VAULT_KEY_B64: ${SECRET_VAULT_KEY_B64:?SECRET_VAULT_KEY_B64 is required}",
+	for _, forbidden := range []string{
+		"SECRET_VAULT_KEY_ID",
+		"SECRET_VAULT_KEY_B64",
 	} {
-		if !strings.Contains(compose, marker) {
-			t.Fatalf("compose must require explicit secret vault marker %q for api", marker)
+		if strings.Contains(compose, forbidden) {
+			t.Fatalf("compose must not inject server-side secret vault key %q", forbidden)
 		}
 	}
 }

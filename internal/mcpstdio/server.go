@@ -12,10 +12,12 @@ import (
 
 	"memory-os/internal/mcp"
 	"memory-os/internal/mcpproxy"
+	"memory-os/internal/secretlocal"
 )
 
 type Server struct {
-	proxy mcpproxy.Proxy
+	proxy       mcpproxy.Proxy
+	secretTools *secretlocal.ToolHandler
 }
 
 type rpcRequest struct {
@@ -45,6 +47,12 @@ type mcpTool struct {
 
 func NewServer(proxy mcpproxy.Proxy) Server {
 	return Server{proxy: proxy}
+}
+
+// WithSecretTools 启用本机 secret 工具（本地加解密）。
+func (s Server) WithSecretTools(handler *secretlocal.ToolHandler) Server {
+	s.secretTools = handler
+	return s
 }
 
 func (s Server) Serve(ctx context.Context, input io.Reader, output io.Writer) error {
@@ -83,7 +91,7 @@ func (s Server) handle(ctx context.Context, body []byte) (rpcResponse, bool) {
 			"serverInfo":      map[string]any{"name": "memory-os-local", "version": "0.4.0"},
 		}}, true
 	case "tools/list":
-		return rpcResponse{JSONRPC: "2.0", ID: request.ID, Result: map[string]any{"tools": convertTools(mcp.Tools())}}, true
+		return rpcResponse{JSONRPC: "2.0", ID: request.ID, Result: map[string]any{"tools": s.listTools()}}, true
 	case "tools/call":
 		result := s.handleToolCall(ctx, request.Params)
 		return rpcResponse{JSONRPC: "2.0", ID: request.ID, Result: result}, true
@@ -102,11 +110,25 @@ func (s Server) handleToolCall(ctx context.Context, params json.RawMessage) map[
 	if err := json.Unmarshal(params, &request); err != nil {
 		return toolContent(true, "invalid tools/call params")
 	}
+	if s.secretTools != nil && secretlocal.Handles(request.Name) {
+		result := s.secretTools.Handle(ctx, request.Name, request.Arguments)
+		return toolContent(result.IsError, result.Text)
+	}
 	result, err := s.proxy.CallTool(ctx, request.Name, request.Arguments)
 	if err != nil {
 		return toolContent(true, err.Error())
 	}
 	return toolContent(result.IsError, result.Text)
+}
+
+func (s Server) listTools() []mcpTool {
+	tools := convertTools(mcp.Tools())
+	if s.secretTools != nil {
+		for _, tool := range secretlocal.Tools() {
+			tools = append(tools, mcpTool{Name: tool.Name, Description: tool.Description, InputSchema: tool.InputSchema})
+		}
+	}
+	return tools
 }
 
 func toolContent(isError bool, text string) map[string]any {

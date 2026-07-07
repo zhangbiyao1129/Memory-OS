@@ -1,8 +1,6 @@
 package config
 
 import (
-	"bytes"
-	"encoding/base64"
 	"testing"
 )
 
@@ -54,34 +52,6 @@ func TestLoadReadsArchiveDir(t *testing.T) {
 
 	if cfg.ArchiveDir != "/srv/memory-os" {
 		t.Fatalf("ArchiveDir = %q, want /srv/memory-os", cfg.ArchiveDir)
-	}
-}
-
-func TestLoadReadsSecretVaultKey(t *testing.T) {
-	key := bytes.Repeat([]byte{7}, 32)
-	t.Setenv("SECRET_VAULT_KEY_ID", "key-2026-07")
-	t.Setenv("SECRET_VAULT_KEY_B64", base64.StdEncoding.EncodeToString(key))
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-
-	if cfg.SecretVaultKeyID != "key-2026-07" {
-		t.Fatalf("SecretVaultKeyID = %q, want key-2026-07", cfg.SecretVaultKeyID)
-	}
-	if !bytes.Equal(cfg.SecretVaultKey, key) {
-		t.Fatal("SecretVaultKey was not decoded from SECRET_VAULT_KEY_B64")
-	}
-}
-
-func TestLoadRejectsInvalidSecretVaultKey(t *testing.T) {
-	t.Setenv("SECRET_VAULT_KEY_ID", "key-2026-07")
-	t.Setenv("SECRET_VAULT_KEY_B64", "not-base64")
-
-	_, err := Load()
-	if err == nil {
-		t.Fatal("Load() error = nil, want invalid secret vault key error")
 	}
 }
 

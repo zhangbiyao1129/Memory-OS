@@ -9,6 +9,10 @@ type SecretMetadata = {
   org_id: string
   project_id: string
   name: string
+  env_name?: string
+  site?: string
+  purpose?: string
+  expires_at?: string
   status: 'active' | 'disabled'
   current_version: number
 }
@@ -16,12 +20,9 @@ type SecretMetadata = {
 type SecretListResponse = { secrets: SecretMetadata[] }
 
 const loading = ref(false)
-const creating = ref(false)
 const disabling = ref('')
 const error = ref('')
 const success = ref('')
-const secretName = ref('MEMORY_OS_TEST_SECRET')
-const transientSecret = ref('')
 const statusFilter = ref<'active' | 'disabled'>('active')
 const secrets = ref<SecretMetadata[]>([])
 
@@ -49,38 +50,6 @@ async function loadSecrets() {
     error.value = err.message || 'Secret metadata 加载失败'
   } finally {
     loading.value = false
-  }
-}
-
-async function createSecret() {
-  if (!hasProjectContext.value) {
-    error.value = '请先选择真实组织和项目'
-    return
-  }
-  creating.value = true
-  error.value = ''
-  success.value = ''
-  try {
-    const metadata = await request<SecretMetadata>('/memory/secrets/create', {
-      method: 'POST',
-      body: {
-        org_id: context.orgId,
-        project_id: context.projectId,
-        name: secretName.value,
-        plaintext: transientSecret.value
-      }
-    })
-    success.value = `已创建 ${metadata.secret_ref}，页面只保留 metadata。`
-    transientSecret.value = ''
-    if (statusFilter.value !== 'active') {
-      statusFilter.value = 'active'
-    } else {
-      await loadSecrets()
-    }
-  } catch (err: any) {
-    error.value = err.message || 'Secret 创建失败'
-  } finally {
-    creating.value = false
   }
 }
 
@@ -123,8 +92,8 @@ watch(() => [context.orgId, context.projectId, statusFilter.value], () => loadSe
   <AppShell>
     <div class="flex flex-wrap items-start justify-between gap-4">
       <div>
-        <h2 class="text-3xl font-black">Secret Vault 管理</h2>
-        <p class="mt-2 text-stone-600">接入真实 Secret Vault API。明文只在提交前短暂存在，列表和响应只展示 metadata。</p>
+        <h2 class="text-3xl font-black">Secret 管理</h2>
+        <p class="mt-2 text-stone-600">服务端只保存密文和元信息。创建 secret 请通过本机 MCP，Web 端不接收明文。</p>
       </div>
       <button class="rounded-2xl border px-4 py-2 font-bold" @click="loadSecrets">刷新</button>
     </div>
@@ -134,19 +103,14 @@ watch(() => [context.orgId, context.projectId, statusFilter.value], () => loadSe
 
     <div class="mt-6 grid gap-4 lg:grid-cols-[1fr_1fr]">
       <section class="rounded-3xl border bg-white p-5">
-        <h3 class="font-black">创建 Secret</h3>
-        <p class="mt-2 text-sm text-stone-600">当前组织 / 项目：</p>
-        <div class="mt-2 rounded-2xl bg-stone-50 p-3 text-xs text-stone-600">
-          <p>组织：{{ context.orgId || '未选择' }}</p>
-          <p>项目：{{ context.projectId || '未选择' }}</p>
-        </div>
-        <input v-model="secretName" class="mt-4 w-full rounded-2xl border px-4 py-3" placeholder="Secret 名称">
-        <input v-model="transientSecret" class="mt-3 w-full rounded-2xl border px-4 py-3" type="password" autocomplete="off" placeholder="明文只在提交前短暂存在">
-        <SecretValueGuard class="mt-3" :value="transientSecret" />
-        <button class="mt-4 w-full rounded-2xl bg-stone-950 px-4 py-3 font-black text-white" :disabled="creating || !hasProjectContext" @click="createSecret">
-          {{ creating ? '创建中...' : '创建真实 Secret' }}
-        </button>
-        <p class="mt-3 text-xs text-stone-500">提交成功后会立即清空明文字段；请不要在名称中写入敏感值。</p>
+        <h3 class="font-black">如何创建 Secret</h3>
+        <p class="mt-2 text-sm text-stone-600">明文永远不进入服务端。请在本机通过 MCP 工具创建：</p>
+        <ol class="mt-3 space-y-2 text-sm text-stone-600">
+          <li>1. 本机 MCP 工具 <code class="rounded bg-stone-100 px-1">secret_create_local</code> 传入明文与用途。</li>
+          <li>2. 本机用设备密钥（<code class="rounded bg-stone-100 px-1">~/.config/memory-os/secret-device-key.json</code>）加密。</li>
+          <li>3. 只有密文和元信息上传到服务端，明文留在本机。</li>
+        </ol>
+        <p class="mt-3 rounded-2xl bg-amber-50 p-3 text-xs text-amber-800">Web 端只做 metadata 查看与禁用，不提供明文创建入口，也无法取回明文。</p>
       </section>
 
       <section class="rounded-3xl border bg-white p-5">
@@ -175,6 +139,9 @@ watch(() => [context.orgId, context.projectId, statusFilter.value], () => loadSe
               {{ disabling === secret.secret_ref ? '禁用中...' : '禁用' }}
             </button>
           </div>
+          <p v-if="secret.env_name" class="mt-2 text-stone-600">env: {{ secret.env_name }}</p>
+          <p v-if="secret.site" class="mt-1 text-stone-600">site: {{ secret.site }}</p>
+          <p v-if="secret.purpose" class="mt-1 text-stone-600">purpose: {{ secret.purpose }}</p>
           <p class="mt-2 break-all text-stone-600">owner: {{ secret.owner_user_id }}</p>
           <p class="mt-1 break-all text-stone-600">project: {{ secret.project_id }}</p>
           <p class="mt-1 text-stone-600">version: {{ secret.current_version }}</p>

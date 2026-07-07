@@ -32,12 +32,11 @@ import (
 )
 
 var (
-	errMissingProductionPostgresDSN       = errors.New("postgres dsn is required in production")
-	errMissingProductionRedisAddr         = errors.New("redis addr is required in production")
-	errMissingProductionQdrantURL         = errors.New("qdrant url is required in production")
-	errMissingProductionArchiveDir        = errors.New("archive dir is required in production")
-	errInvalidProductionLLMConfig         = errors.New("llm embedding config is required in production")
-	errInvalidProductionSecretVaultConfig = errors.New("secret vault config is required in production")
+	errMissingProductionPostgresDSN = errors.New("postgres dsn is required in production")
+	errMissingProductionRedisAddr   = errors.New("redis addr is required in production")
+	errMissingProductionQdrantURL   = errors.New("qdrant url is required in production")
+	errMissingProductionArchiveDir  = errors.New("archive dir is required in production")
+	errInvalidProductionLLMConfig   = errors.New("llm embedding config is required in production")
 )
 
 func main() {
@@ -79,9 +78,6 @@ func buildServer(cfg config.Config) (*server.Hertz, error) {
 			return nil, errMissingProductionArchiveDir
 		}
 		if err := validateProductionLLMConfig(cfg); err != nil {
-			return nil, err
-		}
-		if err := validateProductionSecretVaultConfig(cfg); err != nil {
 			return nil, err
 		}
 	}
@@ -132,18 +128,6 @@ func validateProductionLLMConfig(cfg config.Config) error {
 		return errInvalidProductionLLMConfig
 	}
 	return nil
-}
-
-func validateProductionSecretVaultConfig(cfg config.Config) error {
-	if strings.TrimSpace(cfg.SecretVaultKeyID) == "" {
-		return errInvalidProductionSecretVaultConfig
-	}
-	switch len(cfg.SecretVaultKey) {
-	case 16, 24, 32:
-		return nil
-	default:
-		return errInvalidProductionSecretVaultConfig
-	}
 }
 
 var newProductionArchiveRAG = func(cfg config.Config, pool *pgxpool.Pool) (rag.Service, error) {
@@ -217,11 +201,7 @@ func routerOptions(cfg config.Config, healthService health.Service, pool *pgxpoo
 	options.EventLogService = eventlog.NewService(eventlog.NewPGRepository(pool), eventlog.SanitizerOptions{MaxTurnEventBytes: 256 * 1024, MaxToolOutputBytes: 64 * 1024})
 	options.AuditService = audit.NewService(audit.NewPGRepository(pool))
 	options.ArchiveService = archive.NewService(archive.NewPGRepository(pool), cfg.ArchiveDir)
-	secretVault, err := productionSecretVault(cfg, pool)
-	if err != nil {
-		return httpapi.RouterOptions{}, err
-	}
-	options.SecretVault = secretVault
+	options.SecretStore = secret.NewStore(secret.NewPGRepository(pool))
 	options.ArchiveQueue = jobs.NewPGArchiveQueue(pool, jobs.PGArchiveQueueOptions{WorkerID: "memory-api"})
 	options.ArchiveIndexQueue = jobs.NewPGArchiveIndexQueue(pool, jobs.PGArchiveIndexQueueOptions{WorkerID: "memory-api"})
 	candidateRepo := candidatememory.NewPGRepository(pool)
@@ -252,12 +232,4 @@ func routerOptions(cfg config.Config, healthService health.Service, pool *pgxpoo
 
 func productionAccessLog(pool *pgxpool.Pool) *retrieval.PGAccessLog {
 	return retrieval.NewPGAccessLog(pool)
-}
-
-func productionSecretVault(cfg config.Config, pool *pgxpool.Pool) (secret.Vault, error) {
-	codec, err := secret.NewAESGCMCodec(cfg.SecretVaultKeyID, cfg.SecretVaultKey)
-	if err != nil {
-		return secret.Vault{}, err
-	}
-	return secret.NewVault(secret.NewPGRepository(pool), codec), nil
 }

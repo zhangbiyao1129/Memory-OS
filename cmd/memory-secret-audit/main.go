@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -19,20 +18,18 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"memory-os/internal/audit"
 	"memory-os/internal/db"
 	"memory-os/internal/qdrant"
 	"memory-os/internal/secret"
+	"memory-os/internal/secretlocal"
 	"memory-os/internal/tenant"
 )
 
 type runtimeAuditRequest struct {
-	DSN              string
-	ArchiveDir       string
-	QdrantURL        string
-	SecretVaultKeyID string
-	SecretVaultKey   []byte
-	ProbeValue       string
+	DSN        string
+	ArchiveDir string
+	QdrantURL  string
+	ProbeValue string
 }
 
 type runtimeLeakCounts struct {
@@ -43,6 +40,7 @@ type runtimeLeakCounts struct {
 	ArchiveQdrantPayloadHits   int `json:"archive_qdrant_payload_hits"`
 	HotMemoryQdrantPayloadHits int `json:"hot_memory_qdrant_payload_hits"`
 	QdrantLivePayloadHits      int `json:"qdrant_live_payload_hits"`
+	SecretCiphertextHits       int `json:"secret_ciphertext_hits"`
 }
 
 type runtimeAuditCleanup struct {
@@ -56,7 +54,6 @@ type runtimeAuditResult struct {
 	Status            string              `json:"status"`
 	RequestID         string              `json:"request_id"`
 	SecretRef         string              `json:"secret_ref"`
-	AuditLogCount     int                 `json:"audit_log_count"`
 	RuntimeLeakCounts runtimeLeakCounts   `json:"runtime_leak_counts"`
 	Cleanup           runtimeAuditCleanup `json:"cleanup"`
 	Notes             []string            `json:"notes,omitempty"`
@@ -108,21 +105,6 @@ func runRuntime(args []string) (string, error) {
 		}
 	}
 
-	keyID := strings.TrimSpace(os.Getenv("SECRET_VAULT_KEY_ID"))
-	if keyID == "" {
-		return "", errors.New("SECRET_VAULT_KEY_ID is required and must not be empty")
-	}
-	keyB64 := strings.TrimSpace(os.Getenv("SECRET_VAULT_KEY_B64"))
-	if keyB64 == "" {
-		return "", errors.New("SECRET_VAULT_KEY_B64 is required and must not be empty")
-	}
-	key, err := base64.StdEncoding.DecodeString(keyB64)
-	if err != nil {
-		return "", fmt.Errorf("decode SECRET_VAULT_KEY_B64: %w", err)
-	}
-
-	request.SecretVaultKeyID = keyID
-	request.SecretVaultKey = key
 	request.ProbeValue = strings.TrimSpace(os.Getenv(*probeValueEnv))
 	if request.ProbeValue == "" {
 		request.ProbeValue = "runtime-secret-audit-probe"
@@ -152,9 +134,6 @@ func runtimeSecretAudit(_ context.Context, request runtimeAuditRequest) (runtime
 	if strings.TrimSpace(request.QdrantURL) == "" {
 		return runtimeAuditResult{}, errors.New("runtime audit qdrant url is required")
 	}
-	if strings.TrimSpace(request.SecretVaultKeyID) == "" || len(request.SecretVaultKey) == 0 {
-		return runtimeAuditResult{}, errors.New("runtime audit secret vault key is required")
-	}
 	info, err := os.Stat(request.ArchiveDir)
 	if err != nil {
 		return runtimeAuditResult{}, fmt.Errorf("stat archive dir: %w", err)
@@ -172,13 +151,12 @@ func runtimeSecretAudit(_ context.Context, request runtimeAuditRequest) (runtime
 		return runtimeAuditResult{}, fmt.Errorf("run migrations: %w", err)
 	}
 
-	codec, err := secret.NewAESGCMCodec(request.SecretVaultKeyID, request.SecretVaultKey)
+	// 模拟本机 MCP：用一次性本地设备 key 加密探针明文，服务端只落库密文。
+	deviceKey, err := secretlocal.GenerateDeviceKey("runtime-audit")
 	if err != nil {
-		return runtimeAuditResult{}, fmt.Errorf("build vault codec: %w", err)
+		return runtimeAuditResult{}, fmt.Errorf("generate device key: %w", err)
 	}
-	vault := secret.NewVault(secret.NewPGRepository(pool), codec)
-	auditService := audit.NewService(audit.NewPGRepository(pool))
-	injector := secret.NewInjector(vault, auditService)
+	store := secret.NewStore(secret.NewPGRepository(pool))
 	tenantService := tenant.NewService(tenant.NewPGRepository(pool))
 
 	suffix := strconv.FormatInt(time.Now().UnixNano(), 10)
@@ -192,41 +170,33 @@ func runtimeSecretAudit(_ context.Context, request runtimeAuditRequest) (runtime
 		RequestID: "runtime_secret_audit_" + suffix,
 	}
 
-	meta, err := vault.Create(secret.CreateRequest{
+	blob, err := deviceKey.Encrypt([]byte(request.ProbeValue))
+	if err != nil {
+		return result, fmt.Errorf("local encrypt runtime audit secret: %w", err)
+	}
+	meta, err := store.CreateEncrypted(secret.CreateEncryptedRequest{
 		OwnerUserID: user.ID,
 		OrgID:       org.ID,
 		ProjectID:   project.ID,
 		Name:        "runtime-secret-audit-" + suffix,
-		Plaintext:   request.ProbeValue,
-	})
+		Purpose:     "runtime-secret-audit",
+	}, blob)
 	if err != nil {
 		return result, fmt.Errorf("create runtime audit secret: %w", err)
 	}
 	result.SecretRef = meta.SecretRef
 
-	injected, err := injector.Inject(secret.InjectRequest{
-		ActorUserID: user.ID,
-		OrgID:       org.ID,
-		ProjectID:   project.ID,
-		Tool:        "runtime-secret-audit",
-		Purpose:     "runtime-secret-audit",
-		Target:      secret.InjectionTargetEnv,
-		RequestID:   result.RequestID,
-		Template:    "TOKEN=${" + meta.SecretRef + "}",
-	})
+	// owner 取回密文后本地解密，验证只有持 key 者才能还原明文；服务端无解密能力。
+	_, storedBlob, err := store.GetCiphertext(meta.SecretRef, user.ID)
 	if err != nil {
-		return result, fmt.Errorf("inject runtime audit secret: %w", err)
+		return result, fmt.Errorf("fetch runtime audit ciphertext: %w", err)
 	}
-	if injected != "TOKEN="+request.ProbeValue {
-		return result, errors.New("runtime audit injected output mismatch")
-	}
-
-	result.AuditLogCount, err = countAuditLogRows(ctx, pool, result.RequestID)
+	recovered, err := deviceKey.Decrypt(storedBlob)
 	if err != nil {
-		return result, err
+		return result, fmt.Errorf("local decrypt runtime audit secret: %w", err)
 	}
-	if result.AuditLogCount != 1 {
-		return result, fmt.Errorf("runtime audit expected 1 audit log, got %d", result.AuditLogCount)
+	if string(recovered) != request.ProbeValue {
+		return result, errors.New("runtime audit local decrypt mismatch")
 	}
 
 	result.RuntimeLeakCounts.AuditMetadataHits, err = countProbeHits(ctx, pool, `SELECT count(*) FROM audit_logs WHERE metadata::text ILIKE '%' || $1 || '%'`, request.ProbeValue)
@@ -257,8 +227,13 @@ func runtimeSecretAudit(_ context.Context, request runtimeAuditRequest) (runtime
 	if err != nil {
 		return result, fmt.Errorf("scan qdrant live payload hits: %w", err)
 	}
+	// 服务端存储的密文本身绝不能包含明文探针。
+	result.RuntimeLeakCounts.SecretCiphertextHits, err = countProbeHits(ctx, pool, `SELECT count(*) FROM secret_versions WHERE encode(ciphertext, 'escape') ILIKE '%' || $1 || '%'`, request.ProbeValue)
+	if err != nil {
+		return result, fmt.Errorf("count secret ciphertext hits: %w", err)
+	}
 
-	result.Cleanup.SecretDisabled = vault.Disable(meta.SecretRef) == nil
+	result.Cleanup.SecretDisabled = store.Disable(meta.SecretRef) == nil
 	result.Cleanup.ProjectDeleted = deleteRuntimeAuditProject(tenantService, user.ID, org.ID, project.ID) == nil
 	result.Cleanup.OrgDeleted = deleteRuntimeAuditOrg(tenantService, user.ID, org.ID) == nil
 	_, userDisableErr := tenantService.UpdateUserStatus(user.ID, "disabled")
@@ -283,16 +258,17 @@ func runtimeSecretAudit(_ context.Context, request runtimeAuditRequest) (runtime
 		result.RuntimeLeakCounts.HotMemoryHits +
 		result.RuntimeLeakCounts.ArchiveQdrantPayloadHits +
 		result.RuntimeLeakCounts.HotMemoryQdrantPayloadHits +
-		result.RuntimeLeakCounts.QdrantLivePayloadHits
+		result.RuntimeLeakCounts.QdrantLivePayloadHits +
+		result.RuntimeLeakCounts.SecretCiphertextHits
 	if totalHits != 0 {
 		return result, fmt.Errorf("runtime audit found %d secret leak hits", totalHits)
 	}
 
 	result.Status = "pass"
 	result.Notes = []string{
-		"runtime secret injection audit executed with temporary fixtures",
-		"secret.inject audit log persisted exactly once",
-		"probe plaintext was not found in archive markdown, archive chunks, hot memories, tracked qdrant payloads, or live qdrant payloads",
+		"runtime secret audit executed with temporary fixtures and a throwaway local device key",
+		"probe plaintext was encrypted locally; server only stored/returned ciphertext and has no decryption capability",
+		"probe plaintext was not found in audit metadata, archive markdown, archive chunks, hot memories, tracked/live qdrant payloads, or the stored secret ciphertext column",
 	}
 	return result, nil
 }
@@ -327,10 +303,6 @@ func deleteRuntimeAuditProject(service tenant.Service, userID, orgID, projectID 
 func deleteRuntimeAuditOrg(service tenant.Service, userID, orgID string) error {
 	_, err := service.DeleteOrg(userID, orgID)
 	return err
-}
-
-func countAuditLogRows(ctx context.Context, pool *pgxpool.Pool, requestID string) (int, error) {
-	return countProbeHits(ctx, pool, `SELECT count(*) FROM audit_logs WHERE request_id = $1 AND action = 'secret.inject'`, requestID)
 }
 
 func countProbeHits(ctx context.Context, pool *pgxpool.Pool, sqlText, probe string) (int, error) {

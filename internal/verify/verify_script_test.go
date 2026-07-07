@@ -790,8 +790,6 @@ func TestProductionCommandsLoadEnvironmentWithoutInliningSecrets(t *testing.T) {
 		"MEMORY_OS_ENV_FILE",
 		"docker inspect deploy-memory-api-1",
 		"docker inspect deploy-postgres-1",
-		"SECRET_VAULT_KEY_B64",
-		"python3 -c",
 	} {
 		if !strings.Contains(loader, required) {
 			t.Fatalf("production env loader missing safety marker %q", required)
@@ -893,7 +891,5 @@ func testProductionEnv() []string {
 		"POSTGRES_PASSWORD=test-postgres-password",
 		"LLM_BASE_URL=http://llm.example.test",
 		"LLM_API_KEY=test-llm-key",
-		"SECRET_VAULT_KEY_ID=test-key",
-		"SECRET_VAULT_KEY_B64=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 	}
 }

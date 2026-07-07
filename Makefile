@@ -55,8 +55,6 @@ dev-up:
 	POSTGRES_PASSWORD=$${POSTGRES_PASSWORD:-replace-me-local-only} \
 	LLM_BASE_URL=$${LLM_BASE_URL:-http://example.local:8000} \
 	LLM_API_KEY=$${LLM_API_KEY:-replace-me-dev-only} \
-	SECRET_VAULT_KEY_ID=$${SECRET_VAULT_KEY_ID:-dev-vault-id} \
-	SECRET_VAULT_KEY_B64=$${SECRET_VAULT_KEY_B64:-dGVzdC1rZXktMTIzNDU2Nw==} \
 	APP_ENV=development ENABLE_DEV_ENDPOINTS=true $(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) up -d --build
 
 prod-up-mock:
@@ -66,8 +64,6 @@ prod-up-mock:
 	export POSTGRES_PASSWORD=$${POSTGRES_PASSWORD:-replace-me-mock-password}; \
 	export LLM_BASE_URL=$${LLM_BASE_URL:-http://memory-llm-mock:11434}; \
 	export LLM_API_KEY=$${LLM_API_KEY:-memory-llm-mock-key}; \
-	export SECRET_VAULT_KEY_ID=$${SECRET_VAULT_KEY_ID:-dev-vault-id}; \
-	export SECRET_VAULT_KEY_B64=$${SECRET_VAULT_KEY_B64:-dGVzdC1rZXktMTIzNDU2Nw==}; \
 	. scripts/load-build-info.sh && \
 	ALLOW_EXISTING_DEPLOYMENT=1 scripts/preflight.sh && \
 	APP_ENV=production ENABLE_DEV_ENDPOINTS=false \

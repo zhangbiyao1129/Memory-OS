@@ -225,7 +225,7 @@ func TestE2E_SecretNeverLeaks(t *testing.T) {
 		UserID:      "user_1",
 		ThreadID:    "thread_secret",
 		MemoryType:  MemoryTypeFact,
-		Content:     "配置: sk-test-abc123def456, token=pat_xyz789",
+		Content:     "配置: sk-test-redacted-example, token=pat_xyz789",
 		RiskLevel:   RiskHigh,
 		Confidence:  0.9,
 	})
@@ -235,7 +235,7 @@ func TestE2E_SecretNeverLeaks(t *testing.T) {
 
 	// 候选内容应包含 secret（因为候选本身可能需要人工审核）
 	// 但沉淀到 Archive 时 secret 应被脱敏
-	if !strings.Contains(c.Content, "sk-test-abc123def456") {
+	if !strings.Contains(c.Content, "sk-test-redacted-example") {
 		t.Log("note: candidate content preserves secret for review - archive rendering should sanitize")
 	}
 

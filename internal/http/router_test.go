@@ -905,15 +905,16 @@ func TestArchiveIndexStatusRequiresArchivePermission(t *testing.T) {
 	}
 }
 
+const testEncryptedSecretBody = `{"org_id":"org_1","project_id":"project_1","name":"api-key","env_name":"PROD","site":"binance","purpose":"trading","encrypted":{"algorithm":"AES-256-GCM","device_key_id":"device_1","key_fingerprint":"fp_abc","nonce_b64":"AQIDBAUGBwgJCgsM","ciphertext_b64":"CQgHBgUEAwIB"}}`
+
 func TestSecretAPIsRequirePATWhenAuthAndTenantConfigured(t *testing.T) {
 	h := server.New(server.WithHostPorts("127.0.0.1:0"))
-	vault := secret.NewVault(secret.NewMemoryRepository(), testSecretCodec(t))
+	store := secret.NewStore(secret.NewMemoryRepository())
 	authService := auth.NewService(auth.NewMemoryRepository())
 	tenantService := archiveTenantService(t, tenant.RoleOwner)
-	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), AuthService: authService, TenantService: tenantService, SecretVault: vault})
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), AuthService: authService, TenantService: tenantService, SecretStore: store})
 
-	body := `{"org_id":"org_1","project_id":"project_1","name":"api-key","plaintext":"fake-secret-value"}`
-	response := ut.PerformRequest(h.Engine, "POST", "/memory/secrets/create", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"})
+	response := ut.PerformRequest(h.Engine, "POST", "/memory/secrets/create", &ut.Body{Body: strings.NewReader(testEncryptedSecretBody), Len: len(testEncryptedSecretBody)}, ut.Header{Key: "Content-Type", Value: "application/json"})
 
 	assert.DeepEqual(t, 401, response.Code)
 	if !strings.Contains(response.Body.String(), "pat_required") {
@@ -921,54 +922,75 @@ func TestSecretAPIsRequirePATWhenAuthAndTenantConfigured(t *testing.T) {
 	}
 }
 
-func TestSecretCreateRequiresWritePermissionAndReturnsMetadataOnly(t *testing.T) {
+func TestSecretCreateRejectsPlaintext(t *testing.T) {
 	h := server.New(server.WithHostPorts("127.0.0.1:0"))
-	vault := secret.NewVault(secret.NewMemoryRepository(), testSecretCodec(t))
-	authService := auth.NewService(auth.NewMemoryRepository())
-	memberToken, _, err := authService.CreatePAT("user_1", "reader", []string{"memory:write"}, time.Hour)
-	if err != nil {
-		t.Fatalf("CreatePAT(member) error = %v", err)
-	}
-	tenantService := archiveTenantService(t, tenant.RoleMember)
-	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), AuthService: authService, TenantService: tenantService, SecretVault: vault})
-
-	body := `{"org_id":"org_1","project_id":"project_1","name":"api-key","plaintext":"fake-secret-value"}`
-	memberResponse := ut.PerformRequest(h.Engine, "POST", "/memory/secrets/create", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + memberToken})
-	assert.DeepEqual(t, 403, memberResponse.Code)
-
-	h = server.New(server.WithHostPorts("127.0.0.1:0"))
-	vault = secret.NewVault(secret.NewMemoryRepository(), testSecretCodec(t))
-	authService = auth.NewService(auth.NewMemoryRepository())
-	ownerToken, _, err := authService.CreatePAT("user_1", "writer", []string{"memory:write"}, time.Hour)
-	if err != nil {
-		t.Fatalf("CreatePAT(owner) error = %v", err)
-	}
-	tenantService = archiveTenantService(t, tenant.RoleOwner)
-	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), AuthService: authService, TenantService: tenantService, SecretVault: vault})
-
-	ownerResponse := ut.PerformRequest(h.Engine, "POST", "/memory/secrets/create", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + ownerToken})
-
-	assert.DeepEqual(t, 200, ownerResponse.Code)
-	if strings.Contains(ownerResponse.Body.String(), "fake-secret-value") || strings.Contains(ownerResponse.Body.String(), "ciphertext") {
-		t.Fatalf("secret create leaked secret material: %s", ownerResponse.Body.String())
-	}
-	if !strings.Contains(ownerResponse.Body.String(), `"secret_ref"`) || !strings.Contains(ownerResponse.Body.String(), `"status":"active"`) {
-		t.Fatalf("secret create response missing metadata: %s", ownerResponse.Body.String())
-	}
-}
-
-func TestSecretListAndDisableUsePATSubjectAndPermission(t *testing.T) {
-	h := server.New(server.WithHostPorts("127.0.0.1:0"))
-	vault := secret.NewVault(secret.NewMemoryRepository(), testSecretCodec(t))
+	store := secret.NewStore(secret.NewMemoryRepository())
 	authService := auth.NewService(auth.NewMemoryRepository())
 	token, _, err := authService.CreatePAT("user_1", "writer", []string{"memory:write"}, time.Hour)
 	if err != nil {
 		t.Fatalf("CreatePAT() error = %v", err)
 	}
 	tenantService := archiveTenantService(t, tenant.RoleOwner)
-	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), AuthService: authService, TenantService: tenantService, SecretVault: vault})
-	createBody := `{"org_id":"org_1","project_id":"project_1","name":"api-key","plaintext":"fake-secret-value"}`
-	createResponse := ut.PerformRequest(h.Engine, "POST", "/memory/secrets/create", &ut.Body{Body: strings.NewReader(createBody), Len: len(createBody)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + token})
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), AuthService: authService, TenantService: tenantService, SecretStore: store})
+
+	body := `{"org_id":"org_1","project_id":"project_1","name":"api-key","plaintext":"fake-secret-value","encrypted":{"algorithm":"AES-256-GCM","device_key_id":"device_1","key_fingerprint":"fp_abc","nonce_b64":"AQIDBAUGBwgJCgsM","ciphertext_b64":"CQgHBgUEAwIB"}}`
+	response := ut.PerformRequest(h.Engine, "POST", "/memory/secrets/create", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + token})
+
+	assert.DeepEqual(t, 400, response.Code)
+	if !strings.Contains(response.Body.String(), "plaintext_not_allowed") {
+		t.Fatalf("secret create response = %s, want plaintext_not_allowed", response.Body.String())
+	}
+}
+
+func TestSecretCreateRequiresWritePermissionAndReturnsMetadataOnly(t *testing.T) {
+	h := server.New(server.WithHostPorts("127.0.0.1:0"))
+	store := secret.NewStore(secret.NewMemoryRepository())
+	authService := auth.NewService(auth.NewMemoryRepository())
+	memberToken, _, err := authService.CreatePAT("user_1", "reader", []string{"memory:write"}, time.Hour)
+	if err != nil {
+		t.Fatalf("CreatePAT(member) error = %v", err)
+	}
+	tenantService := archiveTenantService(t, tenant.RoleMember)
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), AuthService: authService, TenantService: tenantService, SecretStore: store})
+
+	memberResponse := ut.PerformRequest(h.Engine, "POST", "/memory/secrets/create", &ut.Body{Body: strings.NewReader(testEncryptedSecretBody), Len: len(testEncryptedSecretBody)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + memberToken})
+	assert.DeepEqual(t, 403, memberResponse.Code)
+
+	h = server.New(server.WithHostPorts("127.0.0.1:0"))
+	store = secret.NewStore(secret.NewMemoryRepository())
+	authService = auth.NewService(auth.NewMemoryRepository())
+	ownerToken, _, err := authService.CreatePAT("user_1", "writer", []string{"memory:write"}, time.Hour)
+	if err != nil {
+		t.Fatalf("CreatePAT(owner) error = %v", err)
+	}
+	tenantService = archiveTenantService(t, tenant.RoleOwner)
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), AuthService: authService, TenantService: tenantService, SecretStore: store})
+
+	ownerResponse := ut.PerformRequest(h.Engine, "POST", "/memory/secrets/create", &ut.Body{Body: strings.NewReader(testEncryptedSecretBody), Len: len(testEncryptedSecretBody)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + ownerToken})
+
+	assert.DeepEqual(t, 200, ownerResponse.Code)
+	if strings.Contains(ownerResponse.Body.String(), "ciphertext") || strings.Contains(ownerResponse.Body.String(), "CQgHBgUEAwIB") {
+		t.Fatalf("secret create leaked secret material: %s", ownerResponse.Body.String())
+	}
+	if !strings.Contains(ownerResponse.Body.String(), `"secret_ref"`) || !strings.Contains(ownerResponse.Body.String(), `"status":"active"`) {
+		t.Fatalf("secret create response missing metadata: %s", ownerResponse.Body.String())
+	}
+	if !strings.Contains(ownerResponse.Body.String(), `"env_name":"PROD"`) || !strings.Contains(ownerResponse.Body.String(), `"site":"binance"`) {
+		t.Fatalf("secret create response missing extra metadata: %s", ownerResponse.Body.String())
+	}
+}
+
+func TestSecretListDisableAndCiphertextUsePATSubjectAndOwner(t *testing.T) {
+	h := server.New(server.WithHostPorts("127.0.0.1:0"))
+	store := secret.NewStore(secret.NewMemoryRepository())
+	authService := auth.NewService(auth.NewMemoryRepository())
+	token, _, err := authService.CreatePAT("user_1", "writer", []string{"memory:write"}, time.Hour)
+	if err != nil {
+		t.Fatalf("CreatePAT() error = %v", err)
+	}
+	tenantService := archiveTenantService(t, tenant.RoleOwner)
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), AuthService: authService, TenantService: tenantService, SecretStore: store})
+	createResponse := ut.PerformRequest(h.Engine, "POST", "/memory/secrets/create", &ut.Body{Body: strings.NewReader(testEncryptedSecretBody), Len: len(testEncryptedSecretBody)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + token})
 	assert.DeepEqual(t, 200, createResponse.Code)
 	var created map[string]any
 	if err := json.Unmarshal(createResponse.Body.Bytes(), &created); err != nil {
@@ -982,11 +1004,19 @@ func TestSecretListAndDisableUsePATSubjectAndPermission(t *testing.T) {
 	listBody := `{"user_id":"attacker_user","org_id":"org_1","project_id":"project_1","status":"active"}`
 	listResponse := ut.PerformRequest(h.Engine, "POST", "/memory/secrets/list", &ut.Body{Body: strings.NewReader(listBody), Len: len(listBody)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + token})
 	assert.DeepEqual(t, 200, listResponse.Code)
-	if strings.Contains(listResponse.Body.String(), "fake-secret-value") || strings.Contains(listResponse.Body.String(), "ciphertext") {
+	if strings.Contains(listResponse.Body.String(), "ciphertext") || strings.Contains(listResponse.Body.String(), "CQgHBgUEAwIB") {
 		t.Fatalf("secret list leaked secret material: %s", listResponse.Body.String())
 	}
 	if !strings.Contains(listResponse.Body.String(), secretRef) || !strings.Contains(listResponse.Body.String(), `"owner_user_id":"user_1"`) {
 		t.Fatalf("secret list did not use PAT subject: %s", listResponse.Body.String())
+	}
+
+	// owner 可取密文
+	ciphertextBody := `{"secret_ref":"` + secretRef + `"}`
+	ciphertextResponse := ut.PerformRequest(h.Engine, "POST", "/memory/secrets/ciphertext", &ut.Body{Body: strings.NewReader(ciphertextBody), Len: len(ciphertextBody)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + token})
+	assert.DeepEqual(t, 200, ciphertextResponse.Code)
+	if !strings.Contains(ciphertextResponse.Body.String(), "CQgHBgUEAwIB") || !strings.Contains(ciphertextResponse.Body.String(), `"algorithm":"AES-256-GCM"`) {
+		t.Fatalf("secret ciphertext response missing blob: %s", ciphertextResponse.Body.String())
 	}
 
 	disableBody := `{"secret_ref":"` + secretRef + `","org_id":"org_1","project_id":"project_1"}`
@@ -994,6 +1024,45 @@ func TestSecretListAndDisableUsePATSubjectAndPermission(t *testing.T) {
 	assert.DeepEqual(t, 200, disableResponse.Code)
 	if !strings.Contains(disableResponse.Body.String(), `"status":"disabled"`) {
 		t.Fatalf("secret disable response mismatch: %s", disableResponse.Body.String())
+	}
+}
+
+func TestSecretCiphertextRejectsNonOwner(t *testing.T) {
+	h := server.New(server.WithHostPorts("127.0.0.1:0"))
+	store := secret.NewStore(secret.NewMemoryRepository())
+	authService := auth.NewService(auth.NewMemoryRepository())
+	ownerToken, _, err := authService.CreatePAT("user_1", "writer", []string{"memory:write"}, time.Hour)
+	if err != nil {
+		t.Fatalf("CreatePAT(owner) error = %v", err)
+	}
+	tenantService := archiveTenantService(t, tenant.RoleOwner)
+	// user_2 也是同项目成员（owner 角色），但不是该 secret 的 owner。
+	if err := tenantService.AddMembership("user_2", "org_1", "project_1", tenant.RoleOwner); err != nil {
+		t.Fatalf("AddMembership(user_2) error = %v", err)
+	}
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), AuthService: authService, TenantService: tenantService, SecretStore: store})
+	createResponse := ut.PerformRequest(h.Engine, "POST", "/memory/secrets/create", &ut.Body{Body: strings.NewReader(testEncryptedSecretBody), Len: len(testEncryptedSecretBody)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + ownerToken})
+	assert.DeepEqual(t, 200, createResponse.Code)
+	var created map[string]any
+	if err := json.Unmarshal(createResponse.Body.Bytes(), &created); err != nil {
+		t.Fatalf("secret create response is not JSON: %v", err)
+	}
+	secretRef, _ := created["secret_ref"].(string)
+
+	// user_2 有同项目 owner 权限，但不是该 secret 的 owner
+	attackerToken, _, err := authService.CreatePAT("user_2", "attacker", []string{"memory:read"}, time.Hour)
+	if err != nil {
+		t.Fatalf("CreatePAT(attacker) error = %v", err)
+	}
+	ciphertextBody := `{"secret_ref":"` + secretRef + `"}`
+	response := ut.PerformRequest(h.Engine, "POST", "/memory/secrets/ciphertext", &ut.Body{Body: strings.NewReader(ciphertextBody), Len: len(ciphertextBody)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + attackerToken})
+
+	assert.DeepEqual(t, 403, response.Code)
+	if !strings.Contains(response.Body.String(), "secret_forbidden") {
+		t.Fatalf("ciphertext non-owner response = %s, want secret_forbidden", response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "CQgHBgUEAwIB") {
+		t.Fatalf("ciphertext non-owner leaked material: %s", response.Body.String())
 	}
 }
 
@@ -2724,15 +2793,6 @@ func jsonStringField(t *testing.T, payload string, field string) string {
 		t.Fatalf("json field %q missing in %s", field, payload)
 	}
 	return value
-}
-
-func testSecretCodec(t *testing.T) secret.AESGCMCodec {
-	t.Helper()
-	codec, err := secret.NewAESGCMCodec("test-key", []byte("0123456789abcdef0123456789abcdef"))
-	if err != nil {
-		t.Fatalf("NewAESGCMCodec() error = %v", err)
-	}
-	return codec
 }
 
 func fixtureRetrievalService() retrieval.Service {

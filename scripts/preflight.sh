@@ -82,7 +82,7 @@ check_placeholder_secrets() {
     return 0
   fi
   local placeholder_patterns='replace-me|example|dev-only|mock'
-  local secret_vars=("POSTGRES_PASSWORD" "LLM_API_KEY" "SECRET_VAULT_KEY_ID" "SECRET_VAULT_KEY_B64")
+  local secret_vars=("POSTGRES_PASSWORD" "LLM_API_KEY")
   for var in "${secret_vars[@]}"; do
     local val="${!var:-}"
     # 使用 :- 兜底，兼容脚本里的 set -u。

@@ -16,6 +16,9 @@ func TestPGRepositoryRequiresPool(t *testing.T) {
 	if err := repo.Save(Metadata{SecretRef: "secret_ref_test"}, Version{}); err == nil {
 		t.Fatal("Save() error = nil, want missing pool error")
 	}
+	if _, err := repo.GetCurrentVersion("secret_ref_test"); err == nil {
+		t.Fatal("GetCurrentVersion() error = nil, want missing pool error")
+	}
 	if _, err := repo.GetMetadata("secret_ref_test"); err == nil {
 		t.Fatal("GetMetadata() error = nil, want missing pool error")
 	}
@@ -24,21 +27,31 @@ func TestPGRepositoryRequiresPool(t *testing.T) {
 	}
 }
 
-func TestPGRepositoryVaultLifecycle(t *testing.T) {
+func TestPGRepositoryStoreLifecycle(t *testing.T) {
 	pool := secretTestPool(t)
 	userID, orgID, projectID := createSecretTenantFixtures(t, pool)
-	vault := NewVault(NewPGRepository(pool), testCodec(t))
+	store := NewStore(NewPGRepository(pool))
 	suffix := strconv.FormatInt(time.Now().UnixNano(), 10)
 
-	meta, err := vault.Create(CreateRequest{
+	expires := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Microsecond)
+	meta, err := store.CreateEncrypted(CreateEncryptedRequest{
 		OwnerUserID: userID,
 		OrgID:       orgID,
 		ProjectID:   projectID,
 		Name:        "api-key-" + suffix,
-		Plaintext:   "fake-secret-value-" + suffix,
+		EnvName:     "PROD",
+		Site:        "binance",
+		Purpose:     "trading",
+		ExpiresAt:   &expires,
+	}, EncryptedBlob{
+		Algorithm:      "AES-256-GCM",
+		DeviceKeyID:    "device-" + suffix,
+		KeyFingerprint: "fp-" + suffix,
+		Nonce:          []byte("nonce-" + suffix),
+		Ciphertext:     []byte("cipher-" + suffix),
 	})
 	if err != nil {
-		t.Fatalf("Create() error = %v", err)
+		t.Fatalf("CreateEncrypted() error = %v", err)
 	}
 	if meta.SecretRef == "" || meta.CurrentVersion != 1 || meta.Status != "active" {
 		t.Fatalf("metadata mismatch: %#v", meta)
@@ -51,6 +64,12 @@ func TestPGRepositoryVaultLifecycle(t *testing.T) {
 	if storedMeta.Name != meta.Name || storedMeta.OwnerUserID != userID || storedMeta.ProjectID != projectID {
 		t.Fatalf("stored metadata mismatch: %#v", storedMeta)
 	}
+	if storedMeta.EnvName != "PROD" || storedMeta.Site != "binance" || storedMeta.Purpose != "trading" {
+		t.Fatalf("stored metadata extra fields mismatch: %#v", storedMeta)
+	}
+	if storedMeta.ExpiresAt == nil {
+		t.Fatal("stored expires_at is nil")
+	}
 	listed, err := NewPGRepository(pool).List(ListFilter{OwnerUserID: userID, OrgID: orgID, ProjectID: projectID, Status: "active"})
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
@@ -59,15 +78,25 @@ func TestPGRepositoryVaultLifecycle(t *testing.T) {
 		t.Fatalf("listed metadata mismatch: %#v", listed)
 	}
 
-	value, err := vault.DecryptForUse(meta.SecretRef)
+	gotMeta, blob, err := store.GetCiphertext(meta.SecretRef, userID)
 	if err != nil {
-		t.Fatalf("DecryptForUse() error = %v", err)
+		t.Fatalf("GetCiphertext(owner) error = %v", err)
 	}
-	if value != "fake-secret-value-"+suffix {
-		t.Fatalf("decrypted value = %q, want fake secret value", value)
+	if gotMeta.SecretRef != meta.SecretRef {
+		t.Fatalf("ciphertext metadata mismatch: %#v", gotMeta)
+	}
+	if string(blob.Ciphertext) != "cipher-"+suffix || string(blob.Nonce) != "nonce-"+suffix {
+		t.Fatalf("ciphertext blob mismatch: %#v", blob)
+	}
+	if blob.Algorithm != "AES-256-GCM" || blob.KeyFingerprint != "fp-"+suffix {
+		t.Fatalf("ciphertext algorithm/fingerprint mismatch: %#v", blob)
 	}
 
-	if err := vault.Disable(meta.SecretRef); err != nil {
+	if _, _, err := store.GetCiphertext(meta.SecretRef, "00000000-0000-0000-0000-000000000000"); err == nil {
+		t.Fatal("GetCiphertext(non-owner) error = nil, want forbidden")
+	}
+
+	if err := store.Disable(meta.SecretRef); err != nil {
 		t.Fatalf("Disable() error = %v", err)
 	}
 	disabledMeta, err := NewPGRepository(pool).GetMetadata(meta.SecretRef)
@@ -77,8 +106,8 @@ func TestPGRepositoryVaultLifecycle(t *testing.T) {
 	if disabledMeta.Status != "disabled" {
 		t.Fatalf("disabled status = %q, want disabled", disabledMeta.Status)
 	}
-	if _, err := vault.DecryptForUse(meta.SecretRef); err == nil {
-		t.Fatal("DecryptForUse() error = nil, want disabled rejection")
+	if _, _, err := store.GetCiphertext(meta.SecretRef, userID); err == nil {
+		t.Fatal("GetCiphertext(disabled) error = nil, want disabled rejection")
 	}
 }
 

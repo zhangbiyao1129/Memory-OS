@@ -195,6 +195,31 @@ func readMigration(t *testing.T, name string) string {
 	return string(content)
 }
 
+func TestSecretLocalCryptoMigrationAddsMetadataAndKeyColumns(t *testing.T) {
+	sql := readMigration(t, "000023_secret_local_crypto.sql")
+
+	required := []string{
+		"ALTER TABLE secrets ADD COLUMN IF NOT EXISTS env_name TEXT",
+		"ALTER TABLE secrets ADD COLUMN IF NOT EXISTS site TEXT",
+		"ALTER TABLE secrets ADD COLUMN IF NOT EXISTS purpose TEXT",
+		"ALTER TABLE secrets ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",
+		"ALTER TABLE secret_versions ADD COLUMN IF NOT EXISTS algorithm TEXT NOT NULL DEFAULT 'AES-256-GCM'",
+		"ALTER TABLE secret_versions ADD COLUMN IF NOT EXISTS device_key_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE secret_versions ADD COLUMN IF NOT EXISTS key_fingerprint TEXT NOT NULL DEFAULT ''",
+	}
+	for _, item := range required {
+		if !strings.Contains(sql, item) {
+			t.Fatalf("secret local crypto migration missing %q", item)
+		}
+	}
+
+	for _, forbidden := range []string{"DROP TABLE", "DROP COLUMN"} {
+		if strings.Contains(strings.ToUpper(sql), forbidden) {
+			t.Fatalf("secret local crypto migration contains destructive statement %q", forbidden)
+		}
+	}
+}
+
 func TestHotMemoryMigrationContainsRequiredTablesAndIndexes(t *testing.T) {
 	sql := readMigration(t, "000006_hot_memory.sql")
 

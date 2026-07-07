@@ -112,11 +112,15 @@ func TestMakefileProdUpMockExportsDefaultEnvForCompose(t *testing.T) {
 		"export POSTGRES_PASSWORD=$${POSTGRES_PASSWORD:-replace-me-mock-password};",
 		"export LLM_BASE_URL=$${LLM_BASE_URL:-http://memory-llm-mock:11434};",
 		"export LLM_API_KEY=$${LLM_API_KEY:-memory-llm-mock-key};",
-		"export SECRET_VAULT_KEY_ID=$${SECRET_VAULT_KEY_ID:-dev-vault-id};",
-		"export SECRET_VAULT_KEY_B64=$${SECRET_VAULT_KEY_B64:-dGVzdC1rZXktMTIzNDU2Nw==};",
 	} {
 		if !strings.Contains(makefile, required) {
 			t.Fatalf("prod-up-mock must export default env for docker-compose interpolation, missing %q", required)
+		}
+	}
+	// 服务端不再需要 secret vault key，Makefile 不应再导出。
+	for _, forbidden := range []string{"SECRET_VAULT_KEY_ID", "SECRET_VAULT_KEY_B64"} {
+		if strings.Contains(makefile, forbidden) {
+			t.Fatalf("prod-up-mock must not export server-side secret vault key %q", forbidden)
 		}
 	}
 }

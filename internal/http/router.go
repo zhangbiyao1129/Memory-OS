@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -47,7 +48,7 @@ type RouterOptions struct {
 	HotMemoryService       hotmemory.Service
 	EventLogService        eventlog.Service
 	AuditService           audit.Service
-	SecretVault            secret.Vault
+	SecretStore            secret.Store
 	ArchiveService         archive.Service
 	ArchiveQueue           archiveEnqueuer
 	CandidateQueue         candidateEnqueuer
@@ -139,9 +140,10 @@ func RegisterRoutes(engine *route.Engine, options RouterOptions) {
 		engine.POST("/memory/candidates/maintenance/run", MaintenanceRunHandler(options.MaintenanceService, options.AuthService, options.TenantService))
 		engine.POST("/memory/candidates/maintenance/status", MaintenanceStatusHandler(options.MaintenanceService, options.AuthService, options.TenantService))
 	}
-	engine.POST("/memory/secrets/create", SecretCreateHandler(options.SecretVault, options.AuthService, options.TenantService))
-	engine.POST("/memory/secrets/list", SecretListHandler(options.SecretVault, options.AuthService, options.TenantService))
-	engine.POST("/memory/secrets/disable", SecretDisableHandler(options.SecretVault, options.AuthService, options.TenantService))
+	engine.POST("/memory/secrets/create", SecretCreateHandler(options.SecretStore, options.AuthService, options.TenantService))
+	engine.POST("/memory/secrets/list", SecretListHandler(options.SecretStore, options.AuthService, options.TenantService))
+	engine.POST("/memory/secrets/ciphertext", SecretCiphertextHandler(options.SecretStore, options.AuthService, options.TenantService))
+	engine.POST("/memory/secrets/disable", SecretDisableHandler(options.SecretStore, options.AuthService, options.TenantService))
 	engine.POST("/memory/tokens/pat/create", PATCreateHandler(options.AuthService, options.AuditService))
 	engine.POST("/memory/setup/bootstrap", SetupBootstrapHandler(defaultSetupCodes))
 	engine.POST("/memory/tokens/pat/list", PATListHandler(options.AuthService))
@@ -205,8 +207,8 @@ func validateProductionRouterOptions(options RouterOptions) error {
 	if !options.AuditService.Configured() {
 		missing = append(missing, "audit")
 	}
-	if !options.SecretVault.Configured() {
-		missing = append(missing, "secret_vault")
+	if !options.SecretStore.Configured() {
+		missing = append(missing, "secret_store")
 	}
 	if !options.ArchiveService.Configured() {
 		missing = append(missing, "archive")
@@ -560,7 +562,7 @@ func OpenAPIHandler() app.HandlerFunc {
 				},
 				"/memory/secrets/create": map[string]any{
 					"post": map[string]any{
-						"summary": "Create encrypted secret and return metadata only",
+						"summary": "Store client-encrypted secret; server never receives plaintext",
 						"responses": map[string]any{
 							"200": map[string]any{"description": "Secret metadata"},
 						},
@@ -571,6 +573,14 @@ func OpenAPIHandler() app.HandlerFunc {
 						"summary": "List secret metadata",
 						"responses": map[string]any{
 							"200": map[string]any{"description": "Secret metadata list"},
+						},
+					},
+				},
+				"/memory/secrets/ciphertext": map[string]any{
+					"post": map[string]any{
+						"summary": "Owner-only fetch of encrypted ciphertext blob (no server decryption)",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Secret metadata and ciphertext blob"},
 						},
 					},
 				},
@@ -884,26 +894,33 @@ func DevPhase2SmokeHandler() app.HandlerFunc {
 			return
 		}
 
-		codec, err := secret.NewAESGCMCodec("dev-smoke", []byte("0123456789abcdef0123456789abcdef"))
+		// 服务端零明文：模拟本机 MCP 已在本地加密后上传密文 blob，
+		// 服务端只落库/回传密文，全程不接触明文，也没有任何解密能力。
+		store := secret.NewStore(secret.NewMemoryRepository())
+		blob := secret.EncryptedBlob{
+			Algorithm:      "AES-256-GCM",
+			DeviceKeyID:    "dev-smoke",
+			KeyFingerprint: "fp-smoke",
+			Nonce:          []byte("smoke-nonce-"),
+			Ciphertext:     []byte("smoke-ciphertext-blob"),
+		}
+		meta, err := store.CreateEncrypted(secret.CreateEncryptedRequest{OwnerUserID: user.ID, OrgID: org.ID, ProjectID: project.ID, Name: "smoke", Purpose: "phase2"}, blob)
 		if err != nil {
 			c.JSON(consts.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()})
 			return
 		}
-		vault := secret.NewVault(secret.NewMemoryRepository(), codec)
-		meta, err := vault.Create(secret.CreateRequest{OwnerUserID: user.ID, OrgID: org.ID, ProjectID: project.ID, Name: "smoke", Plaintext: "fake-secret-value"})
+		// owner 可取回密文；非 owner 被拒。
+		_, gotBlob, err := store.GetCiphertext(meta.SecretRef, user.ID)
 		if err != nil {
 			c.JSON(consts.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()})
 			return
 		}
-		auditRepo := audit.NewMemoryRepository()
-		injector := secret.NewInjector(vault, audit.NewService(auditRepo))
-		injected, err := injector.Inject(secret.InjectRequest{ActorUserID: user.ID, OrgID: org.ID, ProjectID: project.ID, Tool: "smoke", Purpose: "phase2", RequestID: "phase2-smoke", Template: "TOKEN=${" + meta.SecretRef + "}"})
-		if err != nil {
-			c.JSON(consts.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()})
+		if _, _, err := store.GetCiphertext(meta.SecretRef, "someone-else"); !errors.Is(err, secret.ErrForbidden) {
+			c.JSON(consts.StatusInternalServerError, map[string]string{"status": "error", "message": "secret non-owner access not rejected"})
 			return
 		}
-		if !strings.Contains(injected, "fake-secret-value") || len(auditRepo.All()) != 1 {
-			c.JSON(consts.StatusInternalServerError, map[string]string{"status": "error", "message": "secret injection smoke failed"})
+		if string(gotBlob.Ciphertext) != string(blob.Ciphertext) {
+			c.JSON(consts.StatusInternalServerError, map[string]string{"status": "error", "message": "secret ciphertext round-trip mismatch"})
 			return
 		}
 
@@ -913,7 +930,6 @@ func DevPhase2SmokeHandler() app.HandlerFunc {
 			"org_id":     org.ID,
 			"project_id": project.ID,
 			"secret_ref": meta.SecretRef,
-			"audit_logs": len(auditRepo.All()),
 		})
 	}
 }
@@ -1386,12 +1402,25 @@ type archiveReindexRequest struct {
 	Reason    string `json:"reason"`
 }
 
+type encryptedBlobRequest struct {
+	Algorithm      string `json:"algorithm"`
+	DeviceKeyID    string `json:"device_key_id"`
+	KeyFingerprint string `json:"key_fingerprint"`
+	NonceB64       string `json:"nonce_b64"`
+	CiphertextB64  string `json:"ciphertext_b64"`
+}
+
 type secretCreateRequest struct {
-	UserID    string `json:"user_id"`
-	OrgID     string `json:"org_id"`
-	ProjectID string `json:"project_id"`
-	Name      string `json:"name"`
-	Plaintext string `json:"plaintext"`
+	UserID    string               `json:"user_id"`
+	OrgID     string               `json:"org_id"`
+	ProjectID string               `json:"project_id"`
+	Name      string               `json:"name"`
+	EnvName   string               `json:"env_name"`
+	Site      string               `json:"site"`
+	Purpose   string               `json:"purpose"`
+	ExpiresAt string               `json:"expires_at"`
+	Plaintext string               `json:"plaintext"`
+	Encrypted encryptedBlobRequest `json:"encrypted"`
 }
 
 type secretListRequest struct {
@@ -1400,6 +1429,10 @@ type secretListRequest struct {
 	ProjectID string `json:"project_id"`
 	Status    string `json:"status"`
 	Limit     int    `json:"limit"`
+}
+
+type secretCiphertextRequest struct {
+	SecretRef string `json:"secret_ref"`
 }
 
 type secretDisableRequest struct {
@@ -1875,15 +1908,20 @@ func topicStateResponse(ts candidatememory.TopicState) map[string]any {
 	return resp
 }
 
-func SecretCreateHandler(vault secret.Vault, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+func SecretCreateHandler(store secret.Store, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		if !vault.Configured() {
-			c.JSON(consts.StatusServiceUnavailable, map[string]string{"error": "secret_vault_not_configured"})
+		if !store.Configured() {
+			c.JSON(consts.StatusServiceUnavailable, map[string]string{"error": "secret_store_not_configured"})
 			return
 		}
 		var request secretCreateRequest
 		if err := c.BindAndValidate(&request); err != nil {
 			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_secret_create_request"})
+			return
+		}
+		// 服务端零明文：任何明文字段都拒绝。
+		if strings.TrimSpace(request.Plaintext) != "" {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "plaintext_not_allowed", "message": "server never receives secret plaintext; encrypt locally via MCP"})
 			return
 		}
 		permissions, ok := authorizeSecretScope(c, authService, tenantService, request.OrgID, request.ProjectID, "memory:write", "project:"+request.ProjectID+":write")
@@ -1894,7 +1932,30 @@ func SecretCreateHandler(vault secret.Vault, authService auth.Service, tenantSer
 		if authService.Configured() {
 			ownerUserID = permissions.UserID
 		}
-		meta, err := vault.Create(secret.CreateRequest{OwnerUserID: ownerUserID, OrgID: request.OrgID, ProjectID: request.ProjectID, Name: request.Name, Plaintext: request.Plaintext})
+		blob, err := decodeEncryptedBlob(request.Encrypted)
+		if err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_secret_ciphertext", "message": err.Error()})
+			return
+		}
+		var expiresAt *time.Time
+		if strings.TrimSpace(request.ExpiresAt) != "" {
+			parsed, err := time.Parse(time.RFC3339, request.ExpiresAt)
+			if err != nil {
+				c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_secret_expires_at", "message": err.Error()})
+				return
+			}
+			expiresAt = &parsed
+		}
+		meta, err := store.CreateEncrypted(secret.CreateEncryptedRequest{
+			OwnerUserID: ownerUserID,
+			OrgID:       request.OrgID,
+			ProjectID:   request.ProjectID,
+			Name:        request.Name,
+			EnvName:     request.EnvName,
+			Site:        request.Site,
+			Purpose:     request.Purpose,
+			ExpiresAt:   expiresAt,
+		}, blob)
 		if err != nil {
 			c.JSON(consts.StatusBadRequest, map[string]string{"error": "secret_create_rejected", "message": err.Error()})
 			return
@@ -1903,10 +1964,10 @@ func SecretCreateHandler(vault secret.Vault, authService auth.Service, tenantSer
 	}
 }
 
-func SecretListHandler(vault secret.Vault, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+func SecretListHandler(store secret.Store, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		if !vault.Configured() {
-			c.JSON(consts.StatusServiceUnavailable, map[string]string{"error": "secret_vault_not_configured"})
+		if !store.Configured() {
+			c.JSON(consts.StatusServiceUnavailable, map[string]string{"error": "secret_store_not_configured"})
 			return
 		}
 		var request secretListRequest
@@ -1921,7 +1982,7 @@ func SecretListHandler(vault secret.Vault, authService auth.Service, tenantServi
 		if authService.Configured() {
 			request.UserID = permissions.UserID
 		}
-		items, err := vault.List(secret.ListFilter{OwnerUserID: request.UserID, OrgID: request.OrgID, ProjectID: request.ProjectID, Status: request.Status, Limit: request.Limit})
+		items, err := store.List(secret.ListFilter{OwnerUserID: request.UserID, OrgID: request.OrgID, ProjectID: request.ProjectID, Status: request.Status, Limit: request.Limit})
 		if err != nil {
 			c.JSON(consts.StatusBadRequest, map[string]string{"error": "secret_list_rejected", "message": err.Error()})
 			return
@@ -1930,10 +1991,55 @@ func SecretListHandler(vault secret.Vault, authService auth.Service, tenantServi
 	}
 }
 
-func SecretDisableHandler(vault secret.Vault, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+func SecretCiphertextHandler(store secret.Store, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		if !vault.Configured() {
-			c.JSON(consts.StatusServiceUnavailable, map[string]string{"error": "secret_vault_not_configured"})
+		if !store.Configured() {
+			c.JSON(consts.StatusServiceUnavailable, map[string]string{"error": "secret_store_not_configured"})
+			return
+		}
+		var request secretCiphertextRequest
+		if err := c.BindAndValidate(&request); err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_secret_ciphertext_request"})
+			return
+		}
+		meta, err := store.Metadata(request.SecretRef)
+		if err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "secret_ciphertext_rejected", "message": err.Error()})
+			return
+		}
+		permissions, ok := authorizeSecretScope(c, authService, tenantService, meta.OrgID, meta.ProjectID, "memory:read", "")
+		if !ok {
+			return
+		}
+		ownerUserID := meta.OwnerUserID
+		if authService.Configured() {
+			ownerUserID = permissions.UserID
+		}
+		gotMeta, blob, err := store.GetCiphertext(request.SecretRef, ownerUserID)
+		if err != nil {
+			if errors.Is(err, secret.ErrForbidden) {
+				c.JSON(consts.StatusForbidden, map[string]string{"error": "secret_forbidden"})
+				return
+			}
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "secret_ciphertext_rejected", "message": err.Error()})
+			return
+		}
+		response := secretMetadataResponse(gotMeta)
+		response["encrypted"] = map[string]any{
+			"algorithm":       blob.Algorithm,
+			"device_key_id":   blob.DeviceKeyID,
+			"key_fingerprint": blob.KeyFingerprint,
+			"nonce_b64":       base64.StdEncoding.EncodeToString(blob.Nonce),
+			"ciphertext_b64":  base64.StdEncoding.EncodeToString(blob.Ciphertext),
+		}
+		c.JSON(consts.StatusOK, response)
+	}
+}
+
+func SecretDisableHandler(store secret.Store, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		if !store.Configured() {
+			c.JSON(consts.StatusServiceUnavailable, map[string]string{"error": "secret_store_not_configured"})
 			return
 		}
 		var request secretDisableRequest
@@ -1941,7 +2047,7 @@ func SecretDisableHandler(vault secret.Vault, authService auth.Service, tenantSe
 			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_secret_disable_request"})
 			return
 		}
-		meta, err := vault.Metadata(request.SecretRef)
+		meta, err := store.Metadata(request.SecretRef)
 		if err != nil {
 			c.JSON(consts.StatusBadRequest, map[string]string{"error": "secret_disable_rejected", "message": err.Error()})
 			return
@@ -1954,17 +2060,41 @@ func SecretDisableHandler(vault secret.Vault, authService auth.Service, tenantSe
 			c.JSON(consts.StatusForbidden, map[string]string{"error": "secret_forbidden"})
 			return
 		}
-		if err := vault.Disable(request.SecretRef); err != nil {
+		if err := store.Disable(request.SecretRef); err != nil {
 			c.JSON(consts.StatusBadRequest, map[string]string{"error": "secret_disable_rejected", "message": err.Error()})
 			return
 		}
-		disabled, err := vault.Metadata(request.SecretRef)
+		disabled, err := store.Metadata(request.SecretRef)
 		if err != nil {
 			c.JSON(consts.StatusBadRequest, map[string]string{"error": "secret_disable_rejected", "message": err.Error()})
 			return
 		}
 		c.JSON(consts.StatusOK, secretMetadataResponse(disabled))
 	}
+}
+
+func decodeEncryptedBlob(request encryptedBlobRequest) (secret.EncryptedBlob, error) {
+	if strings.TrimSpace(request.Algorithm) == "" {
+		return secret.EncryptedBlob{}, errors.New("algorithm is required")
+	}
+	nonce, err := base64.StdEncoding.DecodeString(request.NonceB64)
+	if err != nil {
+		return secret.EncryptedBlob{}, errors.New("nonce_b64 is invalid base64")
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(request.CiphertextB64)
+	if err != nil {
+		return secret.EncryptedBlob{}, errors.New("ciphertext_b64 is invalid base64")
+	}
+	if len(nonce) == 0 || len(ciphertext) == 0 {
+		return secret.EncryptedBlob{}, errors.New("nonce and ciphertext are required")
+	}
+	return secret.EncryptedBlob{
+		Algorithm:      request.Algorithm,
+		DeviceKeyID:    request.DeviceKeyID,
+		KeyFingerprint: request.KeyFingerprint,
+		Nonce:          nonce,
+		Ciphertext:     ciphertext,
+	}, nil
 }
 
 type patCreateRequest struct {
@@ -3905,15 +4035,22 @@ func secretListResponse(items []secret.Metadata) []map[string]any {
 }
 
 func secretMetadataResponse(meta secret.Metadata) map[string]any {
-	return map[string]any{
+	response := map[string]any{
 		"secret_ref":      meta.SecretRef,
 		"owner_user_id":   meta.OwnerUserID,
 		"org_id":          meta.OrgID,
 		"project_id":      meta.ProjectID,
 		"name":            meta.Name,
+		"env_name":        meta.EnvName,
+		"site":            meta.Site,
+		"purpose":         meta.Purpose,
 		"status":          meta.Status,
 		"current_version": meta.CurrentVersion,
 	}
+	if meta.ExpiresAt != nil {
+		response["expires_at"] = meta.ExpiresAt.Format(time.RFC3339)
+	}
+	return response
 }
 
 func patListResponse(items []auth.PATRecord) []map[string]any {

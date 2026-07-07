@@ -49,8 +49,6 @@ services:
       LLM_MODEL: ${LLM_MODEL:-MiniMax-M2.7}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
       RERANK_MODEL: ${RERANK_MODEL:-bge-reranker-v2-m3}
-      SECRET_VAULT_KEY_ID: ${SECRET_VAULT_KEY_ID:?SECRET_VAULT_KEY_ID is required}
-      SECRET_VAULT_KEY_B64: ${SECRET_VAULT_KEY_B64:?SECRET_VAULT_KEY_B64 is required}
       NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-worker,memory-mcp,memory-web,memory-llm-mock}
       no_proxy: ${NO_PROXY:-localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-worker,memory-mcp,memory-web,memory-llm-mock}
     volumes:

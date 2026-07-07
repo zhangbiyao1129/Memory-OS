@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/base64"
 	"fmt"
 	"net"
 	"net/url"
@@ -37,8 +36,6 @@ type Config struct {
 	LLMModel               string
 	EmbeddingModel         string
 	RerankModel            string
-	SecretVaultKeyID       string
-	SecretVaultKey         []byte
 }
 
 // Load 从环境变量读取配置，并为本地开发提供安全默认值。
@@ -59,13 +56,7 @@ func Load() (Config, error) {
 		LLMModel:               envOrDefault("LLM_MODEL", "MiniMax-M2.7"),
 		EmbeddingModel:         envOrDefault("EMBEDDING_MODEL", "bge-m3"),
 		RerankModel:            envOrDefault("RERANK_MODEL", "bge-reranker-v2-m3"),
-		SecretVaultKeyID:       envOrDefault("SECRET_VAULT_KEY_ID", ""),
 	}
-	secretVaultKey, err := envBase64("SECRET_VAULT_KEY_B64")
-	if err != nil {
-		return Config{}, fmt.Errorf("SECRET_VAULT_KEY_B64 invalid: %w", err)
-	}
-	cfg.SecretVaultKey = secretVaultKey
 
 	for name, addr := range map[string]string{
 		"MEMORY_WEB_ADDR": cfg.WebAddr,
@@ -123,14 +114,6 @@ func envBool(key string) bool {
 	default:
 		return false
 	}
-}
-
-func envBase64(key string) ([]byte, error) {
-	value := strings.TrimSpace(os.Getenv(key))
-	if value == "" {
-		return nil, nil
-	}
-	return base64.StdEncoding.DecodeString(value)
 }
 
 func validateAddr(addr string) error {

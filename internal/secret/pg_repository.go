@@ -3,6 +3,7 @@ package secret
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,14 +32,18 @@ func (r *PGRepository) Save(meta Metadata, version Version) error {
 
 	var secretID string
 	err = tx.QueryRow(context.Background(), `
-INSERT INTO secrets (secret_ref, owner_user_id, org_id, project_id, name, status, current_version)
-VALUES ($1, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7)
+INSERT INTO secrets (secret_ref, owner_user_id, org_id, project_id, name, env_name, site, purpose, expires_at, status, current_version)
+VALUES ($1, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10, $11)
 RETURNING id::text`,
 		meta.SecretRef,
 		meta.OwnerUserID,
 		emptyToNil(meta.OrgID),
 		emptyToNil(meta.ProjectID),
 		meta.Name,
+		meta.EnvName,
+		meta.Site,
+		meta.Purpose,
+		meta.ExpiresAt,
 		meta.Status,
 		meta.CurrentVersion,
 	).Scan(&secretID)
@@ -46,13 +51,16 @@ RETURNING id::text`,
 		return err
 	}
 	_, err = tx.Exec(context.Background(), `
-INSERT INTO secret_versions (secret_id, version, key_id, nonce, ciphertext)
-VALUES ($1::uuid, $2, $3, $4, $5)`,
+INSERT INTO secret_versions (secret_id, version, key_id, algorithm, device_key_id, key_fingerprint, nonce, ciphertext)
+VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8)`,
 		secretID,
 		version.Version,
-		version.Value.KeyID,
-		version.Value.Nonce,
-		version.Value.Ciphertext,
+		version.Blob.DeviceKeyID,
+		version.Blob.Algorithm,
+		version.Blob.DeviceKeyID,
+		version.Blob.KeyFingerprint,
+		version.Blob.Nonce,
+		version.Blob.Ciphertext,
 	)
 	if err != nil {
 		return err
@@ -65,11 +73,10 @@ func (r *PGRepository) GetMetadata(secretRef string) (Metadata, error) {
 		return Metadata{}, errors.New("secret postgres repository is not configured")
 	}
 	row := r.pool.QueryRow(context.Background(), `
-SELECT secret_ref, owner_user_id::text, COALESCE(org_id::text, ''), COALESCE(project_id::text, ''), name, status, current_version
+SELECT secret_ref, owner_user_id::text, COALESCE(org_id::text, ''), COALESCE(project_id::text, ''), name, COALESCE(env_name, ''), COALESCE(site, ''), COALESCE(purpose, ''), expires_at, status, current_version
 FROM secrets
 WHERE secret_ref = $1`, secretRef)
-	var meta Metadata
-	err := row.Scan(&meta.SecretRef, &meta.OwnerUserID, &meta.OrgID, &meta.ProjectID, &meta.Name, &meta.Status, &meta.CurrentVersion)
+	meta, err := scanMetadata(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Metadata{}, errors.New("secret not found")
 	}
@@ -84,7 +91,7 @@ func (r *PGRepository) List(filter ListFilter) ([]Metadata, error) {
 		filter.Limit = 50
 	}
 	rows, err := r.pool.Query(context.Background(), `
-SELECT secret_ref, owner_user_id::text, COALESCE(org_id::text, ''), COALESCE(project_id::text, ''), name, status, current_version
+SELECT secret_ref, owner_user_id::text, COALESCE(org_id::text, ''), COALESCE(project_id::text, ''), name, COALESCE(env_name, ''), COALESCE(site, ''), COALESCE(purpose, ''), expires_at, status, current_version
 FROM secrets
 WHERE owner_user_id = $1::uuid
   AND ($2::uuid IS NULL OR org_id = $2::uuid)
@@ -99,8 +106,8 @@ LIMIT $5`, filter.OwnerUserID, emptyToNil(filter.OrgID), emptyToNil(filter.Proje
 
 	items := []Metadata{}
 	for rows.Next() {
-		var meta Metadata
-		if err := rows.Scan(&meta.SecretRef, &meta.OwnerUserID, &meta.OrgID, &meta.ProjectID, &meta.Name, &meta.Status, &meta.CurrentVersion); err != nil {
+		meta, err := scanMetadata(rows)
+		if err != nil {
 			return nil, err
 		}
 		items = append(items, meta)
@@ -116,12 +123,12 @@ func (r *PGRepository) GetCurrentVersion(secretRef string) (Version, error) {
 		return Version{}, errors.New("secret postgres repository is not configured")
 	}
 	row := r.pool.QueryRow(context.Background(), `
-SELECT s.secret_ref, v.version, v.key_id, v.nonce, v.ciphertext
+SELECT s.secret_ref, v.version, v.algorithm, v.device_key_id, v.key_fingerprint, v.nonce, v.ciphertext
 FROM secrets s
 JOIN secret_versions v ON v.secret_id = s.id AND v.version = s.current_version
 WHERE s.secret_ref = $1`, secretRef)
 	var version Version
-	err := row.Scan(&version.SecretRef, &version.Version, &version.Value.KeyID, &version.Value.Nonce, &version.Value.Ciphertext)
+	err := row.Scan(&version.SecretRef, &version.Version, &version.Blob.Algorithm, &version.Blob.DeviceKeyID, &version.Blob.KeyFingerprint, &version.Blob.Nonce, &version.Blob.Ciphertext)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Version{}, errors.New("secret version not found")
 	}
@@ -140,6 +147,21 @@ func (r *PGRepository) Disable(secretRef string) error {
 		return errors.New("secret not found")
 	}
 	return nil
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanMetadata(row rowScanner) (Metadata, error) {
+	var meta Metadata
+	var expiresAt *time.Time
+	err := row.Scan(&meta.SecretRef, &meta.OwnerUserID, &meta.OrgID, &meta.ProjectID, &meta.Name, &meta.EnvName, &meta.Site, &meta.Purpose, &expiresAt, &meta.Status, &meta.CurrentVersion)
+	if err != nil {
+		return Metadata{}, err
+	}
+	meta.ExpiresAt = expiresAt
+	return meta, nil
 }
 
 func emptyToNil(value string) any {
