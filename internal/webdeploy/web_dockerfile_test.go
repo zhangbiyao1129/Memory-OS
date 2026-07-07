@@ -232,11 +232,10 @@ func TestSearchTestPageDisplaysUnifiedRetrievalEvidence(t *testing.T) {
 	page := string(content)
 
 	for _, required := range []string{
-		"hotMemoryResults",
-		"archiveRAGResults",
-		"Hot Memory 结果",
-		"Archive RAG 结果",
-		"压缩上下文",
+		"检索记忆",
+		"可注入上下文",
+		"标记有用",
+		"调试详情",
 		"marked_used_count",
 		"access_log_count",
 		"item.text || '后端未返回文本。'",
@@ -348,7 +347,11 @@ func TestSecretsPageUsesRealAPIAndMetadataOnlyFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read secrets page: %v", err)
 	}
-	page := string(content)
+	helperContent, err := os.ReadFile("../../frontend/utils/memoryUx.ts")
+	if err != nil {
+		t.Fatalf("read memory UX helper: %v", err)
+	}
+	page := string(content) + string(helperContent)
 
 	for _, forbidden := range []string{
 		"sk-live-",
@@ -429,20 +432,17 @@ func TestTokensPageUsesRealAPIAndOneTimeTokenFlow(t *testing.T) {
 	}
 }
 
-func TestAppShellHidesGlobalContextSelectors(t *testing.T) {
+func TestAppShellShowsFocusedNavigationAndContextSwitcher(t *testing.T) {
 	content, err := os.ReadFile("../../frontend/components/AppShell.vue")
 	if err != nil {
 		t.Fatalf("read AppShell: %v", err)
 	}
-	component := string(content)
+	switcherContent, err := os.ReadFile("../../frontend/components/ContextSwitcher.vue")
+	if err != nil {
+		t.Fatalf("read ContextSwitcher: %v", err)
+	}
+	component := string(content) + string(switcherContent)
 	for _, forbidden := range []string{
-		"<select",
-		"组织 / 项目",
-		"context.setAgent",
-		"codex</option>",
-		"claude</option>",
-		"opencode</option>",
-		"hermes</option>",
 		"['组织', '/orgs']",
 		"['用户', '/users']",
 		"['项目', '/projects']",
@@ -463,12 +463,43 @@ func TestAppShellHidesGlobalContextSelectors(t *testing.T) {
 		"['总览', '/']",
 		"['记忆', '/memory']",
 		"['检索', '/search']",
+		"['接入向导', '/onboarding']",
+		"['写入诊断', '/diagnostics']",
+		"['Secret', '/secrets']",
 		"['日志', '/logs']",
 		"['高级设置', '/settings']",
 		"当前记忆上下文",
+		"context.setAgent",
+		"mobileNavOpen",
+		"aria-controls=\"app-mobile-nav\"",
+		"lg:hidden",
+		"lg:block",
 	} {
 		if !strings.Contains(component, required) {
 			t.Fatalf("AppShell must explain automatic workspace context marker %q", required)
+		}
+	}
+}
+
+func TestFrontendUsesReadableApiErrors(t *testing.T) {
+	uxContent, err := os.ReadFile("../../frontend/utils/memoryUx.ts")
+	if err != nil {
+		t.Fatalf("read memory UX helper: %v", err)
+	}
+	apiContent, err := os.ReadFile("../../frontend/composables/useApi.ts")
+	if err != nil {
+		t.Fatalf("read useApi composable: %v", err)
+	}
+	combined := string(uxContent) + string(apiContent)
+	for _, required := range []string{
+		"friendlyApiError",
+		"Failed to fetch",
+		"<no response>",
+		"Memory OS API 暂不可用，请确认后端服务已启动。",
+		"throw new Error(friendlyApiError(error))",
+	} {
+		if !strings.Contains(combined, required) {
+			t.Fatalf("frontend API errors must stay readable marker %q", required)
 		}
 	}
 }

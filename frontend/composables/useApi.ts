@@ -1,3 +1,5 @@
+import { friendlyApiError } from '~/utils/memoryUx'
+
 type ApiOptions = {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
   body?: unknown
@@ -31,7 +33,7 @@ export function useApi() {
       const status = error?.statusCode || error?.response?.status
       if (status === 401) throw new Error('登录已过期，请重新登录')
       if (status === 403) throw new Error('当前账号没有访问权限')
-      throw new Error(error?.data?.message || error?.data?.error || error?.message || 'Memory OS API 暂不可用')
+      throw new Error(friendlyApiError(error))
     }
   }
 

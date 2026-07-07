@@ -158,12 +158,10 @@ watch(() => [context.orgId, context.projectId, statusFilter.value], () => {
     <p v-if="error" class="mt-6 rounded-2xl bg-red-50 p-4 text-sm text-red-700">{{ error }}</p>
     <p v-if="notice" class="mt-6 rounded-2xl bg-lime-50 p-4 text-sm text-lime-800">{{ notice }}</p>
 
-    <section class="mt-6 rounded-3xl border bg-white p-5">
-      <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h3 class="text-xl font-black">创建 Archive</h3>
-          <p class="mt-2 text-sm text-stone-600">调用真实 <code>/memory/archive/create</code>，用 <code>manual_archive_request</code> 事件生成 Markdown 归档。</p>
-        </div>
+    <details class="mt-6 rounded-3xl border bg-white p-5">
+      <summary class="cursor-pointer text-xl font-black">高级：手动创建归档</summary>
+      <div class="mt-4 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <p class="max-w-3xl text-sm text-stone-600">调用真实 <code>/memory/archive/create</code>，用 <code>manual_archive_request</code> 事件生成 Markdown 归档。日常优先从候选沉淀进入 Archive。</p>
         <button class="rounded-2xl bg-stone-950 px-4 py-3 font-bold text-white disabled:cursor-not-allowed disabled:bg-stone-400" :disabled="creating || !auth.isAuthenticated || !hasProjectContext || !newTitle.trim() || !newContent.trim()" @click="createArchive">
           {{ creating ? '创建中...' : '创建真实 Archive' }}
         </button>
@@ -178,7 +176,7 @@ watch(() => [context.orgId, context.projectId, statusFilter.value], () => {
           <textarea v-model="newContent" class="mt-2 min-h-28 w-full rounded-2xl border p-3 font-normal text-stone-950" placeholder="写入需要沉淀的项目事实、排障结论或后续动作" />
         </label>
       </div>
-    </section>
+    </details>
 
     <div v-if="loading" class="mt-6 rounded-3xl bg-white p-6 text-stone-600">正在加载 Archive...</div>
     <div v-else-if="auth.isAuthenticated && hasProjectContext && archives.length === 0" class="mt-6 rounded-3xl bg-white p-6 text-stone-600">当前过滤条件下暂无 Archive。</div>
@@ -187,8 +185,20 @@ watch(() => [context.orgId, context.projectId, statusFilter.value], () => {
         <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <h3 class="font-black">{{ archive.title || archive.archive_id }}</h3>
-            <p class="mt-2 break-all text-sm text-stone-600">{{ archive.archive_id }} · {{ statusText(archive.status) }} · 版本 {{ archive.current_version }} · 索引代次 {{ archive.index_generation }}</p>
-            <p class="mt-1 break-all text-xs text-stone-500">文件 {{ archive.file_path }}</p>
+            <p class="mt-2 text-sm text-stone-600">{{ statusText(archive.status) }} · 版本 {{ archive.current_version }}</p>
+            <details class="mt-3 rounded-2xl bg-stone-50 p-3">
+              <summary class="cursor-pointer text-sm font-black">技术信息</summary>
+              <dl class="mt-3 grid gap-2 text-xs text-stone-600 sm:grid-cols-[9rem_1fr]">
+                <dt class="font-black">archive_id</dt>
+                <dd class="break-all">{{ archive.archive_id }}</dd>
+                <dt class="font-black">file_path</dt>
+                <dd class="break-all">{{ archive.file_path }}</dd>
+                <dt class="font-black">index_generation</dt>
+                <dd>{{ archive.index_generation }}</dd>
+                <dt class="font-black">content_hash</dt>
+                <dd class="break-all">{{ archive.content_hash }}</dd>
+              </dl>
+            </details>
           </div>
           <p class="text-sm text-stone-500">更新于 {{ formatDate(archive.updated_at) }}</p>
         </div>

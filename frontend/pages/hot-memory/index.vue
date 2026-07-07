@@ -224,14 +224,20 @@ watch(() => [context.orgId, context.projectId, context.agentId, scope.value, sta
     <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div>
         <h2 class="text-3xl font-black">热记忆</h2>
-        <p class="mt-2 text-stone-600">连接真实 <code>/memory/hot-memory/*</code> API，支持创建、提升、降权、标记使用和软删除。</p>
-        <p class="mt-2 rounded-2xl bg-stone-100 p-3 text-sm text-stone-600">热记忆是<strong>可重建的快速召回索引快照</strong>，不是权威记忆源（权威内容在 Archive Markdown）。热度由真实使用行为驱动：<strong>召回 → 返回 → 使用</strong> 三段信号逐层递进，<code>used</code> 只由显式 <code>mark-used</code> 或上下文注入触发，检索命中本身不增加 <code>used</code>。</p>
+        <p class="mt-2 text-stone-600">这里展示系统用于快速召回的工作记忆；长期事实优先进入 Archive。</p>
+        <p class="mt-2 rounded-2xl bg-stone-100 p-3 text-sm text-stone-600">热记忆是可重建的快速索引快照，不是权威记忆源。热度由召回、返回、使用三段信号驱动。</p>
       </div>
-      <button class="rounded-2xl border bg-white px-4 py-2 font-bold" :disabled="loading" @click="loadMemories">{{ loading ? '刷新中...' : '刷新' }}</button>
+      <div class="flex flex-wrap gap-2">
+        <NuxtLink class="rounded-2xl border bg-white px-4 py-2 font-bold" to="/candidates">去候选记忆</NuxtLink>
+        <NuxtLink class="rounded-2xl border bg-white px-4 py-2 font-bold" to="/archive">去归档库</NuxtLink>
+        <button class="rounded-2xl border bg-white px-4 py-2 font-bold" :disabled="loading" @click="loadMemories">{{ loading ? '刷新中...' : '刷新' }}</button>
+      </div>
     </div>
 
-    <section class="mt-6 rounded-3xl border bg-white p-5">
-      <div class="grid gap-4 lg:grid-cols-[1fr_180px_160px_140px]">
+    <details class="mt-6 rounded-3xl border bg-white p-5">
+      <summary class="cursor-pointer text-xl font-black">高级：手动创建热记忆</summary>
+      <p class="mt-3 text-sm text-stone-600">日常优先从候选接受或归档沉淀生成热记忆。只有需要临时补充快速召回事实时，才手动创建。</p>
+      <div class="mt-4 grid gap-4 lg:grid-cols-[1fr_180px_160px_140px]">
         <label class="text-sm font-bold text-stone-600">
           记忆事实
           <textarea v-model="fact" class="mt-2 min-h-24 w-full rounded-2xl border p-3 font-normal text-stone-950" placeholder="写入一个可复用的项目事实" />
@@ -255,9 +261,10 @@ watch(() => [context.orgId, context.projectId, context.agentId, scope.value, sta
       </div>
       <p v-if="!auth.isAuthenticated" class="mt-3 rounded-2xl bg-amber-50 p-3 text-sm text-amber-800">请先登录后管理 Hot Memory。</p>
       <p v-else-if="!hasProjectContext" class="mt-3 rounded-2xl bg-amber-50 p-3 text-sm text-amber-800">请先选择组织和项目。</p>
-      <p v-if="error" class="mt-3 rounded-2xl bg-red-50 p-3 text-sm text-red-700">{{ error }}</p>
-      <p v-if="success" class="mt-3 rounded-2xl bg-emerald-50 p-3 text-sm text-emerald-700">{{ success }}</p>
-    </section>
+    </details>
+
+    <p v-if="error" class="mt-4 rounded-2xl bg-red-50 p-3 text-sm text-red-700">{{ error }}</p>
+    <p v-if="success" class="mt-4 rounded-2xl bg-emerald-50 p-3 text-sm text-emerald-700">{{ success }}</p>
 
     <section class="mt-6 rounded-3xl border bg-white p-5">
       <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -282,15 +289,27 @@ watch(() => [context.orgId, context.projectId, context.agentId, scope.value, sta
                 </label>
               </template>
               <p v-else class="text-lg font-black text-stone-950">{{ memory.fact }}</p>
-              <p class="mt-2 break-all text-sm text-stone-600">{{ memory.memory_id }} · {{ statusText(memory.status) }} · hot_score {{ memory.hot_score.toFixed(2) }}<span v-if="memory.pinned" class="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-900">已固定</span></p>
+              <p class="mt-2 text-sm text-stone-600">{{ statusText(memory.status) }}<span v-if="memory.pinned" class="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-900">已固定</span></p>
               <div class="mt-2 flex flex-wrap gap-2 text-xs">
                 <span class="rounded-full bg-stone-200 px-2 py-1 font-bold text-stone-700" title="被检索召回的次数（access_count）：记忆进入候选集">召回 {{ memory.access_count }}</span>
                 <span class="rounded-full bg-sky-100 px-2 py-1 font-bold text-sky-800" title="实际返回给调用方的次数（returned_count）：通过重排后进入最终结果">返回 {{ memory.returned_count }}</span>
                 <span class="rounded-full bg-emerald-100 px-2 py-1 font-bold text-emerald-800" title="被显式使用/上下文注入的次数（used_count）：只由 mark-used 显式触发，检索命中不计入">使用 {{ memory.used_count }}</span>
               </div>
-              <p class="mt-1 text-sm text-stone-500">scope {{ memory.scope }} · agent {{ memory.agent_id }}</p>
               <p class="mt-1 text-xs text-stone-500">最近召回 {{ formatDate(memory.last_accessed_at) }} · 最近返回 {{ formatDate(memory.last_returned_at) }} · 最近使用 {{ formatDate(memory.last_used_at) }}</p>
               <p class="mt-1 text-xs text-stone-500">更新于 {{ formatDate(memory.updated_at) }}</p>
+              <details class="mt-3 rounded-2xl bg-white p-3">
+                <summary class="cursor-pointer text-xs font-black uppercase tracking-widest text-stone-500">技术信息</summary>
+                <dl class="mt-3 grid gap-2 text-xs text-stone-600 sm:grid-cols-[7rem_1fr]">
+                  <dt class="font-black">memory_id</dt>
+                  <dd class="break-all">{{ memory.memory_id }}</dd>
+                  <dt class="font-black">scope</dt>
+                  <dd>{{ memory.scope }}</dd>
+                  <dt class="font-black">agent</dt>
+                  <dd class="break-all">{{ memory.agent_id }}</dd>
+                  <dt class="font-black">hot_score</dt>
+                  <dd>{{ memory.hot_score.toFixed(2) }}</dd>
+                </dl>
+              </details>
             </div>
             <div class="flex flex-wrap gap-2">
               <button v-if="editingMemoryID !== memory.memory_id" class="rounded-2xl bg-white px-3 py-2 text-sm font-bold text-stone-900" @click="startEditMemory(memory)">编辑</button>

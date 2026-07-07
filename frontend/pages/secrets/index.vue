@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { buildSecretCommandTemplates } from '~/utils/memoryUx'
+
 const auth = useAuthStore()
 const context = useContextStore()
 const { request } = useApi()
@@ -25,8 +27,19 @@ const error = ref('')
 const success = ref('')
 const statusFilter = ref<'active' | 'disabled'>('active')
 const secrets = ref<SecretMetadata[]>([])
+const templateName = ref('gitlab-ee-pat')
+const templateEnvName = ref('GITLAB_TOKEN')
+const templateSite = ref('gitlab-ee')
+const templatePurpose = ref('GitLab API')
+const copiedTemplate = ref('')
 
 const hasProjectContext = computed(() => Boolean(context.orgId && context.projectId))
+const templates = computed(() => buildSecretCommandTemplates({
+  name: templateName.value,
+  envName: templateEnvName.value,
+  site: templateSite.value,
+  purpose: templatePurpose.value
+}))
 
 async function loadSecrets() {
   if (!auth.isAuthenticated || !hasProjectContext.value) {
@@ -79,6 +92,13 @@ async function disableSecret(secretRef: string) {
   }
 }
 
+async function copyTemplate(key: string) {
+  const command = templates.value[key as keyof typeof templates.value]
+  if (!command) return
+  await navigator.clipboard.writeText(command)
+  copiedTemplate.value = key
+}
+
 onMounted(async () => {
   auth.initFromStorage()
   context.initFromStorage()
@@ -104,13 +124,36 @@ watch(() => [context.orgId, context.projectId, statusFilter.value], () => loadSe
     <div class="mt-6 grid gap-4 lg:grid-cols-[1fr_1fr]">
       <section class="rounded-3xl border bg-white p-5">
         <h3 class="font-black">如何创建 Secret</h3>
-        <p class="mt-2 text-sm text-stone-600">明文永远不进入服务端。请在本机通过 MCP 工具创建：</p>
-        <ol class="mt-3 space-y-2 text-sm text-stone-600">
-          <li>1. 本机 MCP 工具 <code class="rounded bg-stone-100 px-1">secret_create_local</code> 传入明文与用途。</li>
-          <li>2. 本机用设备密钥（<code class="rounded bg-stone-100 px-1">~/.config/memory-os/secret-device-key.json</code>）加密。</li>
-          <li>3. 只有密文和元信息上传到服务端，明文留在本机。</li>
-        </ol>
-        <p class="mt-3 rounded-2xl bg-amber-50 p-3 text-xs text-amber-800">Web 端只做 metadata 查看与禁用，不提供明文创建入口，也无法取回明文。</p>
+        <p class="mt-2 text-sm text-stone-600">Web 不接收明文。复制模板后，在本机 MCP/终端里输入真实值。</p>
+        <div class="mt-4 grid gap-3 sm:grid-cols-2">
+          <label class="text-sm font-bold text-stone-600">
+            名称
+            <input v-model="templateName" class="mt-2 w-full rounded-2xl border px-3 py-2 font-normal text-stone-950">
+          </label>
+          <label class="text-sm font-bold text-stone-600">
+            环境变量
+            <input v-model="templateEnvName" class="mt-2 w-full rounded-2xl border px-3 py-2 font-normal text-stone-950">
+          </label>
+          <label class="text-sm font-bold text-stone-600">
+            站点
+            <input v-model="templateSite" class="mt-2 w-full rounded-2xl border px-3 py-2 font-normal text-stone-950">
+          </label>
+          <label class="text-sm font-bold text-stone-600">
+            用途
+            <input v-model="templatePurpose" class="mt-2 w-full rounded-2xl border px-3 py-2 font-normal text-stone-950">
+          </label>
+        </div>
+        <div class="mt-4 grid gap-3">
+          <div v-for="(command, key) in templates" :key="key" class="rounded-2xl bg-stone-50 p-3">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <code class="break-all text-sm text-stone-800">{{ command }}</code>
+              <button class="rounded-xl bg-stone-950 px-3 py-1 text-xs font-black text-white" @click="copyTemplate(String(key))">
+                {{ copiedTemplate === key ? '已复制' : '复制' }}
+              </button>
+            </div>
+          </div>
+        </div>
+        <p class="mt-3 rounded-2xl bg-amber-50 p-3 text-xs text-amber-800">服务端只保存密文和元信息；明文留在本机设备密钥保护范围内。</p>
       </section>
 
       <section class="rounded-3xl border bg-white p-5">
@@ -142,9 +185,17 @@ watch(() => [context.orgId, context.projectId, statusFilter.value], () => loadSe
           <p v-if="secret.env_name" class="mt-2 text-stone-600">env: {{ secret.env_name }}</p>
           <p v-if="secret.site" class="mt-1 text-stone-600">site: {{ secret.site }}</p>
           <p v-if="secret.purpose" class="mt-1 text-stone-600">purpose: {{ secret.purpose }}</p>
-          <p class="mt-2 break-all text-stone-600">owner: {{ secret.owner_user_id }}</p>
-          <p class="mt-1 break-all text-stone-600">project: {{ secret.project_id }}</p>
-          <p class="mt-1 text-stone-600">version: {{ secret.current_version }}</p>
+          <details class="mt-3 rounded-2xl bg-white p-3">
+            <summary class="cursor-pointer text-xs font-black uppercase tracking-widest text-stone-500">技术信息</summary>
+            <dl class="mt-3 grid gap-2 text-xs text-stone-600 sm:grid-cols-[7rem_1fr]">
+              <dt class="font-black text-stone-500">owner</dt>
+              <dd class="break-all">{{ secret.owner_user_id }}</dd>
+              <dt class="font-black text-stone-500">project</dt>
+              <dd class="break-all">{{ secret.project_id }}</dd>
+              <dt class="font-black text-stone-500">version</dt>
+              <dd>{{ secret.current_version }}</dd>
+            </dl>
+          </details>
         </div>
       </section>
     </div>
