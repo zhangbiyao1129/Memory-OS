@@ -11,6 +11,8 @@ import (
 	"memory-os/internal/secret"
 )
 
+const defaultRerankCandidateLimit = 16
+
 type HotMemory interface {
 	Search(hotmemory.SearchRequest) ([]hotmemory.SearchResult, error)
 	MarkAccessed(string) (hotmemory.Memory, error)
@@ -34,6 +36,7 @@ type Options struct {
 	AccessLog                 AccessLog
 	ArchiveFeedbackThreshold  int // Archive 高频命中生成候选阈值,0 用默认 3
 	MinRerankScore            float64
+	RerankCandidateLimit      int
 }
 
 type Service struct {
@@ -44,6 +47,7 @@ type Service struct {
 	accessLog                 AccessLog
 	feedback                  *ArchiveFeedbackTracker
 	minRerankScore            float64
+	rerankCandidateLimit      int
 }
 
 func NewService(options Options) Service {
@@ -51,7 +55,11 @@ func NewService(options Options) Service {
 	if threshold <= 0 {
 		threshold = 3
 	}
-	return Service{hotMemory: options.HotMemory, archiveRAG: options.ArchiveRAG, archiveGenerationResolver: options.ArchiveGenerationResolver, reranker: options.Reranker, accessLog: options.AccessLog, feedback: NewArchiveFeedbackTracker(threshold), minRerankScore: options.MinRerankScore}
+	rerankCandidateLimit := options.RerankCandidateLimit
+	if rerankCandidateLimit <= 0 {
+		rerankCandidateLimit = defaultRerankCandidateLimit
+	}
+	return Service{hotMemory: options.HotMemory, archiveRAG: options.ArchiveRAG, archiveGenerationResolver: options.ArchiveGenerationResolver, reranker: options.Reranker, accessLog: options.AccessLog, feedback: NewArchiveFeedbackTracker(threshold), minRerankScore: options.MinRerankScore, rerankCandidateLimit: rerankCandidateLimit}
 }
 
 func (s Service) Configured() bool {
@@ -76,6 +84,7 @@ func (s Service) Search(request SearchRequest) (SearchResponse, error) {
 	}
 	rerankDegraded := false
 	if s.reranker != nil && len(candidates) > 0 {
+		candidates = limitCandidatesForRerank(candidates, s.rerankCandidateLimit)
 		scores, err := s.reranker.Rerank(request.Query, rerankCandidates(candidates))
 		if err != nil {
 			rerankDegraded = true
@@ -256,6 +265,15 @@ func filterByMinScore(candidates []candidate, minScore float64) []candidate {
 		}
 	}
 	return filtered
+}
+
+func limitCandidatesForRerank(candidates []candidate, limit int) []candidate {
+	if limit <= 0 || len(candidates) <= limit {
+		return candidates
+	}
+	limited := append([]candidate(nil), candidates...)
+	sort.SliceStable(limited, func(i, j int) bool { return limited[i].score > limited[j].score })
+	return limited[:limit]
 }
 
 func dedupeCandidates(candidates []candidate) []candidate {

@@ -164,6 +164,41 @@ func TestSearchFiltersLowRerankScoresWhenThresholdConfigured(t *testing.T) {
 	}
 }
 
+func TestSearchDefaultsRerankCandidateLimit(t *testing.T) {
+	results := make([]rag.SearchResult, 0, 25)
+	for i := 0; i < 25; i++ {
+		results = append(results, rag.SearchResult{
+			Text:  "archive candidate",
+			Score: float64(25 - i),
+			Source: rag.SourceRef{
+				ArchiveID: "archive_1",
+				ChunkID:   "chunk_" + string(rune('a'+i)),
+			},
+		})
+	}
+	reranker := &capturingReranker{}
+	service := NewService(Options{ArchiveRAG: &capturingArchiveRAG{results: results}, Reranker: reranker})
+
+	response, err := service.Search(SearchRequest{
+		RequestID:              "req_rerank_limit",
+		Query:                  "backtest latest data",
+		Actor:                  Actor{UserID: "user_1", OrgID: "org_1", ProjectID: "project_1", AgentID: "codex"},
+		Visibility:             "project",
+		Scope:                  hotmemory.ScopeProject,
+		PermissionLabels:       []string{"project:project_1:read"},
+		ArchiveIndexGeneration: 2,
+	})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(reranker.candidates) != 16 {
+		t.Fatalf("rerank candidates len = %d, want 16", len(reranker.candidates))
+	}
+	if len(response.Results) != 16 {
+		t.Fatalf("results len = %d, want 16", len(response.Results))
+	}
+}
+
 func TestSearchDoesNotMarkFilteredHotMemoryAsReturned(t *testing.T) {
 	hot := &trackingHotMemory{results: []hotmemory.SearchResult{{Memory: hotmemory.Memory{MemoryID: "hm_wrong", Fact: "CloudCode deployment note"}, Score: 0.56}}}
 	service := NewService(Options{
@@ -358,6 +393,19 @@ type qdrantFilterMissingError struct{}
 
 func (qdrantFilterMissingError) Error() string {
 	return "qdrant filter missing"
+}
+
+type capturingReranker struct {
+	candidates []RerankCandidate
+}
+
+func (r *capturingReranker) Rerank(query string, candidates []RerankCandidate) ([]RerankScore, error) {
+	r.candidates = append([]RerankCandidate(nil), candidates...)
+	scores := make([]RerankScore, 0, len(candidates))
+	for index, candidate := range candidates {
+		scores = append(scores, RerankScore{ID: candidate.ID, Score: float64(len(candidates) - index)})
+	}
+	return scores, nil
 }
 
 type fakeArchiveGenerationResolver struct {

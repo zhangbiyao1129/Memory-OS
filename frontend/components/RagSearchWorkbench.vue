@@ -10,6 +10,7 @@ const markingUsed = ref('')
 const error = ref('')
 const success = ref('')
 const result = ref<any>(null)
+const SEARCH_PROJECT_CONCURRENCY = 3
 
 const selectedOrg = computed(() => context.orgs.find((org) => org.org_id === context.orgId))
 const selectedProject = computed(() => context.projects.find((project) => project.project_id === context.projectId))
@@ -80,25 +81,39 @@ function mergeSearchResponses(requestID: string, responses: any[]) {
   }
 }
 
-async function searchProjectsSequentially(requestID: string) {
-  const responses = []
-  for (const project of searchProjectScopes.value) {
-    try {
-      const response = await request('/memory/search', {
-        method: 'POST',
-        body: {
-          request_id: `${requestID}-${project.project_id}`,
-          query: query.value,
-          actor: { user_id: '', org_id: context.orgId, project_id: project.project_id, agent_id: context.agentId },
-          scope: 'project',
-          visibility: 'project',
-          max_context_bytes: 512
-        }
-      })
-      responses.push({ project, response })
-    } catch (err: any) {
-      responses.push({ project, response: null, error: err.message || '检索失败' })
+async function searchOneProject(requestID: string, project: any) {
+  try {
+    const response = await request('/memory/search', {
+      method: 'POST',
+      body: {
+        request_id: `${requestID}-${project.project_id}`,
+        query: query.value,
+        actor: { user_id: '', org_id: context.orgId, project_id: project.project_id, agent_id: context.agentId },
+        scope: 'project',
+        visibility: 'project',
+        max_context_bytes: 512
+      }
+    })
+    return { project, response }
+  } catch (err: any) {
+    return { project, response: null, error: err.message || '检索失败' }
+  }
+}
+
+async function searchProjectsWithConcurrency(requestID: string) {
+  const projects = searchProjectScopes.value
+  const responses: any[] = new Array(projects.length)
+  let nextIndex = 0
+  const workerCount = Math.min(SEARCH_PROJECT_CONCURRENCY, projects.length)
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (nextIndex < projects.length) {
+      const currentIndex = nextIndex
+      nextIndex += 1
+      responses[currentIndex] = await searchOneProject(requestID, projects[currentIndex])
     }
+  })
+  for (const worker of workers) {
+    await worker
   }
   return responses
 }
@@ -126,7 +141,7 @@ async function runSearch() {
   result.value = null
   try {
     const requestID = `web-search-${Date.now()}`
-    const responses = await searchProjectsSequentially(requestID)
+    const responses = await searchProjectsWithConcurrency(requestID)
     result.value = mergeSearchResponses(requestID, responses)
   } catch (err: any) {
     error.value = err.message || '检索失败'
