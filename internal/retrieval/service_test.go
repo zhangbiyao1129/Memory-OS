@@ -70,11 +70,11 @@ func (h *trackingHotMemory) MarkUsed(string) (hotmemory.Memory, error) {
 
 func TestSearchMergesHotMemoryAndArchiveWithTraceableSources(t *testing.T) {
 	hot := hotmemory.NewService(hotmemory.NewMemoryRepository())
-	shared, err := hot.Upsert(hotmemory.UpsertRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: hotmemory.ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "Project deploys API with docker compose", SourceType: hotmemory.SourceTurnEvent, SourceRef: "turn_event_1", Confidence: 0.8})
+	shared, err := hot.Upsert(hotmemory.UpsertRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: hotmemory.ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "Project deploy API uses docker compose", SourceType: hotmemory.SourceTurnEvent, SourceRef: "turn_event_1", Confidence: 0.8})
 	if err != nil {
 		t.Fatalf("hot Upsert shared error = %v", err)
 	}
-	if _, err := hot.Upsert(hotmemory.UpsertRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: hotmemory.ScopeAgentSpecific, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "Codex private deploy shortcut", SourceType: hotmemory.SourceTurnEvent, SourceRef: "turn_event_agent", Confidence: 0.9}); err != nil {
+	if _, err := hot.Upsert(hotmemory.UpsertRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: hotmemory.ScopeAgentSpecific, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "Codex private deploy API shortcut", SourceType: hotmemory.SourceTurnEvent, SourceRef: "turn_event_agent", Confidence: 0.9}); err != nil {
 		t.Fatalf("hot Upsert agent_specific error = %v", err)
 	}
 	ragService := rag.NewService(rag.NewMemoryStore())
@@ -100,7 +100,7 @@ func TestSearchMergesHotMemoryAndArchiveWithTraceableSources(t *testing.T) {
 	if response.Results[0].Source.Kind != SourceArchiveChunk || response.Results[0].Source.ChunkID != "chunk_1" {
 		t.Fatalf("top result source = %#v, want archive chunk_1", response.Results[0].Source)
 	}
-	if strings.Contains(response.Context, "chunk_old") || !strings.Contains(response.Context, "Codex private deploy shortcut") {
+	if strings.Contains(response.Context, "chunk_old") || !strings.Contains(response.Context, "Codex private deploy API shortcut") {
 		t.Fatalf("context should exclude old generation and include cross-agent source memory: %s", response.Context)
 	}
 	if log.Requests() != 1 || log.Results() != 3 {
@@ -112,6 +112,55 @@ func TestSearchMergesHotMemoryAndArchiveWithTraceableSources(t *testing.T) {
 	}
 	if updated.UsedCount != 1 {
 		t.Fatalf("used count after verification mark = %d, want 1", updated.UsedCount)
+	}
+}
+
+func TestSearchUsesFullQueryForRecall(t *testing.T) {
+	archiveRAG := &capturingArchiveRAG{results: []rag.SearchResult{{Text: "deploy API archive", Score: 0.9, Source: rag.SourceRef{ArchiveID: "archive_1", ChunkID: "chunk_1"}}}}
+	service := NewService(Options{ArchiveRAG: archiveRAG})
+
+	_, err := service.Search(SearchRequest{
+		RequestID:              "req_full_query",
+		Query:                  "deploy API",
+		Actor:                  Actor{UserID: "user_1", OrgID: "org_1", ProjectID: "project_1", AgentID: "codex"},
+		Visibility:             "project",
+		Scope:                  hotmemory.ScopeProject,
+		PermissionLabels:       []string{"project:project_1:read"},
+		ArchiveIndexGeneration: 2,
+	})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if archiveRAG.request.Query != "deploy API" {
+		t.Fatalf("archive recall query = %q, want full user query", archiveRAG.request.Query)
+	}
+}
+
+func TestSearchFiltersLowRerankScoresWhenThresholdConfigured(t *testing.T) {
+	archiveRAG := &capturingArchiveRAG{results: []rag.SearchResult{
+		{Text: "unrelated deployment note", Score: 0.62, Source: rag.SourceRef{ArchiveID: "archive_1", ChunkID: "chunk_bad"}},
+		{Text: "backtest latest data shows final equity", Score: 0.58, Source: rag.SourceRef{ArchiveID: "archive_2", ChunkID: "chunk_good"}},
+	}}
+	service := NewService(Options{
+		ArchiveRAG:     archiveRAG,
+		Reranker:       StaticReranker{Scores: map[string]float64{"archive:chunk_bad": 0.04, "archive:chunk_good": 0.82}},
+		MinRerankScore: 0.2,
+	})
+
+	response, err := service.Search(SearchRequest{
+		RequestID:              "req_min_rerank",
+		Query:                  "回测的最新数据是多少",
+		Actor:                  Actor{UserID: "user_1", OrgID: "org_1", ProjectID: "project_1", AgentID: "codex"},
+		Visibility:             "project",
+		Scope:                  hotmemory.ScopeProject,
+		PermissionLabels:       []string{"project:project_1:read"},
+		ArchiveIndexGeneration: 2,
+	})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(response.Results) != 1 || response.Results[0].Source.ChunkID != "chunk_good" {
+		t.Fatalf("results = %#v, want only high rerank score candidate", response.Results)
 	}
 }
 

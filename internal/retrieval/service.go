@@ -33,6 +33,7 @@ type Options struct {
 	Reranker                  Reranker
 	AccessLog                 AccessLog
 	ArchiveFeedbackThreshold  int // Archive 高频命中生成候选阈值,0 用默认 3
+	MinRerankScore            float64
 }
 
 type Service struct {
@@ -42,6 +43,7 @@ type Service struct {
 	reranker                  Reranker
 	accessLog                 AccessLog
 	feedback                  *ArchiveFeedbackTracker
+	minRerankScore            float64
 }
 
 func NewService(options Options) Service {
@@ -49,7 +51,7 @@ func NewService(options Options) Service {
 	if threshold <= 0 {
 		threshold = 3
 	}
-	return Service{hotMemory: options.HotMemory, archiveRAG: options.ArchiveRAG, archiveGenerationResolver: options.ArchiveGenerationResolver, reranker: options.Reranker, accessLog: options.AccessLog, feedback: NewArchiveFeedbackTracker(threshold)}
+	return Service{hotMemory: options.HotMemory, archiveRAG: options.ArchiveRAG, archiveGenerationResolver: options.ArchiveGenerationResolver, reranker: options.Reranker, accessLog: options.AccessLog, feedback: NewArchiveFeedbackTracker(threshold), minRerankScore: options.MinRerankScore}
 }
 
 func (s Service) Configured() bool {
@@ -79,6 +81,7 @@ func (s Service) Search(request SearchRequest) (SearchResponse, error) {
 			rerankDegraded = true
 		} else {
 			applyRerankScores(candidates, scores)
+			candidates = filterByMinScore(candidates, s.minRerankScore)
 		}
 	}
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
@@ -190,11 +193,7 @@ func (s Service) archiveIndexGeneration(request SearchRequest) (int, error) {
 }
 
 func primaryRecallQuery(query string) string {
-	fields := strings.Fields(query)
-	if len(fields) == 0 {
-		return query
-	}
-	return fields[0]
+	return strings.TrimSpace(query)
 }
 
 func validateRequest(request SearchRequest) error {
@@ -234,6 +233,19 @@ func applyRerankScores(candidates []candidate, scores []RerankScore) {
 			candidates[index].score = score
 		}
 	}
+}
+
+func filterByMinScore(candidates []candidate, minScore float64) []candidate {
+	if minScore <= 0 {
+		return candidates
+	}
+	filtered := []candidate{}
+	for _, candidate := range candidates {
+		if candidate.score >= minScore {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered
 }
 
 func dedupeCandidates(candidates []candidate) []candidate {

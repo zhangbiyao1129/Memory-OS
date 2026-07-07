@@ -12,6 +12,8 @@ const success = ref('')
 const result = ref<any>(null)
 
 const hasContext = computed(() => Boolean(context.orgId && context.projectId))
+const selectedOrg = computed(() => context.orgs.find((org) => org.org_id === context.orgId))
+const selectedProject = computed(() => context.projects.find((project) => project.project_id === context.projectId))
 const allResults = computed(() => result.value?.results || [])
 const sourceRefs = computed(() => allResults.value.map((item: any) => item.source).filter(Boolean))
 
@@ -102,11 +104,14 @@ async function markUsed(item: any) {
     <div class="mt-4 grid gap-3 md:grid-cols-3">
       <div class="rounded-2xl border bg-white p-4 text-sm">
         <div class="font-bold text-stone-500">组织</div>
-        <div class="mt-1 break-all text-stone-950">{{ context.orgId || '未选择' }}</div>
+        <div class="mt-1 break-all font-bold text-stone-950">{{ selectedOrg?.name || context.orgId || '未选择' }}</div>
+        <div v-if="context.orgId" class="mt-1 break-all text-xs text-stone-500">{{ context.orgId }}</div>
       </div>
       <div class="rounded-2xl border bg-white p-4 text-sm">
         <div class="font-bold text-stone-500">项目</div>
-        <div class="mt-1 break-all text-stone-950">{{ context.projectId || '未选择' }}</div>
+        <div class="mt-1 break-all font-bold text-stone-950">{{ selectedProject?.name || context.projectId || '未选择' }}</div>
+        <div v-if="selectedProject?.source_key" class="mt-1 break-all text-xs text-stone-500">{{ selectedProject.source_key }}</div>
+        <div v-if="context.projectId" class="mt-1 break-all text-xs text-stone-500">{{ context.projectId }}</div>
       </div>
       <div class="rounded-2xl border bg-white p-4 text-sm">
         <div class="font-bold text-stone-500">Agent</div>

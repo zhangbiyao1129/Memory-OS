@@ -36,6 +36,7 @@ type Config struct {
 	LLMModel               string
 	EmbeddingModel         string
 	RerankModel            string
+	RerankMinScore         float64
 }
 
 // Load 从环境变量读取配置，并为本地开发提供安全默认值。
@@ -56,6 +57,7 @@ func Load() (Config, error) {
 		LLMModel:               envOrDefault("LLM_MODEL", "MiniMax-M2.7"),
 		EmbeddingModel:         envOrDefault("EMBEDDING_MODEL", "bge-m3"),
 		RerankModel:            envOrDefault("RERANK_MODEL", "bge-reranker-v2-m3"),
+		RerankMinScore:         envFloatOrDefault("RERANK_MIN_SCORE", 0.2),
 	}
 
 	for name, addr := range map[string]string{
@@ -114,6 +116,18 @@ func envBool(key string) bool {
 	default:
 		return false
 	}
+}
+
+func envFloatOrDefault(key string, fallback float64) float64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func validateAddr(addr string) error {

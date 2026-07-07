@@ -176,6 +176,14 @@ var newProductionMaintenanceService = func(cfg config.Config, pool *pgxpool.Pool
 	return candidatememory.NewMaintenanceService(candidatememory.NewPGMaintenanceRepository(pool), candidateRepo, composer, cleaner), nil
 }
 
+var newProductionReranker = func(cfg config.Config) retrieval.Reranker {
+	client, err := llm.NewOpenAICompatible(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, RerankModel: cfg.RerankModel})
+	if err != nil {
+		return retrieval.FailingReranker{Err: err}
+	}
+	return retrieval.NewLLMReranker(client)
+}
+
 func routerOptions(cfg config.Config, healthService health.Service, pool *pgxpool.Pool) (httpapi.RouterOptions, error) {
 	options := httpapi.RouterOptions{HealthService: healthService, AppEnv: cfg.AppEnv, EnableDevEndpoints: cfg.EnableDevEndpoints, LegacyTurnEventArchive: cfg.LegacyTurnEventArchive}
 	if pool == nil {
@@ -195,7 +203,7 @@ func routerOptions(cfg config.Config, healthService health.Service, pool *pgxpoo
 	options.AuthService = auth.NewService(auth.NewPGRepository(pool))
 	options.TenantService = tenant.NewService(tenant.NewPGRepository(pool))
 	accessLog := productionAccessLog(pool)
-	options.RetrievalService = retrieval.NewService(retrieval.Options{HotMemory: hot, ArchiveRAG: archiveRAG, ArchiveGenerationResolver: retrieval.NewPGArchiveGenerationResolver(pool), Reranker: retrieval.FailingReranker{}, AccessLog: accessLog})
+	options.RetrievalService = retrieval.NewService(retrieval.Options{HotMemory: hot, ArchiveRAG: archiveRAG, ArchiveGenerationResolver: retrieval.NewPGArchiveGenerationResolver(pool), Reranker: newProductionReranker(cfg), AccessLog: accessLog, MinRerankScore: cfg.RerankMinScore})
 	options.HotMemoryService = hot
 	options.RetrievalAccessLog = accessLog
 	options.EventLogService = eventlog.NewService(eventlog.NewPGRepository(pool), eventlog.SanitizerOptions{MaxTurnEventBytes: 256 * 1024, MaxToolOutputBytes: 64 * 1024})

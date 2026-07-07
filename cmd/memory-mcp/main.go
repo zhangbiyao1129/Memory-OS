@@ -182,8 +182,16 @@ var newProductionRetrieval = func(cfg config.Config, pool *pgxpool.Pool) (retrie
 	hot := hotmemory.NewServiceWithVectorIndex(hotmemory.NewPGRepository(pool), hotmemory.NewQdrantIndex(pool, qdrantClient, embedder, qdrant.DefaultCollectionName))
 	archiveRAG := rag.NewService(rag.NewQdrantStore(pool, qdrantClient, embedder, qdrant.DefaultCollectionName))
 	accessLog := retrieval.NewPGAccessLog(pool)
-	service := retrieval.NewService(retrieval.Options{HotMemory: hot, ArchiveRAG: archiveRAG, ArchiveGenerationResolver: retrieval.NewPGArchiveGenerationResolver(pool), Reranker: retrieval.FailingReranker{}, AccessLog: accessLog})
+	service := retrieval.NewService(retrieval.Options{HotMemory: hot, ArchiveRAG: archiveRAG, ArchiveGenerationResolver: retrieval.NewPGArchiveGenerationResolver(pool), Reranker: newProductionReranker(cfg), AccessLog: accessLog, MinRerankScore: cfg.RerankMinScore})
 	return service, hot, nil
+}
+
+var newProductionReranker = func(cfg config.Config) retrieval.Reranker {
+	client, err := llm.NewOpenAICompatible(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, RerankModel: cfg.RerankModel})
+	if err != nil {
+		return retrieval.FailingReranker{Err: err}
+	}
+	return retrieval.NewLLMReranker(client)
 }
 
 func (s *Server) ListenAndServe() error {
