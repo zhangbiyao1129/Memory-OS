@@ -2857,6 +2857,39 @@ func TestMemoryLifecycleStatsReturnsSnapshotForCurrentProject(t *testing.T) {
 	}
 }
 
+func TestMemoryLifecycleStatsCanReturnUserScopedSnapshot(t *testing.T) {
+	h := server.New(server.WithHostPorts("127.0.0.1:0"))
+	authService := auth.NewService(auth.NewMemoryRepository())
+	token, _, err := authService.CreatePAT("user_1", "reader", []string{"memory:read"}, time.Hour)
+	if err != nil {
+		t.Fatalf("CreatePAT() error = %v", err)
+	}
+	repo := memorystats.NewMemoryRepository(memorystats.Snapshot{
+		Archives:    memorystats.AssetStats{Total: 7, ByStatus: map[string]int64{"active": 7}},
+		HotMemories: memorystats.HotMemoryStats{Total: 5, ByStatus: map[string]int64{"active": 5}},
+		Candidates:  memorystats.CandidateStats{Total: 9, ActionableTotal: 4, ByStatus: map[string]int64{"pending": 3, "in_compose_pool": 1}},
+	})
+	RegisterRoutes(h.Engine, RouterOptions{
+		HealthService:      health.NewService(nil),
+		AuthService:        authService,
+		TenantService:      tenant.NewService(tenant.NewMemoryRepository()),
+		MemoryStatsService: memorystats.NewService(repo),
+	})
+
+	body := `{}`
+	response := ut.PerformRequest(h.Engine, "POST", "/memory/stats/lifecycle", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + token})
+	assert.DeepEqual(t, 200, response.Code)
+	if !strings.Contains(response.Body.String(), `"total":7`) || !strings.Contains(response.Body.String(), `"actionable_total":4`) {
+		t.Fatalf("memory stats response mismatch: %s", response.Body.String())
+	}
+	if repo.LastFilter.UserID != "user_1" || repo.LastFilter.OrgID != "" || repo.LastFilter.ProjectID != "" {
+		t.Fatalf("repo filter = %#v, want user scoped stats without org/project", repo.LastFilter)
+	}
+	if len(repo.LastFilter.PermissionLabels) != 0 {
+		t.Fatalf("repo filter permission labels = %#v, want none for user scoped stats", repo.LastFilter.PermissionLabels)
+	}
+}
+
 func TestHotMemoryResponseExposesUsageSignals(t *testing.T) {
 	now := time.Now().UTC()
 	memory := hotmemory.Memory{

@@ -821,6 +821,19 @@ func MemoryStatsHandler(service memorystats.Service, authService auth.Service, t
 			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_memory_stats_request"})
 			return
 		}
+		if strings.TrimSpace(request.OrgID) == "" && strings.TrimSpace(request.ProjectID) == "" {
+			record, ok := authorizePAT(c, authService, "memory:read", "memory_stats_forbidden")
+			if !ok {
+				return
+			}
+			snapshot, err := service.Snapshot(ctx, memorystats.Filter{UserID: record.SubjectID})
+			if err != nil {
+				c.JSON(consts.StatusBadRequest, map[string]string{"error": "memory_stats_rejected", "message": err.Error()})
+				return
+			}
+			c.JSON(consts.StatusOK, snapshot)
+			return
+		}
 		permissions, ok := authorizeProjectScope(c, authService, tenantService, request.OrgID, request.ProjectID, "memory:read", "", "memory_stats_forbidden")
 		if !ok {
 			return

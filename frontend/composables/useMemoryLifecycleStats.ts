@@ -1,5 +1,6 @@
 export type ScoreBucket = { label: string; count: number }
 export type CountMap = Record<string, number>
+
 export type LifecycleStats = {
   archives: { total: number; by_status: CountMap }
   hot_memories: { total: number; by_status: CountMap }
@@ -25,14 +26,31 @@ export type LifecycleStats = {
   topics: { total: number; ready_to_compose: number; composed: number; open: number }
 }
 
-export function useMemoryLifecycleStats() {
+type LifecycleStatsOptions = { userScoped?: boolean }
+
+export function useMemoryLifecycleStats(options: LifecycleStatsOptions = {}) {
   const auth = useAuthStore()
   const context = useContextStore()
   const { request } = useApi()
+  const userScoped = options.userScoped === true
   const loading = ref(false)
   const error = ref('')
   const stats = ref<LifecycleStats | null>(null)
-  const hasProjectContext = computed(() => Boolean(context.orgId && context.projectId))
+  const hasProjectContext = computed(() => userScoped ? auth.isAuthenticated : Boolean(context.orgId && context.projectId))
+
+  async function loadProjectStats(orgId: string, projectId: string) {
+    return await request<LifecycleStats>('/memory/stats/lifecycle', {
+      method: 'POST',
+      body: { org_id: orgId, project_id: projectId }
+    })
+  }
+
+  async function loadUserStats() {
+    stats.value = await request<LifecycleStats>('/memory/stats/lifecycle', {
+      method: 'POST',
+      body: {}
+    })
+  }
 
   async function loadStats() {
     auth.initFromStorage()
@@ -44,10 +62,11 @@ export function useMemoryLifecycleStats() {
     loading.value = true
     error.value = ''
     try {
-      stats.value = await request<LifecycleStats>('/memory/stats/lifecycle', {
-        method: 'POST',
-        body: { org_id: context.orgId, project_id: context.projectId }
-      })
+      if (userScoped) {
+        await loadUserStats()
+      } else {
+        stats.value = await loadProjectStats(context.orgId, context.projectId)
+      }
     } catch (err: any) {
       error.value = err.message || '记忆生命周期统计加载失败'
       stats.value = null
@@ -56,7 +75,7 @@ export function useMemoryLifecycleStats() {
     }
   }
 
-  watch(() => [auth.token, context.orgId, context.projectId], () => {
+  watch(() => userScoped ? [auth.token] : [auth.token, context.orgId, context.projectId], () => {
     void loadStats()
   })
 

@@ -2,7 +2,7 @@
 const { request, baseURL } = useApi()
 const health = ref('checking')
 
-const { stats, loading, error: statsError, hasProjectContext, loadStats } = useMemoryLifecycleStats()
+const { stats, loading, error: statsError, loadStats } = useMemoryLifecycleStats({ userScoped: true })
 
 const assetRows = computed(() => [
   { label: '归档库', value: stats.value?.archives.total || 0, tone: 'bg-sky-600' },
@@ -33,7 +33,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <AppShell>
+  <AppShell :show-context-switcher="false">
     <section class="grid gap-6">
       <div class="flex flex-col gap-4 rounded-[2rem] bg-gradient-to-br from-orange-100 to-lime-100 p-6 sm:flex-row sm:items-end sm:justify-between">
         <div>
@@ -43,8 +43,12 @@ onMounted(async () => {
         </div>
         <HealthBadge :status="health" />
       </div>
-      <div class="rounded-3xl border border-stone-200 bg-white p-4 text-sm text-stone-600">API 地址：<code>{{ baseURL }}</code></div>
-      <p v-if="!hasProjectContext" class="rounded-2xl bg-amber-50 p-4 text-sm text-amber-800">请先选择组织和项目。</p>
+      <div class="rounded-3xl border border-stone-200 bg-white p-4 text-sm text-stone-600">
+        <span>总览口径：当前用户全部记忆</span>
+        <span class="mx-2 text-stone-300">/</span>
+        <span>API 地址：<code>{{ baseURL }}</code></span>
+      </div>
+      <p v-if="loading" class="rounded-2xl bg-stone-50 p-4 text-sm text-stone-600">正在汇总当前用户的全部记忆统计...</p>
       <p v-if="statsError" class="rounded-2xl bg-red-50 p-4 text-sm text-red-700">{{ statsError }}</p>
       <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <MetricTile label="归档库" :value="stats?.archives.total || 0" detail="长期沉淀" />

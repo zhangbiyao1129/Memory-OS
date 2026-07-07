@@ -25,10 +25,12 @@ func (s Service) Snapshot(ctx context.Context, filter Filter) (Snapshot, error) 
 	if strings.TrimSpace(filter.UserID) == "" {
 		return Snapshot{}, errors.New("user_id is required")
 	}
-	if strings.TrimSpace(filter.OrgID) == "" || strings.TrimSpace(filter.ProjectID) == "" {
-		return Snapshot{}, errors.New("org_id and project_id are required")
+	hasOrg := strings.TrimSpace(filter.OrgID) != ""
+	hasProject := strings.TrimSpace(filter.ProjectID) != ""
+	if hasOrg != hasProject {
+		return Snapshot{}, errors.New("org_id and project_id must be provided together")
 	}
-	if len(filter.PermissionLabels) == 0 {
+	if hasProject && len(filter.PermissionLabels) == 0 {
 		return Snapshot{}, errors.New("permission labels are required")
 	}
 	return s.repo.Snapshot(ctx, filter)

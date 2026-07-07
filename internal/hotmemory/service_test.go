@@ -135,7 +135,7 @@ func TestServiceSearchDoesNotReturnDeletedMemory(t *testing.T) {
 	}
 }
 
-func TestAgentSpecificMemoryDefaultsToAgentIsolation(t *testing.T) {
+func TestAgentSpecificMemoryIsVisibleAcrossAgentsAsSourceMetadata(t *testing.T) {
 	service := NewService(NewMemoryRepository())
 	if _, err := service.Upsert(UpsertRequest{OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: ScopeAgentSpecific, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "Codex prefers compact turn summaries", SourceType: SourceTurnEvent, SourceRef: "event_1", Confidence: 0.9}); err != nil {
 		t.Fatalf("Upsert() error = %v", err)
@@ -145,8 +145,32 @@ func TestAgentSpecificMemoryDefaultsToAgentIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Search() error = %v", err)
 	}
-	if len(results) != 0 {
-		t.Fatalf("cross-agent results len = %d, want 0", len(results))
+	if len(results) != 1 {
+		t.Fatalf("cross-agent results len = %d, want 1", len(results))
+	}
+	if results[0].Memory.AgentID != "codex" {
+		t.Fatalf("source agent = %q, want codex", results[0].Memory.AgentID)
+	}
+}
+
+func TestServiceDeduplicatesFactAcrossAgentsWithinProject(t *testing.T) {
+	service := NewService(NewMemoryRepository())
+	request := UpsertRequest{
+		OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: ScopeProject, Visibility: "project",
+		PermissionLabels: []string{"project:project_1:read"}, Fact: "Project stores memory by project context", SourceType: SourceTurnEvent, SourceRef: "event_1", Confidence: 0.8,
+	}
+	first, err := service.Upsert(request)
+	if err != nil {
+		t.Fatalf("first Upsert() error = %v", err)
+	}
+	request.AgentID = "claude"
+	request.SourceRef = "event_2"
+	second, err := service.Upsert(request)
+	if err != nil {
+		t.Fatalf("second Upsert() error = %v", err)
+	}
+	if first.MemoryID != second.MemoryID {
+		t.Fatalf("memory id mismatch across agents: %s != %s", first.MemoryID, second.MemoryID)
 	}
 }
 
@@ -348,8 +372,12 @@ func TestBuildFilterRejectsMissingPermissionAndAgentSpecificAgent(t *testing.T) 
 	if _, err := BuildFilter(FilterContext{UserID: "user_1", Scope: ScopeProject, Visibility: "project"}); err == nil {
 		t.Fatal("BuildFilter() error = nil, want missing permission labels")
 	}
-	if _, err := BuildFilter(FilterContext{UserID: "user_1", Scope: ScopeAgentSpecific, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}}); err == nil {
-		t.Fatal("BuildFilter() error = nil, want missing agent id")
+	filter, err := BuildFilter(FilterContext{UserID: "user_1", Scope: ScopeAgentSpecific, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}})
+	if err != nil {
+		t.Fatalf("BuildFilter() missing agent_id error = %v, want nil", err)
+	}
+	if _, ok := filter.Must["agent_id"]; ok {
+		t.Fatalf("BuildFilter() filter includes agent_id = %#v, want source metadata only", filter.Must["agent_id"])
 	}
 }
 

@@ -128,7 +128,7 @@ WITH upserted AS (
         permission_labels, fact, fact_hash, confidence, access_count, returned_count,
         used_count, last_accessed_at, last_returned_at, last_used_at, pinned, hot_score, status
     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
-    ON CONFLICT (org_id, project_id, user_id, agent_id, scope, fact_hash) WHERE deleted_at IS NULL
+    ON CONFLICT (org_id, project_id, user_id, scope, fact_hash) WHERE deleted_at IS NULL
     DO UPDATE SET
         confidence = GREATEST(hot_memories.confidence, EXCLUDED.confidence),
         hot_score = EXCLUDED.hot_score,

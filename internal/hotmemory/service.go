@@ -259,7 +259,7 @@ func recencyBonus(values ...time.Time) float64 {
 }
 
 func dedupeKey(memory Memory) string {
-	return strings.Join([]string{memory.OrgID, memory.ProjectID, memory.UserID, memory.AgentID, string(memory.Scope), memory.FactHash}, "|")
+	return strings.Join([]string{memory.OrgID, memory.ProjectID, memory.UserID, string(memory.Scope), memory.FactHash}, "|")
 }
 
 func normalizeFact(fact string) string {

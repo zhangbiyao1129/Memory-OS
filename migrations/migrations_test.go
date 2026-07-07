@@ -233,6 +233,7 @@ func TestHotMemoryMigrationContainsRequiredTablesAndIndexes(t *testing.T) {
 		"hot_score DOUBLE PRECISION NOT NULL DEFAULT 0",
 		"status TEXT NOT NULL DEFAULT 'active'",
 		"CREATE UNIQUE INDEX IF NOT EXISTS hot_memories_scope_fact_unique",
+		"ON hot_memories (org_id, project_id, user_id, scope, fact_hash)",
 		"CREATE INDEX IF NOT EXISTS hot_memories_scope_idx",
 		"CREATE INDEX IF NOT EXISTS hot_memories_status_score_idx",
 		"CREATE INDEX IF NOT EXISTS hot_memory_sources_memory_idx",

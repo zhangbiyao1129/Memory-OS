@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  aggregateLifecycleStats,
   buildContextSummary,
   buildSecretCommandTemplates,
   explainLifecycle,
@@ -70,5 +71,69 @@ describe('memory UX helpers', () => {
   it('keeps backend error messages readable', () => {
     expect(friendlyApiError({ data: { message: '项目加载失败' } })).toBe('项目加载失败')
     expect(friendlyApiError({ data: { error: '缺少权限' } })).toBe('缺少权限')
+  })
+
+  it('aggregates lifecycle stats across projects for overview', () => {
+    const stats = aggregateLifecycleStats([
+      {
+        archives: { total: 1, by_status: { active: 1 } },
+        hot_memories: { total: 3, by_status: { active: 3 } },
+        candidates: {
+          total: 5,
+          actionable_total: 2,
+          by_status: { pending: 1, in_compose_pool: 1, promoted_to_hot: 3 },
+          by_risk: { low: 5 },
+          hot_score_buckets: [{ label: 'high', count: 1 }],
+          compose_score_buckets: []
+        },
+        candidate_jobs: {
+          total: 4,
+          by_status: { done: 4 },
+          pending: 0,
+          running: 0,
+          failed: 0,
+          done: 4,
+          latest_error: '',
+          oldest_pending_at: '',
+          last_completed_at: '2026-07-07T01:00:00Z'
+        },
+        topics: { total: 1, ready_to_compose: 0, composed: 0, open: 1 }
+      },
+      {
+        archives: { total: 2, by_status: { active: 2 } },
+        hot_memories: { total: 4, by_status: { active: 4 } },
+        candidates: {
+          total: 6,
+          actionable_total: 3,
+          by_status: { pending: 2, in_compose_pool: 1, promoted_to_hot: 3 },
+          by_risk: { low: 4, medium: 2 },
+          hot_score_buckets: [{ label: 'high', count: 2 }],
+          compose_score_buckets: []
+        },
+        candidate_jobs: {
+          total: 5,
+          by_status: { done: 3, pending: 2 },
+          pending: 2,
+          running: 0,
+          failed: 0,
+          done: 3,
+          latest_error: '',
+          oldest_pending_at: '2026-07-07T02:00:00Z',
+          last_completed_at: '2026-07-07T03:00:00Z'
+        },
+        topics: { total: 2, ready_to_compose: 1, composed: 1, open: 0 }
+      }
+    ])
+
+    expect(stats.archives.total).toBe(3)
+    expect(stats.hot_memories.total).toBe(7)
+    expect(stats.candidates.total).toBe(11)
+    expect(stats.candidates.actionable_total).toBe(5)
+    expect(stats.candidates.by_status.pending).toBe(3)
+    expect(stats.candidates.by_status.in_compose_pool).toBe(2)
+    expect(stats.candidate_jobs?.total).toBe(9)
+    expect(stats.candidate_jobs?.pending).toBe(2)
+    expect(stats.topics.total).toBe(3)
+    expect(stats.topics.composed).toBe(1)
   })
 })

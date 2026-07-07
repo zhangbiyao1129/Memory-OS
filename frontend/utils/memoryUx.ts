@@ -86,3 +86,117 @@ export function friendlyApiError(error: any) {
   }
   return message
 }
+
+type CountMap = Record<string, number>
+type ScoreBucket = { label: string; count: number }
+type LifecycleStatsLike = {
+  archives: { total: number; by_status: CountMap }
+  hot_memories: { total: number; by_status: CountMap }
+  candidates: {
+    total: number
+    actionable_total?: number
+    by_status: CountMap
+    by_risk: CountMap
+    hot_score_buckets: ScoreBucket[]
+    compose_score_buckets: ScoreBucket[]
+  }
+  candidate_jobs?: {
+    total: number
+    by_status: CountMap
+    pending: number
+    running: number
+    failed: number
+    done: number
+    latest_error: string
+    oldest_pending_at: string
+    last_completed_at: string
+  }
+  topics: { total: number; ready_to_compose: number; composed: number; open: number }
+}
+
+function addCounts(target: CountMap, source: CountMap = {}) {
+  for (const [key, value] of Object.entries(source)) {
+    target[key] = (target[key] || 0) + value
+  }
+}
+
+function addBuckets(target: ScoreBucket[], source: ScoreBucket[] = []) {
+  const byLabel = new Map(target.map((bucket) => [bucket.label, bucket]))
+  for (const bucket of source) {
+    const existing = byLabel.get(bucket.label)
+    if (existing) {
+      existing.count += bucket.count
+    } else {
+      const next = { label: bucket.label, count: bucket.count }
+      target.push(next)
+      byLabel.set(next.label, next)
+    }
+  }
+}
+
+function emptyLifecycleStats(): LifecycleStatsLike {
+  return {
+    archives: { total: 0, by_status: {} },
+    hot_memories: { total: 0, by_status: {} },
+    candidates: {
+      total: 0,
+      actionable_total: 0,
+      by_status: {},
+      by_risk: {},
+      hot_score_buckets: [],
+      compose_score_buckets: []
+    },
+    candidate_jobs: {
+      total: 0,
+      by_status: {},
+      pending: 0,
+      running: 0,
+      failed: 0,
+      done: 0,
+      latest_error: '',
+      oldest_pending_at: '',
+      last_completed_at: ''
+    },
+    topics: { total: 0, ready_to_compose: 0, composed: 0, open: 0 }
+  }
+}
+
+export function aggregateLifecycleStats(items: LifecycleStatsLike[]) {
+  const out = emptyLifecycleStats()
+  for (const item of items) {
+    out.archives.total += item.archives.total || 0
+    addCounts(out.archives.by_status, item.archives.by_status)
+
+    out.hot_memories.total += item.hot_memories.total || 0
+    addCounts(out.hot_memories.by_status, item.hot_memories.by_status)
+
+    out.candidates.total += item.candidates.total || 0
+    out.candidates.actionable_total = (out.candidates.actionable_total || 0) + (item.candidates.actionable_total || 0)
+    addCounts(out.candidates.by_status, item.candidates.by_status)
+    addCounts(out.candidates.by_risk, item.candidates.by_risk)
+    addBuckets(out.candidates.hot_score_buckets, item.candidates.hot_score_buckets)
+    addBuckets(out.candidates.compose_score_buckets, item.candidates.compose_score_buckets)
+
+    if (item.candidate_jobs && out.candidate_jobs) {
+      out.candidate_jobs.total += item.candidate_jobs.total || 0
+      out.candidate_jobs.pending += item.candidate_jobs.pending || 0
+      out.candidate_jobs.running += item.candidate_jobs.running || 0
+      out.candidate_jobs.failed += item.candidate_jobs.failed || 0
+      out.candidate_jobs.done += item.candidate_jobs.done || 0
+      if (!out.candidate_jobs.latest_error && item.candidate_jobs.latest_error) out.candidate_jobs.latest_error = item.candidate_jobs.latest_error
+      if (!out.candidate_jobs.oldest_pending_at || item.candidate_jobs.oldest_pending_at < out.candidate_jobs.oldest_pending_at) {
+        out.candidate_jobs.oldest_pending_at = item.candidate_jobs.oldest_pending_at
+      }
+      if (item.candidate_jobs.last_completed_at > out.candidate_jobs.last_completed_at) {
+        out.candidate_jobs.last_completed_at = item.candidate_jobs.last_completed_at
+      }
+      addCounts(out.candidate_jobs.by_status, item.candidate_jobs.by_status)
+    }
+
+    out.topics.total += item.topics.total || 0
+    out.topics.ready_to_compose += item.topics.ready_to_compose || 0
+    out.topics.composed += item.topics.composed || 0
+    out.topics.open += item.topics.open || 0
+  }
+  return out
+}

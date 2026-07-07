@@ -32,9 +32,6 @@ func BuildFilter(ctx FilterContext) (PayloadFilter, error) {
 	if ctx.Visibility != "private" && len(ctx.PermissionLabels) == 0 {
 		return PayloadFilter{}, errors.New("permission labels are required")
 	}
-	if ctx.Scope == ScopeAgentSpecific && strings.TrimSpace(ctx.AgentID) == "" {
-		return PayloadFilter{}, errors.New("agent_id is required for agent_specific scope")
-	}
 	must := map[string][]string{
 		"doc_type":   {"hot_memory"},
 		"user_id":    {ctx.UserID},
@@ -47,9 +44,6 @@ func BuildFilter(ctx FilterContext) (PayloadFilter, error) {
 	}
 	if ctx.ProjectID != "" {
 		must["project_id"] = []string{ctx.ProjectID}
-	}
-	if ctx.AgentID != "" && ctx.Scope == ScopeAgentSpecific {
-		must["agent_id"] = []string{ctx.AgentID}
 	}
 	if len(ctx.PermissionLabels) > 0 {
 		must["permission_labels"] = append([]string(nil), ctx.PermissionLabels...)

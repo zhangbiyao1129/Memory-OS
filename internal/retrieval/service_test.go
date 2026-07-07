@@ -94,17 +94,17 @@ func TestSearchMergesHotMemoryAndArchiveWithTraceableSources(t *testing.T) {
 	if response.RerankDegraded {
 		t.Fatal("RerankDegraded = true, want false")
 	}
-	if len(response.Results) != 2 {
-		t.Fatalf("results len = %d, want 2", len(response.Results))
+	if len(response.Results) != 3 {
+		t.Fatalf("results len = %d, want 3", len(response.Results))
 	}
 	if response.Results[0].Source.Kind != SourceArchiveChunk || response.Results[0].Source.ChunkID != "chunk_1" {
 		t.Fatalf("top result source = %#v, want archive chunk_1", response.Results[0].Source)
 	}
-	if strings.Contains(response.Context, "chunk_old") || strings.Contains(response.Context, "Codex private") {
-		t.Fatalf("context leaked old generation or cross-agent memory: %s", response.Context)
+	if strings.Contains(response.Context, "chunk_old") || !strings.Contains(response.Context, "Codex private deploy shortcut") {
+		t.Fatalf("context should exclude old generation and include cross-agent source memory: %s", response.Context)
 	}
-	if log.Requests() != 1 || log.Results() != 2 {
-		t.Fatalf("access logs = %d/%d, want 1/2", log.Requests(), log.Results())
+	if log.Requests() != 1 || log.Results() != 3 {
+		t.Fatalf("access logs = %d/%d, want 1/3", log.Requests(), log.Results())
 	}
 	updated, err := hot.MarkUsed(shared.MemoryID)
 	if err != nil {

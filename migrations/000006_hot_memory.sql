@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS hot_memory_index_jobs (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS hot_memories_scope_fact_unique
-    ON hot_memories (org_id, project_id, user_id, agent_id, scope, fact_hash)
+    ON hot_memories (org_id, project_id, user_id, scope, fact_hash)
     WHERE deleted_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS hot_memories_scope_idx

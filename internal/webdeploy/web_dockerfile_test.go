@@ -470,6 +470,7 @@ func TestAppShellShowsFocusedNavigationAndContextSwitcher(t *testing.T) {
 		"['高级设置', '/settings']",
 		"当前记忆上下文",
 		"context.setAgent",
+		"showContextSwitcher",
 		"mobileNavOpen",
 		"aria-controls=\"app-mobile-nav\"",
 		"lg:hidden",
@@ -478,6 +479,35 @@ func TestAppShellShowsFocusedNavigationAndContextSwitcher(t *testing.T) {
 		if !strings.Contains(component, required) {
 			t.Fatalf("AppShell must explain automatic workspace context marker %q", required)
 		}
+	}
+}
+
+func TestOverviewUsesGlobalStatsAndHidesContextSelector(t *testing.T) {
+	pageContent, err := os.ReadFile("../../frontend/pages/index.vue")
+	if err != nil {
+		t.Fatalf("read overview page: %v", err)
+	}
+	composableContent, err := os.ReadFile("../../frontend/composables/useMemoryLifecycleStats.ts")
+	if err != nil {
+		t.Fatalf("read lifecycle stats composable: %v", err)
+	}
+	uxContent, err := os.ReadFile("../../frontend/utils/memoryUx.ts")
+	if err != nil {
+		t.Fatalf("read memory UX helper: %v", err)
+	}
+	combined := string(pageContent) + string(composableContent) + string(uxContent)
+	for _, required := range []string{
+		":show-context-switcher=\"false\"",
+		"userScoped: true",
+		"总览口径：当前用户全部记忆",
+		"body: {}",
+	} {
+		if !strings.Contains(combined, required) {
+			t.Fatalf("overview must use global aggregate stats and hide context selector marker %q", required)
+		}
+	}
+	if strings.Contains(string(pageContent), "请先选择组织和项目") {
+		t.Fatal("overview must not ask the user to select org/project")
 	}
 }
 

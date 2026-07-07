@@ -3,6 +3,7 @@ package memorystats
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -45,7 +46,14 @@ func (r *PGRepository) Snapshot(ctx context.Context, filter Filter) (Snapshot, e
 
 func (r *PGRepository) archiveStats(ctx context.Context, filter Filter) (AssetStats, error) {
 	stats := AssetStats{ByStatus: make(map[string]int64)}
-	rows, err := r.pool.Query(ctx, `SELECT status, count(*) FROM archives WHERE user_id=$1 AND org_id=$2 AND project_id=$3 GROUP BY status`, filter.UserID, filter.OrgID, filter.ProjectID)
+	query := `SELECT status, count(*) FROM archives WHERE user_id=$1`
+	args := []any{filter.UserID}
+	if projectScoped(filter) {
+		query += ` AND org_id=$2 AND project_id=$3`
+		args = append(args, filter.OrgID, filter.ProjectID)
+	}
+	query += ` GROUP BY status`
+	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
 		return stats, err
 	}
@@ -64,7 +72,14 @@ func (r *PGRepository) archiveStats(ctx context.Context, filter Filter) (AssetSt
 
 func (r *PGRepository) hotMemoryStats(ctx context.Context, filter Filter) (HotMemoryStats, error) {
 	stats := HotMemoryStats{ByStatus: make(map[string]int64)}
-	rows, err := r.pool.Query(ctx, `SELECT status, count(*) FROM hot_memories WHERE user_id=$1 AND org_id=$2 AND project_id=$3 AND scope='project' AND visibility='project' AND deleted_at IS NULL AND status <> 'deleted' AND permission_labels && $4::text[] GROUP BY status`, filter.UserID, filter.OrgID, filter.ProjectID, filter.PermissionLabels)
+	query := `SELECT status, count(*) FROM hot_memories WHERE user_id=$1 AND deleted_at IS NULL AND status <> 'deleted'`
+	args := []any{filter.UserID}
+	if projectScoped(filter) {
+		query += ` AND org_id=$2 AND project_id=$3 AND permission_labels && $4::text[]`
+		args = append(args, filter.OrgID, filter.ProjectID, filter.PermissionLabels)
+	}
+	query += ` GROUP BY status`
+	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
 		return stats, err
 	}
@@ -85,7 +100,7 @@ func (r *PGRepository) candidateStats(ctx context.Context, filter Filter) (Candi
 	stats := CandidateStats{ByStatus: make(map[string]int64), ByRisk: make(map[string]int64)}
 
 	// 按状态统计
-	rows, err := r.pool.Query(ctx, `SELECT status, count(*) FROM candidate_memories WHERE org_id=$1 AND project_id=$2 GROUP BY status`, filter.OrgID, filter.ProjectID)
+	rows, err := r.pool.Query(ctx, scopedCandidateQuery(filter, `SELECT status, count(*) FROM candidate_memories`, `GROUP BY status`), scopedCandidateArgs(filter)...)
 	if err != nil {
 		return stats, err
 	}
@@ -103,7 +118,7 @@ func (r *PGRepository) candidateStats(ctx context.Context, filter Filter) (Candi
 	}
 
 	// 按风险等级统计
-	rows, err = r.pool.Query(ctx, `SELECT risk_level, count(*) FROM candidate_memories WHERE org_id=$1 AND project_id=$2 GROUP BY risk_level`, filter.OrgID, filter.ProjectID)
+	rows, err = r.pool.Query(ctx, scopedCandidateQuery(filter, `SELECT risk_level, count(*) FROM candidate_memories`, `GROUP BY risk_level`), scopedCandidateArgs(filter)...)
 	if err != nil {
 		return stats, err
 	}
@@ -150,10 +165,10 @@ func (r *PGRepository) scoreBuckets(ctx context.Context, filter Filter, scoreKey
 	  count(*) FILTER (WHERE COALESCE((scores->>'` + scoreKey + `')::double precision, 0) >= 0.5 AND COALESCE((scores->>'` + scoreKey + `')::double precision, 0) < 0.75),
 	  count(*) FILTER (WHERE COALESCE((scores->>'` + scoreKey + `')::double precision, 0) >= 0.75)
 	FROM candidate_memories
-	WHERE org_id=$1 AND project_id=$2`
+	WHERE ` + candidateWhereClause(filter)
 
 	var c1, c2, c3, c4 int64
-	err := r.pool.QueryRow(ctx, query, filter.OrgID, filter.ProjectID).Scan(&c1, &c2, &c3, &c4)
+	err := r.pool.QueryRow(ctx, query, scopedCandidateArgs(filter)...).Scan(&c1, &c2, &c3, &c4)
 	if err != nil {
 		return err
 	}
@@ -171,7 +186,7 @@ func (r *PGRepository) candidateJobStats(ctx context.Context, filter Filter) (Ca
 	stats := CandidateJobStats{ByStatus: make(map[string]int64)}
 
 	// 按状态统计
-	rows, err := r.pool.Query(ctx, `SELECT status, count(*) FROM candidate_memory_jobs WHERE org_id=$1 AND project_id=$2 GROUP BY status`, filter.OrgID, filter.ProjectID)
+	rows, err := r.pool.Query(ctx, scopedCandidateJobQuery(filter, `SELECT status, count(*) FROM candidate_memory_jobs`, `GROUP BY status`), scopedCandidateJobArgs(filter)...)
 	if err != nil {
 		return stats, err
 	}
@@ -197,7 +212,7 @@ func (r *PGRepository) candidateJobStats(ctx context.Context, filter Filter) (Ca
 
 	// 最近错误(截断到500字符,不含 secret)
 	var latestError string
-	err = r.pool.QueryRow(ctx, `SELECT last_error FROM candidate_memory_jobs WHERE org_id=$1 AND project_id=$2 AND last_error <> '' ORDER BY updated_at DESC LIMIT 1`, filter.OrgID, filter.ProjectID).Scan(&latestError)
+	err = r.pool.QueryRow(ctx, scopedCandidateJobQuery(filter, `SELECT last_error FROM candidate_memory_jobs`, `AND last_error <> '' ORDER BY updated_at DESC LIMIT 1`), scopedCandidateJobArgs(filter)...).Scan(&latestError)
 	if err == nil {
 		// 截断到 500 字符
 		if len(latestError) > 500 {
@@ -210,7 +225,7 @@ func (r *PGRepository) candidateJobStats(ctx context.Context, filter Filter) (Ca
 
 	// 最早 pending 时间
 	var oldestPendingAt interface{}
-	err = r.pool.QueryRow(ctx, `SELECT MIN(created_at) FROM candidate_memory_jobs WHERE org_id=$1 AND project_id=$2 AND status='pending'`, filter.OrgID, filter.ProjectID).Scan(&oldestPendingAt)
+	err = r.pool.QueryRow(ctx, scopedCandidateJobQuery(filter, `SELECT MIN(created_at) FROM candidate_memory_jobs`, `AND status='pending'`), scopedCandidateJobArgs(filter)...).Scan(&oldestPendingAt)
 	if err == nil && oldestPendingAt != nil {
 		if t, ok := oldestPendingAt.(interface{ Format(string) string }); ok {
 			stats.OldestPendingAt = t.Format("2006-01-02T15:04:05Z07:00")
@@ -221,7 +236,7 @@ func (r *PGRepository) candidateJobStats(ctx context.Context, filter Filter) (Ca
 
 	// 最近完成时间
 	var lastCompletedAt interface{}
-	err = r.pool.QueryRow(ctx, `SELECT MAX(completed_at) FROM candidate_memory_jobs WHERE org_id=$1 AND project_id=$2 AND status='done'`, filter.OrgID, filter.ProjectID).Scan(&lastCompletedAt)
+	err = r.pool.QueryRow(ctx, scopedCandidateJobQuery(filter, `SELECT MAX(completed_at) FROM candidate_memory_jobs`, `AND status='done'`), scopedCandidateJobArgs(filter)...).Scan(&lastCompletedAt)
 	if err == nil && lastCompletedAt != nil {
 		if t, ok := lastCompletedAt.(interface{ Format(string) string }); ok {
 			stats.LastCompletedAt = t.Format("2006-01-02T15:04:05Z07:00")
@@ -235,15 +250,81 @@ func (r *PGRepository) candidateJobStats(ctx context.Context, filter Filter) (Ca
 
 func (r *PGRepository) topicStats(ctx context.Context, filter Filter) (TopicStats, error) {
 	var stats TopicStats
-	err := r.pool.QueryRow(ctx, `SELECT
+	query := `SELECT
 	  count(*),
 	  count(*) FILTER (WHERE composed_archive_id = '' AND ready_to_compose),
 	  count(*) FILTER (WHERE composed_archive_id <> ''),
 	  count(*) FILTER (WHERE composed_archive_id = '' AND NOT ready_to_compose)
 	FROM topic_memory_states
-	WHERE org_id=$1 AND project_id=$2`, filter.OrgID, filter.ProjectID).Scan(&stats.Total, &stats.ReadyToCompose, &stats.Composed, &stats.Open)
+	WHERE ` + topicWhereClause(filter)
+	err := r.pool.QueryRow(ctx, query, topicArgs(filter)...).Scan(&stats.Total, &stats.ReadyToCompose, &stats.Composed, &stats.Open)
 	if err != nil {
 		return stats, err
 	}
 	return stats, nil
+}
+
+func projectScoped(filter Filter) bool {
+	return strings.TrimSpace(filter.OrgID) != "" && strings.TrimSpace(filter.ProjectID) != ""
+}
+
+func candidateWhereClause(filter Filter) string {
+	if projectScoped(filter) {
+		return "org_id=$1 AND project_id=$2"
+	}
+	return "user_id=$1"
+}
+
+func scopedCandidateArgs(filter Filter) []any {
+	if projectScoped(filter) {
+		return []any{filter.OrgID, filter.ProjectID}
+	}
+	return []any{filter.UserID}
+}
+
+func scopedCandidateQuery(filter Filter, prefix, suffix string) string {
+	return prefix + " WHERE " + candidateWhereClause(filter) + " " + suffix
+}
+
+func candidateJobWhereClause(filter Filter) string {
+	if projectScoped(filter) {
+		return "org_id=$1 AND project_id=$2"
+	}
+	return `EXISTS (
+		SELECT 1 FROM turn_events
+		WHERE turn_events.event_id = candidate_memory_jobs.source_event_id
+		  AND turn_events.user_id = $1
+	)`
+}
+
+func scopedCandidateJobArgs(filter Filter) []any {
+	if projectScoped(filter) {
+		return []any{filter.OrgID, filter.ProjectID}
+	}
+	return []any{filter.UserID}
+}
+
+func scopedCandidateJobQuery(filter Filter, prefix, suffix string) string {
+	return prefix + " WHERE " + candidateJobWhereClause(filter) + " " + suffix
+}
+
+func topicWhereClause(filter Filter) string {
+	if projectScoped(filter) {
+		return "org_id=$1 AND project_id=$2"
+	}
+	return `EXISTS (
+		SELECT 1 FROM candidate_memories
+		WHERE candidate_memories.org_id = topic_memory_states.org_id
+		  AND candidate_memories.project_id = topic_memory_states.project_id
+		  AND candidate_memories.source_key = topic_memory_states.source_key
+		  AND candidate_memories.thread_id = topic_memory_states.thread_id
+		  AND candidate_memories.user_id = $1
+	)`
+}
+
+func topicArgs(filter Filter) []any {
+	if projectScoped(filter) {
+		return []any{filter.OrgID, filter.ProjectID}
+	}
+	return []any{filter.UserID}
 }
