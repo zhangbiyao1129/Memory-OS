@@ -1095,7 +1095,7 @@ func TestComposePassesBackendBuildInfoArgs(t *testing.T) {
 	}
 	compose := string(content)
 	for _, marker := range []string{
-		"BUILD_VERSION: ${BUILD_VERSION:-0.4.0-dev}",
+		"BUILD_VERSION: ${BUILD_VERSION:-0.9.0-dev}",
 		"BUILD_COMMIT: ${BUILD_COMMIT:-unknown}",
 		"BUILD_TIME: ${BUILD_TIME:-unknown}",
 		"BUILD_DIRTY: ${BUILD_DIRTY:-unknown}",

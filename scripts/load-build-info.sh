@@ -71,7 +71,7 @@ memory_os_load_build_info_from_git() {
 }
 
 memory_os_default_build_info() {
-  export BUILD_VERSION="${BUILD_VERSION:-0.4.0-dev}"
+  export BUILD_VERSION="${BUILD_VERSION:-0.9.0-dev}"
   export BUILD_COMMIT="${BUILD_COMMIT:-unknown}"
   export BUILD_TIME="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
   export BUILD_DIRTY="${BUILD_DIRTY:-unknown}"

@@ -97,7 +97,7 @@ fi
 cat > "$FINAL_REPORT_PATH" <<REPORT
 # Memory OS Final Delivery Report (Draft)
 
-> 说明：本报告是当前交付证据的汇总草稿，不自动等同于“v0.4 生产级完全体已完成”。只有当本报告中的未闭环项被逐一关闭后，才能声明最终交付完成。
+> 说明：本报告是当前交付证据的汇总草稿，不自动等同于“v0.9 生产级完全体已完成”。只有当本报告中的未闭环项被逐一关闭后，才能声明最终交付完成。
 
 ## Runtime Endpoints
 

@@ -1,6 +1,6 @@
 FROM golang:1.25-bookworm AS build
 WORKDIR /src
-ARG BUILD_VERSION=0.4.0-dev
+ARG BUILD_VERSION=0.9.0-dev
 ARG BUILD_COMMIT=unknown
 ARG BUILD_TIME=unknown
 ARG BUILD_DIRTY=unknown

@@ -2,7 +2,7 @@ package buildinfo
 
 // 这些变量由 Dockerfile 的 ldflags 注入；本地 go test 使用安全默认值。
 var (
-	Version   = "0.4.0-dev"
+	Version   = "0.9.0-dev"
 	Commit    = "unknown"
 	BuildTime = "unknown"
 	Dirty     = "unknown"

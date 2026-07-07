@@ -38,7 +38,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/backend/Dockerfile.llm-mock
-    image: memory-llm-mock:0.4
+    image: memory-llm-mock:0.9
     environment:
       LLM_MOCK_PORT: 11434
     ports:
@@ -49,7 +49,7 @@ services:
       context: ..
       dockerfile: deploy/backend/Dockerfile.api
       args:
-        BUILD_VERSION: ${BUILD_VERSION:-0.4.0-dev}
+        BUILD_VERSION: ${BUILD_VERSION:-0.9.0-dev}
         BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
         BUILD_DIRTY: ${BUILD_DIRTY:-unknown}
@@ -87,7 +87,7 @@ services:
       context: ..
       dockerfile: deploy/backend/Dockerfile.worker
       args:
-        BUILD_VERSION: ${BUILD_VERSION:-0.4.0-dev}
+        BUILD_VERSION: ${BUILD_VERSION:-0.9.0-dev}
         BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
         BUILD_DIRTY: ${BUILD_DIRTY:-unknown}
@@ -121,7 +121,7 @@ services:
       context: ..
       dockerfile: deploy/backend/Dockerfile.mcp
       args:
-        BUILD_VERSION: ${BUILD_VERSION:-0.4.0-dev}
+        BUILD_VERSION: ${BUILD_VERSION:-0.9.0-dev}
         BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
         BUILD_DIRTY: ${BUILD_DIRTY:-unknown}

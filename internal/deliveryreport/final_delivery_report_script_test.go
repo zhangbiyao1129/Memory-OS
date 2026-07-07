@@ -48,7 +48,7 @@ func TestFinalDeliveryReportScriptWritesDraftReport(t *testing.T) {
 		"PERMISSION_ISOLATION_BUNDLE_PATH="+permissionBundlePath,
 		"CHECKLIST_AUDIT_PATH="+checklistAuditPath,
 		"RUN_RUNTIME_CHECKS=1",
-		"VERSION_CMD=printf '{\"version\":\"0.4.0-dev\"}'",
+		"VERSION_CMD=printf '{\"version\":\"0.9.0-dev\"}'",
 		"HEALTHZ_CMD=printf '{\"status\":\"ok\"}'",
 		"OPENAPI_COUNT_CMD=printf '50'",
 	)
@@ -76,7 +76,7 @@ func TestFinalDeliveryReportScriptWritesDraftReport(t *testing.T) {
 		"Production permission isolation bundle",
 		"/search-test",
 		"RUN_RUNTIME_CHECKS=1 make final-delivery-report",
-		"{\"version\":\"0.4.0-dev\"}",
+		"{\"version\":\"0.9.0-dev\"}",
 		"{\"status\":\"ok\"}",
 		"50",
 	} {

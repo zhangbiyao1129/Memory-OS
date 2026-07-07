@@ -15,7 +15,7 @@ memory_os_write_build_info() {
     return 0
   fi
 
-  local build_version="${BUILD_VERSION:-0.4.0-dev}"
+  local build_version="${BUILD_VERSION:-0.9.0-dev}"
   local build_commit="${BUILD_COMMIT:-unknown}"
   local build_dirty="${BUILD_DIRTY:-unknown}"
   local build_time="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
