@@ -11,9 +11,23 @@ const error = ref('')
 const success = ref('')
 const result = ref<any>(null)
 
-const hasContext = computed(() => Boolean(context.orgId && context.projectId))
 const selectedOrg = computed(() => context.orgs.find((org) => org.org_id === context.orgId))
 const selectedProject = computed(() => context.projects.find((project) => project.project_id === context.projectId))
+const searchProjectScopes = computed(() => {
+  const projects = context.projects.filter((project) => !context.orgId || project.org_id === context.orgId)
+  if (projects.length > 0) return projects
+  if (context.projectId) {
+    return [{
+      project_id: context.projectId,
+      org_id: context.orgId,
+      name: selectedProject.value?.name || context.projectId,
+      slug: selectedProject.value?.slug || '',
+      source_key: selectedProject.value?.source_key
+    }]
+  }
+  return []
+})
+const hasContext = computed(() => Boolean(context.orgId && searchProjectScopes.value.length > 0))
 const allResults = computed(() => result.value?.results || [])
 const sourceRefs = computed(() => allResults.value.map((item: any) => item.source).filter(Boolean))
 
@@ -30,6 +44,38 @@ function canMarkUsed(item: any) {
   return item?.source?.kind === 'hot_memory' && Boolean(item?.source?.memory_id)
 }
 
+function mergeSearchResponses(requestID: string, responses: any[]) {
+  const mergedResults = responses
+    .flatMap((entry: any) => (entry.response?.results || []).map((item: any) => ({
+      ...item,
+      project: {
+        project_id: entry.project.project_id,
+        name: entry.project.name,
+        source_key: entry.project.source_key
+      }
+    })))
+    .sort((left: any, right: any) => Number(right.score || 0) - Number(left.score || 0))
+  const contextText = responses
+    .filter((entry: any) => entry.response?.context)
+    .map((entry: any) => `[${entry.project.name || entry.project.project_id}]\n${entry.response.context}`)
+    .join('\n')
+  return {
+    request_id: requestID,
+    context: contextText,
+    results: mergedResults,
+    rerank_degraded: responses.some((entry: any) => Boolean(entry.response?.rerank_degraded)),
+    access_log_count: responses.reduce((total: number, entry: any) => total + Number(entry.response?.access_log_count || 0), 0),
+    marked_used_count: responses.reduce((total: number, entry: any) => total + Number(entry.response?.marked_used_count || 0), 0),
+    project_count: responses.length,
+    project_results: responses.map((entry: any) => ({
+      project_id: entry.project.project_id,
+      name: entry.project.name,
+      results: entry.response?.results?.length || 0,
+      rerank_degraded: Boolean(entry.response?.rerank_degraded)
+    }))
+  }
+}
+
 onMounted(() => {
   auth.initFromStorage()
   context.initFromStorage()
@@ -43,7 +89,7 @@ async function runSearch() {
     return
   }
   if (!hasContext.value) {
-    error.value = '请先选择组织和项目。'
+    error.value = '请先加载工作区项目。'
     return
   }
 
@@ -52,17 +98,22 @@ async function runSearch() {
   success.value = ''
   result.value = null
   try {
-    result.value = await request('/memory/search', {
-      method: 'POST',
-      body: {
-        request_id: `web-search-${Date.now()}`,
-        query: query.value,
-        actor: { user_id: '', org_id: context.orgId, project_id: context.projectId, agent_id: context.agentId },
-        scope: 'project',
-        visibility: 'project',
-        max_context_bytes: 512
-      }
-    })
+    const requestID = `web-search-${Date.now()}`
+    const responses = await Promise.all(searchProjectScopes.value.map(async (project) => ({
+      project,
+      response: await request('/memory/search', {
+        method: 'POST',
+        body: {
+          request_id: `${requestID}-${project.project_id}`,
+          query: query.value,
+          actor: { user_id: '', org_id: context.orgId, project_id: project.project_id, agent_id: context.agentId },
+          scope: 'project',
+          visibility: 'project',
+          max_context_bytes: 512
+        }
+      })
+    })))
+    result.value = mergeSearchResponses(requestID, responses)
   } catch (err: any) {
     error.value = err.message || '检索失败'
   } finally {
@@ -108,10 +159,9 @@ async function markUsed(item: any) {
         <div v-if="context.orgId" class="mt-1 break-all text-xs text-stone-500">{{ context.orgId }}</div>
       </div>
       <div class="rounded-2xl border bg-white p-4 text-sm">
-        <div class="font-bold text-stone-500">项目</div>
-        <div class="mt-1 break-all font-bold text-stone-950">{{ selectedProject?.name || context.projectId || '未选择' }}</div>
-        <div v-if="selectedProject?.source_key" class="mt-1 break-all text-xs text-stone-500">{{ selectedProject.source_key }}</div>
-        <div v-if="context.projectId" class="mt-1 break-all text-xs text-stone-500">{{ context.projectId }}</div>
+        <div class="font-bold text-stone-500">检索范围</div>
+        <div class="mt-1 break-all font-bold text-stone-950">全部项目</div>
+        <div class="mt-1 break-all text-xs text-stone-500">{{ searchProjectScopes.length }} 个项目</div>
       </div>
       <div class="rounded-2xl border bg-white p-4 text-sm">
         <div class="font-bold text-stone-500">Agent</div>
@@ -123,7 +173,7 @@ async function markUsed(item: any) {
       <textarea v-model="query" class="min-h-28 w-full rounded-2xl border p-4" placeholder="输入你想找回的项目事实、决策或上下文" />
       <button class="mt-3 rounded-2xl bg-stone-950 px-4 py-2 font-bold text-white disabled:cursor-not-allowed disabled:bg-stone-400" :disabled="loading || !auth.isAuthenticated || !hasContext" @click="runSearch">{{ loading ? '检索中...' : '运行检索' }}</button>
       <p v-if="!auth.isAuthenticated" class="mt-3 rounded-2xl bg-amber-50 p-3 text-sm text-amber-800">请先登录后再检索。</p>
-      <p v-else-if="!hasContext" class="mt-3 rounded-2xl bg-amber-50 p-3 text-sm text-amber-800">请先选择组织和项目。</p>
+      <p v-else-if="!hasContext" class="mt-3 rounded-2xl bg-amber-50 p-3 text-sm text-amber-800">请先加载工作区项目。</p>
       <p v-if="error" class="mt-3 rounded-2xl bg-red-50 p-3 text-sm text-red-700">{{ error }}</p>
       <p v-if="success" class="mt-3 rounded-2xl bg-emerald-50 p-3 text-sm text-emerald-800">{{ success }}</p>
     </div>
@@ -147,6 +197,7 @@ async function markUsed(item: any) {
             <div>
               <div class="flex flex-wrap items-center gap-2">
                 <span class="rounded-full bg-orange-100 px-3 py-1 text-xs font-black text-orange-900">{{ resultTitle(item) }}</span>
+                <span v-if="item.project?.name" class="rounded-full bg-stone-100 px-3 py-1 text-xs font-bold text-stone-600">{{ item.project.name }}</span>
                 <span class="rounded-full bg-stone-100 px-3 py-1 text-xs font-bold text-stone-600">score {{ Number(item.score || 0).toFixed(4) }}</span>
               </div>
               <p class="mt-3 whitespace-pre-wrap text-stone-800">{{ item.text || '后端未返回文本。' }}</p>
