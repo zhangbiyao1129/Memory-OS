@@ -5,6 +5,7 @@ import {
   buildSecretCommandTemplates,
   explainLifecycle,
   explainSearchHit,
+  formatCandidateMaintenanceSummary,
   friendlyApiError
 } from '../utils/memoryUx'
 
@@ -135,5 +136,20 @@ describe('memory UX helpers', () => {
     expect(stats.candidate_jobs?.pending).toBe(2)
     expect(stats.topics.total).toBe(3)
     expect(stats.topics.composed).toBe(1)
+  })
+
+  it('formats candidate maintenance results from one shared summary', () => {
+    expect(
+      formatCandidateMaintenanceSummary({
+        processed: 4,
+        discarded: 0,
+        kept: 1,
+        composed: 8
+      })
+    ).toBe('清洗完成：处理 4 条，丢弃 0 条，保留 1 条，沉淀 8 条。')
+
+    expect(formatCandidateMaintenanceSummary({ processed: undefined, discarded: Number.NaN, kept: 1, composed: 0 })).toBe(
+      '清洗完成：处理 0 条，丢弃 0 条，保留 1 条，沉淀 0 条。'
+    )
   })
 })

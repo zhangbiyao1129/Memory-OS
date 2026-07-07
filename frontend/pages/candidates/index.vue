@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { formatCandidateMaintenanceSummary } from '~/utils/memoryUx'
+
 const auth = useAuthStore()
 const context = useContextStore()
 const { request } = useApi()
@@ -177,14 +179,14 @@ function startPolling(runID?: string) {
       if (status.status === 'done') {
         stopPolling()
         clearRunID()
-        success.value = `清洗完成：处理 ${n(status.processed)} 条，丢弃 ${n(status.discarded)} 条，保留 ${n(status.kept)} 条，沉淀 ${n(status.composed)} 条。`
+        success.value = ''
         cleaning.value = false
         await loadCandidates()
         await loadLifecycleStats()
       } else if (status.status === 'failed') {
         stopPolling()
         clearRunID()
-        error.value = status.last_error || '清洗失败'
+        error.value = ''
         cleaning.value = false
       }
     } catch {
@@ -221,7 +223,8 @@ async function restoreMaintenanceTask() {
       // 任务已完成,清理
       clearRunID()
       if (savedRunID) {
-        success.value = `清洗完成：处理 ${n(status.processed)} 条，丢弃 ${n(status.discarded)} 条，保留 ${n(status.kept)} 条，沉淀 ${n(status.composed)} 条。`
+        maintenanceStatus.value = status
+        success.value = ''
       }
     } else {
       clearRunID()
@@ -338,7 +341,7 @@ async function runMaintenance() {
     } else if (result && result.status === 'done') {
       // 已有完成的任务直接返回
       cleaning.value = false
-      success.value = `清洗完成：处理 ${n(result.processed)} 条，丢弃 ${n(result.discarded)} 条，保留 ${n(result.kept)} 条，沉淀 ${n(result.composed)} 条。`
+      maintenanceStatus.value = result
       await loadCandidates()
     } else {
       cleaning.value = false
@@ -379,8 +382,8 @@ onBeforeUnmount(() => {
 
     <!-- 筛选 -->
     <section class="mt-6 rounded-3xl border bg-white p-5">
-      <div class="grid gap-3 sm:grid-cols-4">
-        <label class="text-sm font-bold text-stone-600">
+      <div class="flex flex-col gap-3 lg:flex-row lg:items-end">
+        <label class="min-w-0 flex-1 text-sm font-bold text-stone-600">
           状态
           <select v-model="statusFilter" class="mt-2 w-full rounded-2xl border p-3 text-sm">
             <option value="">全部</option>
@@ -391,7 +394,7 @@ onBeforeUnmount(() => {
             <option value="composed">已沉淀</option>
           </select>
         </label>
-        <label class="text-sm font-bold text-stone-600">
+        <label class="min-w-0 flex-1 text-sm font-bold text-stone-600">
           风险
           <select v-model="riskFilter" class="mt-2 w-full rounded-2xl border p-3 text-sm">
             <option value="">全部</option>
@@ -400,60 +403,44 @@ onBeforeUnmount(() => {
             <option value="high">高</option>
           </select>
         </label>
-        <label class="text-sm font-bold text-stone-600">
+        <label class="min-w-0 flex-[1.4] text-sm font-bold text-stone-600">
           source_key
           <input v-model="sourceKeyFilter" class="mt-2 w-full rounded-2xl border p-3 text-sm" placeholder="筛选 source_key" @keyup.enter="loadCandidates">
         </label>
-        <label class="text-sm font-bold text-stone-600">
+        <label class="min-w-0 flex-[1.4] text-sm font-bold text-stone-600">
           thread_id
           <input v-model="threadIdFilter" class="mt-2 w-full rounded-2xl border p-3 text-sm" placeholder="筛选 thread_id" @keyup.enter="loadCandidates">
         </label>
+        <button class="rounded-2xl border px-4 py-3 text-sm font-bold text-stone-700 lg:w-auto" :disabled="loading" @click="loadCandidates">应用筛选</button>
       </div>
-    </section>
-
-    <!-- 主题沉淀 -->
-    <section class="mt-4 rounded-3xl border bg-white p-5">
-      <h3 class="text-lg font-black">主题沉淀</h3>
-      <div class="mt-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto_auto]">
-        <label class="text-sm font-bold text-stone-600">
-          source_key
-          <input v-model="composeSourceKey" class="mt-2 w-full rounded-2xl border p-3 text-sm" placeholder="主题 source_key">
-        </label>
-        <label class="text-sm font-bold text-stone-600">
-          thread_id（可选）
-          <input v-model="composeThreadId" class="mt-2 w-full rounded-2xl border p-3 text-sm" placeholder="主题 thread_id">
-        </label>
-        <label class="flex items-end gap-2 text-sm font-bold text-stone-600">
-          <input v-model="composeForce" type="checkbox" class="h-5 w-5 rounded border-stone-300">
-          强制沉淀
-        </label>
-        <button class="self-end rounded-2xl bg-stone-950 px-4 py-3 font-bold text-white disabled:cursor-not-allowed disabled:bg-stone-400" :disabled="composing || !hasProjectContext" @click="composeTopic">
-          {{ composing ? '沉淀中...' : '沉淀' }}
-        </button>
-      </div>
-      <p v-if="!hasProjectContext" class="mt-3 rounded-2xl bg-amber-50 p-3 text-sm text-amber-800">请先选择组织和项目。</p>
       <p v-if="error" class="mt-3 rounded-2xl bg-red-50 p-3 text-sm text-red-700">{{ error }}</p>
       <p v-if="success" class="mt-3 rounded-2xl bg-emerald-50 p-3 text-sm text-emerald-700">{{ success }}</p>
     </section>
 
-    <!-- AI 清洗整合 -->
+    <!-- 维护工具 -->
     <section class="mt-4 rounded-3xl border bg-white p-5">
-      <h3 class="text-lg font-black">AI 清洗整合</h3>
-      <p class="mt-2 text-sm text-stone-600">AI 自动丢弃噪声、合并重复、保留高价值候选，并触发现有沉淀。</p>
-      <div class="mt-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto]">
-        <label class="text-sm font-bold text-stone-600">
-          source_key（可选）
-          <input v-model="cleanSourceKey" class="mt-2 w-full rounded-2xl border p-3 text-sm" placeholder="筛选 source_key">
-        </label>
-        <label class="text-sm font-bold text-stone-600">
-          thread_id（可选）
-          <input v-model="cleanThreadId" class="mt-2 w-full rounded-2xl border p-3 text-sm" placeholder="筛选 thread_id">
-        </label>
-        <button class="self-end rounded-2xl bg-orange-600 px-4 py-3 font-bold text-white disabled:cursor-not-allowed disabled:bg-stone-400" :disabled="cleaning || !hasProjectContext" @click="runMaintenance">
+      <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+        <div>
+          <h3 class="text-lg font-black">候选维护</h3>
+          <p class="mt-1 text-sm text-stone-600">自动清洗为主，指定主题沉淀作为高级操作。</p>
+        </div>
+        <button class="rounded-2xl bg-orange-600 px-4 py-3 text-sm font-bold text-white disabled:cursor-not-allowed disabled:bg-stone-400" :disabled="cleaning || !hasProjectContext" @click="runMaintenance">
           {{ cleaning ? '清洗中...' : 'AI 清洗' }}
         </button>
       </div>
+
       <p v-if="!hasProjectContext" class="mt-3 rounded-2xl bg-amber-50 p-3 text-sm text-amber-800">请先选择组织和项目。</p>
+
+      <div class="mt-4 grid gap-3 md:grid-cols-[1fr_1fr]">
+        <label class="text-sm font-bold text-stone-600">
+          清洗 source_key（可选）
+          <input v-model="cleanSourceKey" class="mt-2 w-full rounded-2xl border p-3 text-sm" placeholder="筛选 source_key">
+        </label>
+        <label class="text-sm font-bold text-stone-600">
+          清洗 thread_id（可选）
+          <input v-model="cleanThreadId" class="mt-2 w-full rounded-2xl border p-3 text-sm" placeholder="筛选 thread_id">
+        </label>
+      </div>
 
       <!-- 进度条 -->
       <div v-if="maintenanceStatus && maintenanceStatus.active" class="mt-4 rounded-2xl bg-orange-50 p-4">
@@ -478,9 +465,30 @@ onBeforeUnmount(() => {
       <!-- 完成统计 -->
       <div v-if="maintenanceStatus && maintenanceStatus.status === 'done' && !cleaning" class="mt-4 rounded-2xl bg-emerald-50 p-4">
         <p class="text-sm font-bold text-emerald-900">
-          清洗完成：处理 {{ n(maintenanceStatus.processed) }} 条，丢弃 {{ n(maintenanceStatus.discarded) }} 条，保留 {{ n(maintenanceStatus.kept) }} 条，沉淀 {{ n(maintenanceStatus.composed) }} 条。
+          {{ formatCandidateMaintenanceSummary(maintenanceStatus) }}
         </p>
       </div>
+
+      <details class="mt-4 rounded-2xl border bg-stone-50 p-4">
+        <summary class="cursor-pointer text-sm font-black text-stone-800">指定主题沉淀</summary>
+        <div class="mt-3 grid gap-3 md:grid-cols-[1fr_1fr_auto_auto]">
+          <label class="text-sm font-bold text-stone-600">
+            source_key
+            <input v-model="composeSourceKey" class="mt-2 w-full rounded-2xl border bg-white p-3 text-sm" placeholder="主题 source_key">
+          </label>
+          <label class="text-sm font-bold text-stone-600">
+            thread_id（可选）
+            <input v-model="composeThreadId" class="mt-2 w-full rounded-2xl border bg-white p-3 text-sm" placeholder="主题 thread_id">
+          </label>
+          <label class="flex items-end gap-2 text-sm font-bold text-stone-600">
+            <input v-model="composeForce" type="checkbox" class="h-5 w-5 rounded border-stone-300">
+            强制沉淀
+          </label>
+          <button class="self-end rounded-2xl bg-stone-950 px-4 py-3 font-bold text-white disabled:cursor-not-allowed disabled:bg-stone-400" :disabled="composing || !hasProjectContext" @click="composeTopic">
+            {{ composing ? '沉淀中...' : '沉淀' }}
+          </button>
+        </div>
+      </details>
     </section>
 
     <!-- 候选列表 -->

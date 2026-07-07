@@ -87,6 +87,21 @@ export function friendlyApiError(error: any) {
   return message
 }
 
+export type CandidateMaintenanceSummaryInput = {
+  processed?: number
+  discarded?: number
+  kept?: number
+  composed?: number
+}
+
+function safeCount(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+export function formatCandidateMaintenanceSummary(input: CandidateMaintenanceSummaryInput) {
+  return `清洗完成：处理 ${safeCount(input.processed)} 条，丢弃 ${safeCount(input.discarded)} 条，保留 ${safeCount(input.kept)} 条，沉淀 ${safeCount(input.composed)} 条。`
+}
+
 type CountMap = Record<string, number>
 type ScoreBucket = { label: string; count: number }
 type LifecycleStatsLike = {

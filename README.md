@@ -14,7 +14,7 @@ v0.9 的重点是把记忆生命周期跑成闭环：事件写入、候选提炼
 - **Hot Memory**：高价值短期工作记忆可以进入 Hot Memory，并在检索命中后记录使用反馈。
 - **Archive RAG**：长期沉淀以 Markdown 为正文权威源，Qdrant 只保存可重建索引。
 - **Secret 安全边界**：Secret 明文只进入加密存储和本地解密路径，不进入日志、Markdown、Qdrant、Hot Memory 或模型回复。
-- **生产部署脚本**：默认部署到 ThinkPad T480，通过 Docker Compose 管理 API、worker、MCP、Web、PostgreSQL、Redis、Qdrant。
+- **生产部署脚本**：通过 Docker Compose 管理 API、worker、MCP、Web、PostgreSQL、Redis、Qdrant。
 
 ## 当前架构
 
@@ -69,7 +69,7 @@ TurnEvent -> candidate_memory_jobs -> memory-worker
 远程 MCP Streamable HTTP 入口：
 
 ```text
-POST http://your-server:18082/mcp
+POST <memory-os-mcp-url>/mcp
 Authorization: Bearer <Memory OS PAT>
 Accept: application/json, text/event-stream
 ```
@@ -77,8 +77,8 @@ Accept: application/json, text/event-stream
 兼容 HTTP bridge：
 
 ```text
-GET  http://your-server:18082/tools
-POST http://your-server:18082/tools/call
+GET  <memory-os-mcp-url>/tools
+POST <memory-os-mcp-url>/tools/call
 ```
 
 当前 MCP 工具状态：
@@ -106,7 +106,7 @@ go build -o ~/bin/memory-mcp-local ./cmd/memory-mcp-local
     "memory-os": {
       "command": "/Users/your-name/bin/memory-mcp-local",
       "env": {
-        "MEMORY_OS_MCP_URL": "http://your-server:18082",
+        "MEMORY_OS_MCP_URL": "<memory-os-mcp-url>",
         "MEMORY_OS_TOKEN": "<Memory OS PAT>"
       }
     }
@@ -118,10 +118,10 @@ go build -o ~/bin/memory-mcp-local ./cmd/memory-mcp-local
 
 ## 管理台
 
-Web 控制台默认端口：
+Web 控制台入口：
 
 ```text
-http://your-server:18080
+<memory-os-web-url>
 ```
 
 主要页面：
@@ -140,39 +140,37 @@ http://your-server:18080
 - 存储、清洗、归档和检索仍按项目隔离。
 - Agent 只标记来源，不作为展示统计维度。
 
-## 部署环境
+## 部署
 
-默认部署目标是 T480：
+Memory OS 可以部署到任意支持 Docker 和 Docker Compose 的 Linux 主机。仓库内提供 Compose 文件作为参考部署拓扑，具体端口、域名、TLS、反向代理、防火墙和数据目录应由部署方按自己的环境配置。
 
-```text
-thinkpad:/opt/memory-os
-```
+服务拓扑：
 
-默认端口：
-
-| 服务 | 端口 |
+| 服务 | 说明 |
 | --- | --- |
-| Web | 18080 |
-| API | 18081 |
-| MCP | 18082 |
-| Qdrant | 18083 |
-| PostgreSQL | 仅容器内 |
-| Redis | 仅容器内 |
+| Web | 管理台前端 |
+| API | Memory OS HTTP API |
+| MCP | Streamable HTTP MCP 服务 |
+| Worker | 后台队列、候选提炼、自动清洗沉淀 |
+| PostgreSQL | 权威元数据源 |
+| Redis | 队列、锁、缓存和限流 |
+| Qdrant | 可重建向量索引 |
 
-日常流程：
+基础流程：
 
 ```bash
-# 本地同步源码到 T480
-make t480-sync
+# 复制环境变量模板并填写生产配置
+cp .env.example .env
 
-# 在 T480 运行 Go 测试和 Nuxt build
-make t480-build-check
+# 构建并启动服务
+APP_ENV=production ENABLE_DEV_ENDPOINTS=false \
+docker-compose -f deploy/docker-compose.yml up -d --build
 
-# 构建镜像、重启服务并执行部署后验证
-make t480-deploy
+# 部署后验证
+make post-deploy-verify
 ```
 
-GitHub 只作为稳定改动远端仓库。日常部署不依赖服务器 `git pull`。
+如果需要远程主机部署，可以使用 `rsync`、CI/CD、镜像仓库或自己的发布脚本把源码或镜像同步到目标主机；不要把本地私有路径、主机名或密钥写入仓库。
 
 ## 本地验证
 
@@ -199,10 +197,10 @@ git diff --check
 运行时检查：
 
 ```bash
-curl http://127.0.0.1:18081/version
-curl http://127.0.0.1:18081/healthz
-curl http://127.0.0.1:18081/openapi.json
-curl -X POST http://127.0.0.1:18082/mcp \
+curl "$MEMORY_OS_API_URL/version"
+curl "$MEMORY_OS_API_URL/healthz"
+curl "$MEMORY_OS_API_URL/openapi.json"
+curl -X POST "$MEMORY_OS_MCP_URL/mcp" \
   -H "Authorization: Bearer $MEMORY_OS_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
@@ -223,7 +221,7 @@ make post-deploy-verify
 运行时版本接口：
 
 ```bash
-curl http://127.0.0.1:18081/version
+curl "$MEMORY_OS_API_URL/version"
 ```
 
 返回字段：
