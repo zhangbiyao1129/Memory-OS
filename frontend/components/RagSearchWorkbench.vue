@@ -71,9 +71,36 @@ function mergeSearchResponses(requestID: string, responses: any[]) {
       project_id: entry.project.project_id,
       name: entry.project.name,
       results: entry.response?.results?.length || 0,
+      error: entry.error || '',
       rerank_degraded: Boolean(entry.response?.rerank_degraded)
-    }))
+    })),
+    project_errors: responses
+      .filter((entry: any) => entry.error)
+      .map((entry: any) => ({ project_id: entry.project.project_id, name: entry.project.name, error: entry.error }))
   }
+}
+
+async function searchProjectsSequentially(requestID: string) {
+  const responses = []
+  for (const project of searchProjectScopes.value) {
+    try {
+      const response = await request('/memory/search', {
+        method: 'POST',
+        body: {
+          request_id: `${requestID}-${project.project_id}`,
+          query: query.value,
+          actor: { user_id: '', org_id: context.orgId, project_id: project.project_id, agent_id: context.agentId },
+          scope: 'project',
+          visibility: 'project',
+          max_context_bytes: 512
+        }
+      })
+      responses.push({ project, response })
+    } catch (err: any) {
+      responses.push({ project, response: null, error: err.message || '检索失败' })
+    }
+  }
+  return responses
 }
 
 onMounted(() => {
@@ -99,20 +126,7 @@ async function runSearch() {
   result.value = null
   try {
     const requestID = `web-search-${Date.now()}`
-    const responses = await Promise.all(searchProjectScopes.value.map(async (project) => ({
-      project,
-      response: await request('/memory/search', {
-        method: 'POST',
-        body: {
-          request_id: `${requestID}-${project.project_id}`,
-          query: query.value,
-          actor: { user_id: '', org_id: context.orgId, project_id: project.project_id, agent_id: context.agentId },
-          scope: 'project',
-          visibility: 'project',
-          max_context_bytes: 512
-        }
-      })
-    })))
+    const responses = await searchProjectsSequentially(requestID)
     result.value = mergeSearchResponses(requestID, responses)
   } catch (err: any) {
     error.value = err.message || '检索失败'

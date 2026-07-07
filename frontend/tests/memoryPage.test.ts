@@ -26,8 +26,10 @@ describe('memory page', () => {
 
   it('runs the search workbench across all loaded workspace projects', () => {
     expect(ragSearchWorkbenchSource).toContain('searchProjectScopes')
-    expect(ragSearchWorkbenchSource).toContain('Promise.all')
+    expect(ragSearchWorkbenchSource).toContain('searchProjectsSequentially')
     expect(ragSearchWorkbenchSource).toContain('mergeSearchResponses')
+    expect(ragSearchWorkbenchSource).toContain('project_errors')
+    expect(ragSearchWorkbenchSource).not.toContain('Promise.all')
     expect(ragSearchWorkbenchSource).not.toContain("actor: { user_id: '', org_id: context.orgId, project_id: context.projectId")
     expect(ragSearchWorkbenchSource).not.toContain('请先选择组织和项目')
   })
