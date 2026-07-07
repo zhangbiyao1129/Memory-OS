@@ -1,9 +1,4 @@
 <script setup lang="ts">
-import { buildContextSummary } from '~/utils/memoryUx'
-
-const props = withDefaults(defineProps<{ showContextSwitcher?: boolean }>(), {
-  showContextSwitcher: true
-})
 const auth = useAuthStore()
 const context = useContextStore()
 const router = useRouter()
@@ -11,7 +6,6 @@ const { request } = useApi()
 const loadingTenants = ref(false)
 const tenantError = ref('')
 const mobileNavOpen = ref(false)
-const showContextSwitcher = computed(() => props.showContextSwitcher)
 const nav = [
   ['接入向导', '/onboarding'],
   ['总览', '/'],
@@ -26,16 +20,7 @@ const nav = [
 type OrgListResponse = { orgs: TenantOrg[] }
 type ProjectListResponse = { projects: TenantProject[] }
 
-const selectedOrg = computed(() => context.orgs.find((org) => org.org_id === context.orgId))
-const selectedProject = computed(() => context.projects.find((project) => project.project_id === context.projectId))
-const contextSummary = computed(() =>
-  buildContextSummary({
-    orgName: selectedOrg.value?.name,
-    projectName: selectedProject.value?.name,
-    agentId: context.agentId
-  })
-)
-const shellSubtitle = computed(() => props.showContextSwitcher ? contextSummary.value.primary : '全部工作区项目总览')
+const shellSubtitle = '全部工作区项目总览'
 
 function closeMobileNav() {
   mobileNavOpen.value = false
@@ -122,12 +107,8 @@ watch(() => context.orgId, async (_next, previous) => {
           <p class="text-xs font-bold uppercase text-orange-800">Memory OS</p>
           <h1 class="mt-2 text-2xl font-black tracking-tight">原生记忆控制台</h1>
         </NuxtLink>
-        <div v-if="showContextSwitcher" class="mt-6">
-          <ContextSwitcher />
-          <p v-if="loadingTenants" class="mt-2 rounded-lg bg-white/70 p-2 text-xs text-orange-800">正在加载工作空间信息...</p>
-          <p v-if="tenantError" class="mt-2 rounded-lg bg-red-50 p-2 text-xs text-red-700">{{ tenantError }}</p>
-        </div>
-        <p v-else-if="tenantError" class="mt-6 rounded-lg bg-red-50 p-2 text-xs text-red-700">{{ tenantError }}</p>
+        <p v-if="loadingTenants" class="mt-6 rounded-lg bg-white/70 p-2 text-xs text-orange-800">正在加载工作空间信息...</p>
+        <p v-if="tenantError" class="mt-6 rounded-lg bg-red-50 p-2 text-xs text-red-700">{{ tenantError }}</p>
         <nav class="mt-7 grid gap-2">
           <NuxtLink
             v-for="item in nav"

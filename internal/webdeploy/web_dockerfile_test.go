@@ -432,16 +432,12 @@ func TestTokensPageUsesRealAPIAndOneTimeTokenFlow(t *testing.T) {
 	}
 }
 
-func TestAppShellShowsFocusedNavigationAndContextSwitcher(t *testing.T) {
+func TestAppShellShowsFocusedNavigationWithoutGlobalContextSwitcher(t *testing.T) {
 	content, err := os.ReadFile("../../frontend/components/AppShell.vue")
 	if err != nil {
 		t.Fatalf("read AppShell: %v", err)
 	}
-	switcherContent, err := os.ReadFile("../../frontend/components/ContextSwitcher.vue")
-	if err != nil {
-		t.Fatalf("read ContextSwitcher: %v", err)
-	}
-	component := string(content) + string(switcherContent)
+	component := string(content)
 	for _, forbidden := range []string{
 		"['组织', '/orgs']",
 		"['用户', '/users']",
@@ -454,6 +450,10 @@ func TestAppShellShowsFocusedNavigationAndContextSwitcher(t *testing.T) {
 		"['Token', '/tokens']",
 		"['Qdrant 状态', '/qdrant']",
 		"['检索测试', '/search-test']",
+		"当前记忆上下文",
+		"ContextSwitcher",
+		"context.setAgent",
+		"showContextSwitcher",
 	} {
 		if strings.Contains(component, forbidden) {
 			t.Fatalf("AppShell must hide global workspace selector marker %q", forbidden)
@@ -468,9 +468,7 @@ func TestAppShellShowsFocusedNavigationAndContextSwitcher(t *testing.T) {
 		"['Secret', '/secrets']",
 		"['日志', '/logs']",
 		"['高级设置', '/settings']",
-		"当前记忆上下文",
-		"context.setAgent",
-		"showContextSwitcher",
+		"全部工作区项目总览",
 		"mobileNavOpen",
 		"aria-controls=\"app-mobile-nav\"",
 		"lg:hidden",
@@ -497,7 +495,7 @@ func TestOverviewUsesGlobalStatsAndHidesContextSelector(t *testing.T) {
 	}
 	combined := string(pageContent) + string(composableContent) + string(uxContent)
 	for _, required := range []string{
-		":show-context-switcher=\"false\"",
+		"<AppShell>",
 		"userScoped: true",
 		"总览口径：当前用户全部记忆",
 		"body: {}",

@@ -33,7 +33,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <AppShell :show-context-switcher="false">
+  <AppShell>
     <section class="grid gap-6">
       <div class="flex flex-col gap-4 rounded-[2rem] bg-gradient-to-br from-orange-100 to-lime-100 p-6 sm:flex-row sm:items-end sm:justify-between">
         <div>
