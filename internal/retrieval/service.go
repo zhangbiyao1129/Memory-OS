@@ -70,7 +70,7 @@ func (s Service) Search(request SearchRequest) (SearchResponse, error) {
 	if err := validateRequest(request); err != nil {
 		return SearchResponse{}, err
 	}
-	candidates, markedUsed, err := s.collect(request)
+	candidates, err := s.collect(request)
 	if err != nil {
 		return SearchResponse{}, err
 	}
@@ -86,6 +86,7 @@ func (s Service) Search(request SearchRequest) (SearchResponse, error) {
 	}
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
 	results := resultsFromCandidates(candidates)
+	markedUsed := s.markReturnedHotResults(results)
 	context := compress(results, request.MaxContextBytes)
 	response := SearchResponse{RequestID: request.RequestID, Context: context, Results: results, RerankDegraded: rerankDegraded, MarkedUsedCount: markedUsed}
 	if s.accessLog != nil {
@@ -98,63 +99,52 @@ func (s Service) Search(request SearchRequest) (SearchResponse, error) {
 	return response, nil
 }
 
-func (s Service) collect(request SearchRequest) ([]candidate, int, error) {
+func (s Service) collect(request SearchRequest) ([]candidate, error) {
 	candidates := []candidate{}
-	markedUsed := 0
 	recallQuery := primaryRecallQuery(request.Query)
 	if s.hotMemory != nil {
 		projectFilter, err := hotmemory.BuildFilter(hotmemory.FilterContext{OrgID: request.Actor.OrgID, ProjectID: request.Actor.ProjectID, UserID: request.Actor.UserID, AgentID: request.Actor.AgentID, Scope: request.Scope, Visibility: request.Visibility, PermissionLabels: request.PermissionLabels})
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		results, err := s.hotMemory.Search(hotmemory.SearchRequest{Query: recallQuery, Filter: projectFilter})
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		for _, result := range results {
 			memory := result.Memory
 			candidates = append(candidates, candidate{id: "hot_memory:" + memory.MemoryID, text: memory.Fact, score: result.Score, source: SourceRef{Kind: SourceHotMemory, MemoryID: memory.MemoryID}})
-			if _, err := s.hotMemory.MarkAccessed(memory.MemoryID); err == nil {
-				if _, err := s.hotMemory.MarkReturned(memory.MemoryID); err == nil {
-					markedUsed++
-				}
-			}
 		}
 		if request.Scope != hotmemory.ScopeAgentSpecific {
 			agentFilter, err := hotmemory.BuildFilter(hotmemory.FilterContext{OrgID: request.Actor.OrgID, ProjectID: request.Actor.ProjectID, UserID: request.Actor.UserID, AgentID: request.Actor.AgentID, Scope: hotmemory.ScopeAgentSpecific, Visibility: request.Visibility, PermissionLabels: request.PermissionLabels})
 			if err != nil {
-				return nil, 0, err
+				return nil, err
 			}
 			agentResults, err := s.hotMemory.Search(hotmemory.SearchRequest{Query: recallQuery, Filter: agentFilter})
 			if err != nil {
-				return nil, 0, err
+				return nil, err
 			}
 			for _, result := range agentResults {
 				memory := result.Memory
 				candidates = append(candidates, candidate{id: "hot_memory:" + memory.MemoryID, text: memory.Fact, score: result.Score, source: SourceRef{Kind: SourceHotMemory, MemoryID: memory.MemoryID}})
-				if _, err := s.hotMemory.MarkAccessed(memory.MemoryID); err == nil {
-					if _, err := s.hotMemory.MarkReturned(memory.MemoryID); err == nil {
-						markedUsed++
-					}
-				}
 			}
 		}
 	}
 	if s.archiveRAG != nil {
 		generation, err := s.archiveIndexGeneration(request)
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		if generation <= 0 {
-			return dedupeCandidates(candidates), markedUsed, nil
+			return dedupeCandidates(candidates), nil
 		}
 		filter, err := qdrant.BuildPayloadFilter(qdrant.FilterContext{OrgID: request.Actor.OrgID, ProjectID: request.Actor.ProjectID, UserID: request.Actor.UserID, Visibility: request.Visibility, PermissionLabels: request.PermissionLabels, DocType: "archive_chunk", IndexGeneration: generation})
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		results, err := s.archiveRAG.Search(rag.SearchRequest{Query: recallQuery, Filter: filter})
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		for _, result := range results {
 			candidates = append(candidates, candidate{id: "archive:" + result.Source.ChunkID, text: result.Text, score: result.Score, source: SourceRef{Kind: SourceArchiveChunk, ArchiveID: result.Source.ArchiveID, ChunkID: result.Source.ChunkID, SourceEventIDs: result.Source.SourceEventIDs}})
@@ -175,7 +165,27 @@ func (s Service) collect(request SearchRequest) ([]candidate, int, error) {
 	for i := range candidates {
 		boostCandidate(&candidates[i])
 	}
-	return dedupeCandidates(candidates), markedUsed, nil
+	return dedupeCandidates(candidates), nil
+}
+
+func (s Service) markReturnedHotResults(results []SearchResult) int {
+	if s.hotMemory == nil {
+		return 0
+	}
+	count := 0
+	for _, result := range results {
+		if result.Source.Kind != SourceHotMemory || result.Source.MemoryID == "" {
+			continue
+		}
+		if _, err := s.hotMemory.MarkAccessed(result.Source.MemoryID); err != nil {
+			continue
+		}
+		if _, err := s.hotMemory.MarkReturned(result.Source.MemoryID); err != nil {
+			continue
+		}
+		count++
+	}
+	return count
 }
 
 func (s Service) archiveIndexGeneration(request SearchRequest) (int, error) {

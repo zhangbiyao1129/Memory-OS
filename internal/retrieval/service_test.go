@@ -34,8 +34,8 @@ func TestSearchMarksAccessedReturnedAndDoesNotMarkUsedOnHotResults(t *testing.T)
 	if len(response.Results) != 1 {
 		t.Fatalf("results len = %d, want 1", len(response.Results))
 	}
-	if hot.accessed != 2 || hot.returned != 2 {
-		t.Fatalf("usage signals = accessed:%d returned:%d, want 2/2", hot.accessed, hot.returned)
+	if hot.accessed != 1 || hot.returned != 1 {
+		t.Fatalf("usage signals = accessed:%d returned:%d, want 1/1", hot.accessed, hot.returned)
 	}
 	if hot.used != 0 {
 		t.Fatalf("used count = %d, want 0", hot.used)
@@ -161,6 +161,36 @@ func TestSearchFiltersLowRerankScoresWhenThresholdConfigured(t *testing.T) {
 	}
 	if len(response.Results) != 1 || response.Results[0].Source.ChunkID != "chunk_good" {
 		t.Fatalf("results = %#v, want only high rerank score candidate", response.Results)
+	}
+}
+
+func TestSearchDoesNotMarkFilteredHotMemoryAsReturned(t *testing.T) {
+	hot := &trackingHotMemory{results: []hotmemory.SearchResult{{Memory: hotmemory.Memory{MemoryID: "hm_wrong", Fact: "CloudCode deployment note"}, Score: 0.56}}}
+	service := NewService(Options{
+		HotMemory:      hot,
+		Reranker:       StaticReranker{Scores: map[string]float64{"hot_memory:hm_wrong": 0.01}},
+		MinRerankScore: 0.2,
+	})
+
+	response, err := service.Search(SearchRequest{
+		RequestID:        "req_filtered_hot",
+		Query:            "回测的最新数据是多少",
+		Actor:            Actor{UserID: "user_1", OrgID: "org_1", ProjectID: "project_1", AgentID: "codex"},
+		Visibility:       "project",
+		Scope:            hotmemory.ScopeProject,
+		PermissionLabels: []string{"project:project_1:read"},
+	})
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(response.Results) != 0 {
+		t.Fatalf("results len = %d, want 0", len(response.Results))
+	}
+	if response.MarkedUsedCount != 0 {
+		t.Fatalf("marked used count = %d, want 0 for filtered results", response.MarkedUsedCount)
+	}
+	if hot.accessed != 0 || hot.returned != 0 {
+		t.Fatalf("usage signals = accessed:%d returned:%d, want 0/0 for filtered results", hot.accessed, hot.returned)
 	}
 }
 
