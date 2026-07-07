@@ -59,6 +59,15 @@ func TestRunnerReportsArchiveWorkerConfigured(t *testing.T) {
 	}
 }
 
+func TestRunnerReportsAutoMaintenanceConfigured(t *testing.T) {
+	maintenance := &fakeAutoMaintenance{}
+	runner := NewRunner(Options{Concurrency: 1, AutoMaintenance: maintenance})
+
+	if !runner.AutoMaintenanceConfigured() {
+		t.Fatal("AutoMaintenanceConfigured() = false, want true")
+	}
+}
+
 func TestRunnerRunsCleanupOnExit(t *testing.T) {
 	cleaned := false
 	runner := NewRunner(Options{Concurrency: 1, Cleanup: func() { cleaned = true }})
@@ -70,6 +79,24 @@ func TestRunnerRunsCleanupOnExit(t *testing.T) {
 	}
 	if !cleaned {
 		t.Fatal("Run() did not call cleanup")
+	}
+}
+
+func TestRunnerRunsAutoMaintenanceLoop(t *testing.T) {
+	maintenance := &fakeAutoMaintenance{}
+	runner := NewRunner(Options{Concurrency: 1, AutoMaintenance: maintenance, AutoMaintenanceInterval: time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runner.Run(ctx)
+	}()
+
+	waitFor(t, func() bool { return maintenance.runCount() >= 1 })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run() error = %v", err)
 	}
 }
 
@@ -187,6 +214,24 @@ type fakeArchiveQueue struct {
 type failedArchiveJob struct {
 	job ArchiveJob
 	err error
+}
+
+type fakeAutoMaintenance struct {
+	mu   sync.Mutex
+	runs int
+}
+
+func (m *fakeAutoMaintenance) RunAutoClean(ctx context.Context) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.runs++
+	return 1, nil
+}
+
+func (m *fakeAutoMaintenance) runCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.runs
 }
 
 func (q *fakeArchiveQueue) Lease(ctx context.Context) (ArchiveJob, bool, error) {

@@ -219,6 +219,8 @@ var (
 	ErrNoCandidatesToClean = errors.New("no candidates to clean")
 )
 
+const autoCleanIdleThreshold = 5 * time.Minute
+
 // StartRun 创建清洗任务并返回,实际执行由 ExecuteRun 在后台完成。
 func (s *MaintenanceService) StartRun(ctx context.Context, req MaintenanceRequest) (MaintenanceRun, error) {
 	// 1. 检查是否有运行中的任务(项目级防重入),返回已有任务
@@ -382,9 +384,47 @@ func (s *MaintenanceService) GetRun(ctx context.Context, runID string) (Maintena
 	return s.repo.GetRun(ctx, runID)
 }
 
+// RunAutoClean 扫描已满足沉淀条件的 topic,并按项目/source/thread 自动执行清洗整合。
+func (s *MaintenanceService) RunAutoClean(ctx context.Context) (int, error) {
+	if s == nil || s.candidateRepo == nil {
+		return 0, errors.New("maintenance service is not configured")
+	}
+	topics, err := s.candidateRepo.ListTopicStates(ctx, TopicStateFilter{Limit: 1000})
+	if err != nil {
+		return 0, err
+	}
+	started := 0
+	for _, topic := range topics {
+		if topic.ComposedArchiveID != "" {
+			continue
+		}
+		if !s.shouldAutoCleanScope(ctx, topic.OrgID, topic.ProjectID, topic.SourceKey, topic.ThreadID) {
+			continue
+		}
+		req := MaintenanceRequest{
+			OrgID:     topic.OrgID,
+			ProjectID: topic.ProjectID,
+			SourceKey: topic.SourceKey,
+			ThreadID:  topic.ThreadID,
+			Trigger:   MaintenanceTriggerAuto,
+		}
+		run, err := s.StartRun(ctx, req)
+		if err != nil {
+			return started, err
+		}
+		s.ExecuteRun(ctx, req, run.RunID)
+		started++
+	}
+	return started, nil
+}
+
 // ShouldAutoClean 判断是否应该自动触发清洗整合。
-// 条件:同项目待处理候选累计 >= 100 且最近 5 分钟没有新候选注入。
+// 条件:同项目待处理候选累计达到主题沉淀阈值且最近 5 分钟没有新候选注入。
 func (s *MaintenanceService) ShouldAutoClean(ctx context.Context, orgID, projectID string) bool {
+	return s.shouldAutoCleanScope(ctx, orgID, projectID, "", "")
+}
+
+func (s *MaintenanceService) shouldAutoCleanScope(ctx context.Context, orgID, projectID, sourceKey, threadID string) bool {
 	// 检查是否有运行中的任务
 	if existing, err := s.repo.GetRunningRun(ctx, orgID, projectID); err == nil && existing != nil {
 		return false
@@ -394,17 +434,19 @@ func (s *MaintenanceService) ShouldAutoClean(ctx context.Context, orgID, project
 	candidates, err := s.candidateRepo.ListCandidates(ctx, ListFilter{
 		OrgID:     orgID,
 		ProjectID: projectID,
+		SourceKey: sourceKey,
+		ThreadID:  threadID,
 		Status:    StatusPending,
-		Limit:     101, // 多取一个判断是否 >= 100
+		Limit:     composeMinCandidates,
 	})
-	if err != nil || len(candidates) < 100 {
+	if err != nil || len(candidates) < composeMinCandidates {
 		return false
 	}
 
 	// 检查最近是否有新候选(5分钟内)
 	if len(candidates) > 0 {
 		newest := candidates[0].CreatedAt
-		if time.Since(newest) < 5*time.Minute {
+		if time.Since(newest) < autoCleanIdleThreshold {
 			return false
 		}
 	}

@@ -74,6 +74,35 @@ func TestCandidateMemoryWorkerPersistsCandidatesAndTopicState(t *testing.T) {
 	if ts.CandidateCount != 2 {
 		t.Fatalf("topic candidate_count 应为 2: %d", ts.CandidateCount)
 	}
+	if ts.ReadyToCompose {
+		t.Fatal("候选数未达到阈值时 ready_to_compose 应为 false")
+	}
+}
+
+func TestCandidateMemoryWorkerMarksTopicReadyAtComposeThreshold(t *testing.T) {
+	extracted := make([]candidatememory.Candidate, 0, candidatememory.ComposeMinCandidates)
+	for i := 0; i < candidatememory.ComposeMinCandidates; i++ {
+		extracted = append(extracted, candidatememory.Candidate{
+			CandidateID: "cand-ready-" + string(rune('a'+i)),
+			MemoryType:  candidatememory.MemoryTypeFact,
+			Content:     "可沉淀事实",
+			Confidence:  0.9,
+			RiskLevel:   candidatememory.RiskLow,
+		})
+	}
+	worker, repo, _ := newTestCandidateWorker(t, fakeExtractor{candidates: extracted})
+
+	if _, err := worker.Handle(candidatememory.Job{OrgID: "org-1", ProjectID: "proj-1", SourceKey: "github.com/acme/web", SourceEventID: "e1"}); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	ts, err := repo.GetTopicState(context.Background(), "org-1", "proj-1", "github.com/acme/web", "thread-1")
+	if err != nil {
+		t.Fatalf("topic state: %v", err)
+	}
+	if !ts.ReadyToCompose {
+		t.Fatalf("ready_to_compose = false, want true when candidate_count reaches %d", candidatememory.ComposeMinCandidates)
+	}
 }
 
 // 重复候选(ErrConflict)跳过,不阻塞其余候选。

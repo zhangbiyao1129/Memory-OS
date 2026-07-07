@@ -113,6 +113,7 @@ func (w CandidateMemoryWorker) updateTopicState(ctx context.Context, job candida
 		SourceKey:      job.SourceKey,
 		ThreadID:       threadID,
 		CandidateCount: newCount,
+		ReadyToCompose: newCount >= candidatememory.ComposeMinCandidates,
 		LastEventAt:    &now,
 	})
 	return err

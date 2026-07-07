@@ -23,17 +23,23 @@ type RAGIndexQueue interface {
 	Fail(ctx context.Context, job RAGIndexJob, err error) error
 }
 
+type AutoMaintenance interface {
+	RunAutoClean(ctx context.Context) (int, error)
+}
+
 // Options 保存 worker 运行参数。
 type Options struct {
-	Concurrency     int
-	ArchiveWorker   *ArchiveWorker
-	ArchiveQueue    ArchiveQueue
-	RAGIndexWorker  *RAGIndexWorker
-	RAGIndexQueue   RAGIndexQueue
-	CandidateWorker *CandidateMemoryWorker
-	CandidateQueue  CandidateMemoryQueue
-	PollInterval    time.Duration
-	Cleanup         func()
+	Concurrency             int
+	ArchiveWorker           *ArchiveWorker
+	ArchiveQueue            ArchiveQueue
+	RAGIndexWorker          *RAGIndexWorker
+	RAGIndexQueue           RAGIndexQueue
+	CandidateWorker         *CandidateMemoryWorker
+	CandidateQueue          CandidateMemoryQueue
+	AutoMaintenance         AutoMaintenance
+	PollInterval            time.Duration
+	AutoMaintenanceInterval time.Duration
+	Cleanup                 func()
 }
 
 // Runner 是 Phase 1 的后台任务骨架，后续承载 archive/index/hotmemory jobs。
@@ -75,6 +81,9 @@ func (r Runner) Run(ctx context.Context) error {
 	if r.options.CandidateWorker != nil && r.options.CandidateQueue != nil {
 		loops = append(loops, r.runCandidateLoop)
 	}
+	if r.options.AutoMaintenance != nil {
+		loops = append(loops, r.runAutoMaintenanceLoop)
+	}
 	if len(loops) > 0 {
 		return runLoops(ctx, loops)
 	}
@@ -104,6 +113,10 @@ func (r Runner) CandidateWorkerConfigured() bool {
 
 func (r Runner) CandidateQueueConfigured() bool {
 	return r.options.CandidateQueue != nil
+}
+
+func (r Runner) AutoMaintenanceConfigured() bool {
+	return r.options.AutoMaintenance != nil
 }
 
 func (r Runner) runArchiveLoop(ctx context.Context) error {
@@ -198,6 +211,27 @@ func (r Runner) runCandidateLoop(ctx context.Context) error {
 		}
 		if err := r.options.CandidateQueue.Complete(ctx, job, result); err != nil {
 			return err
+		}
+	}
+}
+
+func (r Runner) runAutoMaintenanceLoop(ctx context.Context) error {
+	interval := r.options.AutoMaintenanceInterval
+	if interval <= 0 {
+		interval = r.options.PollInterval
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		if _, err := r.options.AutoMaintenance.RunAutoClean(ctx); err != nil {
+			return err
+		}
+		if err := waitForNextPoll(ctx, interval); err != nil {
+			return nil
 		}
 	}
 }

@@ -14,7 +14,8 @@ var completionSignalKeywords = []string{
 
 // 候选沉淀阈值。
 const (
-	composeMinCandidates    = 10
+	ComposeMinCandidates    = 10
+	composeMinCandidates    = ComposeMinCandidates
 	composeIdleThreshold    = 24 * time.Hour
 	composeHotMemoryUsedMin = 3
 )

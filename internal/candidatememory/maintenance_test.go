@@ -555,13 +555,13 @@ func TestShouldAutoClean(t *testing.T) {
 	cleaner := &fakeMaintenanceCleaner{result: CleanResult{Summary: "ok"}}
 	service, _ := newTestMaintenanceService(t, cleaner)
 
-	// 不足 100 个候选
+	// 不足主题沉淀阈值
 	if service.ShouldAutoClean(context.Background(), "org-1", "proj-1") {
-		t.Fatal("should not auto clean with less than 100 candidates")
+		t.Fatal("should not auto clean with less than compose threshold candidates")
 	}
 
-	// 创建 100 个候选
-	for i := 0; i < 100; i++ {
+	// 创建达到主题沉淀阈值的候选
+	for i := 0; i < composeMinCandidates; i++ {
 		service.candidateRepo.CreateCandidate(context.Background(), Candidate{
 			CandidateID: "cand-" + string(rune('a'+i%26)) + string(rune('0'+i/26)),
 			OrgID:       "org-1",
@@ -573,6 +573,85 @@ func TestShouldAutoClean(t *testing.T) {
 
 	// 满足条件
 	if !service.ShouldAutoClean(context.Background(), "org-1", "proj-1") {
-		t.Fatal("should auto clean with 100+ candidates and 5min idle")
+		t.Fatal("should auto clean with enough candidates and 5min idle")
 	}
+}
+
+func TestRunAutoCleanComposesReadyTopic(t *testing.T) {
+	ctx := context.Background()
+	candidateRepo := NewInMemoryRepository()
+	maintRepo := NewInMemoryMaintenanceRepository()
+	creator := &fakeArchiveCreator{}
+	composer := NewTopicComposer(candidateRepo, creator)
+	keepIDs := make([]string, 0, composeMinCandidates)
+	old := time.Now().UTC().Add(-10 * time.Minute)
+	for i := 0; i < composeMinCandidates; i++ {
+		id := "auto-cand-" + string(rune('a'+i))
+		keepIDs = append(keepIDs, id)
+		if _, err := candidateRepo.CreateCandidate(ctx, Candidate{
+			CandidateID: id,
+			OrgID:       "org-auto",
+			ProjectID:   "project-auto",
+			SourceKey:   "workspace/project",
+			ThreadID:    "thread-auto",
+			UserID:      "user-auto",
+			Status:      StatusPending,
+			RiskLevel:   RiskLow,
+			MemoryType:  MemoryTypeFact,
+			Content:     "自动沉淀候选",
+			CreatedAt:   old,
+		}); err != nil {
+			t.Fatalf("seed candidate: %v", err)
+		}
+	}
+	if _, err := candidateRepo.UpsertTopicState(ctx, TopicState{
+		OrgID:          "org-auto",
+		ProjectID:      "project-auto",
+		SourceKey:      "workspace/project",
+		ThreadID:       "thread-auto",
+		CandidateCount: composeMinCandidates,
+		LastEventAt:    &old,
+	}); err != nil {
+		t.Fatalf("seed topic: %v", err)
+	}
+	service := NewMaintenanceService(maintRepo, candidateRepo, &composer, fakeMaintenanceCleaner{
+		result: CleanResult{KeepIDs: keepIDs, Summary: "自动清洗完成"},
+	})
+
+	started, err := service.RunAutoClean(ctx)
+	if err != nil {
+		t.Fatalf("RunAutoClean() error = %v", err)
+	}
+	if started != 1 {
+		t.Fatalf("RunAutoClean() started = %d, want 1", started)
+	}
+	candidates, _ := candidateRepo.ListCandidates(ctx, ListFilter{OrgID: "org-auto", ProjectID: "project-auto", SourceKey: "workspace/project", ThreadID: "thread-auto"})
+	for _, candidate := range candidates {
+		if candidate.Status != StatusComposed {
+			t.Fatalf("candidate %s status = %s, want composed", candidate.CandidateID, candidate.Status)
+		}
+	}
+	if creator.last.ProjectID != "project-auto" || creator.last.SourceKey != "workspace/project" {
+		t.Fatalf("archive scope = project:%q source:%q, want project-auto/workspace/project", creator.last.ProjectID, creator.last.SourceKey)
+	}
+	run := onlyMaintenanceRun(t, maintRepo)
+	if run.TriggerType != MaintenanceTriggerAuto {
+		t.Fatalf("trigger = %s, want auto", run.TriggerType)
+	}
+	if run.Status != MaintenanceRunDone || run.Composed != composeMinCandidates || run.ArchiveID == "" {
+		t.Fatalf("maintenance run not completed with composed archive: %+v", run)
+	}
+}
+
+func onlyMaintenanceRun(t *testing.T, repo *InMemoryMaintenanceRepository) MaintenanceRun {
+	t.Helper()
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+	if len(repo.runs) != 1 {
+		t.Fatalf("maintenance runs = %d, want 1", len(repo.runs))
+	}
+	for _, run := range repo.runs {
+		return run
+	}
+	return MaintenanceRun{}
 }

@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"memory-os/internal/archive"
 	"memory-os/internal/candidatememory"
@@ -75,6 +76,21 @@ var newHotMemoryService = func(ctx context.Context, cfg config.Config, pool *pgx
 }
 var newOpenAICompatibleClient = llm.NewOpenAICompatible
 var newCandidateMemoryWorker = jobs.NewCandidateMemoryWorker
+var newAutoMaintenanceService = func(cfg config.Config, pool *pgxpool.Pool, candidateRepo candidatememory.Repository, composer *candidatememory.TopicComposer) (jobs.AutoMaintenance, error) {
+	model := strings.TrimSpace(cfg.LLMModel)
+	if model == "" {
+		model = "MiniMax-M2.7"
+	}
+	if strings.TrimSpace(cfg.LLMBaseURL) == "" || strings.TrimSpace(cfg.LLMAPIKey) == "" || strings.TrimSpace(model) == "" {
+		return nil, nil
+	}
+	client, err := llm.NewOpenAICompatible(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, LLMModel: model, EmbeddingModel: cfg.EmbeddingModel, Timeout: 5 * time.Minute})
+	if err != nil {
+		return nil, err
+	}
+	cleaner := candidatememory.NewLLMMaintenanceCleaner(client).WithModel(model)
+	return candidatememory.NewMaintenanceService(candidatememory.NewPGMaintenanceRepository(pool), candidateRepo, composer, cleaner), nil
+}
 
 // eventlogCandidateLoader 把候选任务转换为提炼请求:从 eventlog 加载已保存(已脱敏)事件。
 type eventlogCandidateLoader struct {
@@ -154,6 +170,7 @@ func buildWorker(cfg config.Config) (*jobs.Runner, error) {
 	var ragIndexQueue jobs.RAGIndexQueue
 	var candidateWorker *jobs.CandidateMemoryWorker
 	var candidateQueue jobs.CandidateMemoryQueue
+	var autoMaintenance jobs.AutoMaintenance
 	var cleanup func()
 	if cfg.PostgresDSN != "" {
 		pool, err := newPostgresPool(context.Background(), cfg.PostgresDSN)
@@ -170,8 +187,8 @@ func buildWorker(cfg config.Config) (*jobs.Runner, error) {
 			closePostgresPool(pool)
 			return nil, err
 		}
-		service := newArchiveService(archive.NewPGRepository(pool), cfg.ArchiveDir)
-		worker := jobs.NewArchiveWorkerWithIndexQueue(service, ragIndexQueue)
+		archiveService := newArchiveService(archive.NewPGRepository(pool), cfg.ArchiveDir)
+		worker := jobs.NewArchiveWorkerWithIndexQueue(archiveService, ragIndexQueue)
 		archiveWorker = &worker
 		archiveQueue = newArchiveQueue(pool)
 		ragIndexWorker = newRAGIndexWorker(ragIndexStore)
@@ -191,9 +208,16 @@ func buildWorker(cfg config.Config) (*jobs.Runner, error) {
 			eventLoader := eventlogCandidateLoader{eventlog: eventlog.NewService(eventlog.NewPGRepository(pool), eventlog.SanitizerOptions{MaxTurnEventBytes: 256 * 1024, MaxToolOutputBytes: 64 * 1024})}
 			worker := newCandidateMemoryWorker(extractor, candidatememory.NewRouter(hotMemoryService), candidateService, candidateRepo, eventLoader)
 			candidateWorker = &worker
+			archiveCreator := jobs.NewProductionArchiveCreator(archiveService, ragIndexQueue)
+			composer := candidatememory.NewTopicComposer(candidateRepo, archiveCreator)
+			autoMaintenance, err = newAutoMaintenanceService(cfg, pool, candidateRepo, &composer)
+			if err != nil {
+				closePostgresPool(pool)
+				return nil, err
+			}
 		}
 	}
-	runner := jobs.NewRunner(jobs.Options{Concurrency: 1, ArchiveWorker: archiveWorker, ArchiveQueue: archiveQueue, RAGIndexWorker: ragIndexWorker, RAGIndexQueue: ragIndexQueue, CandidateWorker: candidateWorker, CandidateQueue: candidateQueue, Cleanup: cleanup})
+	runner := jobs.NewRunner(jobs.Options{Concurrency: 1, ArchiveWorker: archiveWorker, ArchiveQueue: archiveQueue, RAGIndexWorker: ragIndexWorker, RAGIndexQueue: ragIndexQueue, CandidateWorker: candidateWorker, CandidateQueue: candidateQueue, AutoMaintenance: autoMaintenance, AutoMaintenanceInterval: 5 * time.Minute, Cleanup: cleanup})
 	return &runner, nil
 }
 
