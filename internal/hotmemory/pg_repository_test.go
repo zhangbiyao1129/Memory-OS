@@ -2,6 +2,7 @@ package hotmemory
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -66,6 +67,16 @@ func TestBuildUpdateSQLIncludesUsageSignalColumns(t *testing.T) {
 	}
 	if len(args) < 14 {
 		t.Fatalf("buildUpdateSQL args len = %d, want usage-signal args included", len(args))
+	}
+}
+
+func TestScanMemoryAcceptsNullUsageSignalTimestamps(t *testing.T) {
+	memory, err := scanMemory(nullUsageSignalScanner{})
+	if err != nil {
+		t.Fatalf("scanMemory() error = %v, want nil for nullable usage timestamps", err)
+	}
+	if !memory.LastAccessedAt.IsZero() || !memory.LastReturnedAt.IsZero() || !memory.LastUsedAt.IsZero() {
+		t.Fatalf("usage timestamps = accessed:%v returned:%v used:%v, want zero values", memory.LastAccessedAt, memory.LastReturnedAt, memory.LastUsedAt)
 	}
 }
 
@@ -148,4 +159,74 @@ func createHotMemoryTenantFixtures(t *testing.T, pool *pgxpool.Pool) (string, st
 func hotMemorySuffix() string {
 	replacer := strings.NewReplacer("-", "")
 	return replacer.Replace(strconv.FormatInt(time.Now().UnixNano(), 10))
+}
+
+type nullUsageSignalScanner struct{}
+
+func (nullUsageSignalScanner) Scan(dest ...any) error {
+	now := time.Now().UTC()
+	values := []any{
+		"hm_null_usage",
+		"org_null_usage",
+		"project_null_usage",
+		"user_null_usage",
+		"codex",
+		string(ScopeProject),
+		"project",
+		[]string{"project:project_null_usage:read"},
+		"fact with null usage timestamps",
+		"hash_null_usage",
+		0.8,
+		0,
+		0,
+		0,
+		nil,
+		nil,
+		nil,
+		false,
+		4.2,
+		string(StatusActive),
+		now,
+		now,
+		nil,
+	}
+	if len(dest) != len(values) {
+		return fmt.Errorf("dest len = %d, want %d", len(dest), len(values))
+	}
+	for i, value := range values {
+		if err := assignScanValue(dest[i], value); err != nil {
+			return fmt.Errorf("scan dest[%d]: %w", i, err)
+		}
+	}
+	return nil
+}
+
+func assignScanValue(dest any, value any) error {
+	switch pointer := dest.(type) {
+	case *string:
+		*pointer = value.(string)
+	case *[]string:
+		*pointer = append([]string(nil), value.([]string)...)
+	case *float64:
+		*pointer = value.(float64)
+	case *int:
+		*pointer = value.(int)
+	case *bool:
+		*pointer = value.(bool)
+	case *time.Time:
+		if value == nil {
+			return fmt.Errorf("cannot scan NULL into *time.Time")
+		}
+		*pointer = value.(time.Time)
+	case **time.Time:
+		if value == nil {
+			*pointer = nil
+			return nil
+		}
+		v := value.(time.Time)
+		*pointer = &v
+	default:
+		return fmt.Errorf("unsupported destination %T", dest)
+	}
+	return nil
 }

@@ -235,6 +235,9 @@ func scanMemory(row memoryScanner) (Memory, error) {
 	var memory Memory
 	var scope string
 	var status string
+	var lastAccessedAt *time.Time
+	var lastReturnedAt *time.Time
+	var lastUsedAt *time.Time
 	var deletedAt *time.Time
 	if err := row.Scan(
 		&memory.MemoryID,
@@ -251,9 +254,9 @@ func scanMemory(row memoryScanner) (Memory, error) {
 		&memory.AccessCount,
 		&memory.ReturnedCount,
 		&memory.UsedCount,
-		&memory.LastAccessedAt,
-		&memory.LastReturnedAt,
-		&memory.LastUsedAt,
+		&lastAccessedAt,
+		&lastReturnedAt,
+		&lastUsedAt,
 		&memory.Pinned,
 		&memory.HotScore,
 		&status,
@@ -268,6 +271,15 @@ func scanMemory(row memoryScanner) (Memory, error) {
 	}
 	memory.Scope = Scope(scope)
 	memory.Status = Status(status)
+	if lastAccessedAt != nil {
+		memory.LastAccessedAt = *lastAccessedAt
+	}
+	if lastReturnedAt != nil {
+		memory.LastReturnedAt = *lastReturnedAt
+	}
+	if lastUsedAt != nil {
+		memory.LastUsedAt = *lastUsedAt
+	}
 	memory.DeletedAt = deletedAt
 	return memory, nil
 }
