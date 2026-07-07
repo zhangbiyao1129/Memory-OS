@@ -2,6 +2,7 @@
 const auth = useAuthStore()
 const context = useContextStore()
 const { request } = useApi()
+const { hasWorkspaceContext, requestWorkspaceProjects } = useWorkspaceProjectScopes()
 
 type HotMemory = {
   memory_id: string
@@ -68,20 +69,24 @@ function requestBody(extra: Record<string, unknown> = {}) {
 }
 
 async function loadMemories() {
-  if (!auth.isAuthenticated || !hasProjectContext.value) return
+  if (!auth.isAuthenticated || !hasWorkspaceContext.value) return
   loading.value = true
   error.value = ''
   try {
-    const response = await request<HotMemoryListResponse>('/memory/hot-memory/list', {
-      method: 'POST',
-      body: requestBody({
+    const items = await requestWorkspaceProjects<HotMemoryListResponse, HotMemory>({
+      path: '/memory/hot-memory/list',
+      buildBody: (project) => ({
+        org_id: project.org_id,
+        project_id: project.project_id,
+        agent_id: context.agentId,
         scope: scope.value,
         visibility: visibility.value,
         status: statusFilter.value,
         limit: 50
-      })
+      }),
+      pick: (response) => response.memories || []
     })
-    memories.value = response.memories || []
+    memories.value = items.sort((a, b) => Date.parse(b.updated_at || '') - Date.parse(a.updated_at || ''))
   } catch (err: any) {
     error.value = err.message || 'Hot Memory 加载失败'
   } finally {
@@ -214,7 +219,7 @@ onMounted(async () => {
   await loadMemories()
 })
 
-watch(() => [context.orgId, context.projectId, context.agentId, scope.value, statusFilter.value], () => {
+watch(() => [context.orgId, context.projectId, context.agentId, scope.value, visibility.value, statusFilter.value], () => {
   void loadMemories()
 })
 </script>
@@ -276,7 +281,7 @@ watch(() => [context.orgId, context.projectId, context.agentId, scope.value, sta
         </select>
       </div>
       <div v-if="loading" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">正在加载 Hot Memory...</div>
-      <div v-else-if="memories.length === 0" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">当前过滤条件下暂无 Hot Memory。</div>
+      <div v-else-if="memories.length === 0" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">当前工作区暂无 Hot Memory。</div>
       <div v-else class="mt-4 grid gap-4">
         <article v-for="memory in memories" :key="memory.memory_id" class="rounded-3xl border bg-stone-50 p-5">
           <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">

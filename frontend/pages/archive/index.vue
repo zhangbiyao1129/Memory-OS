@@ -2,6 +2,7 @@
 const auth = useAuthStore()
 const context = useContextStore()
 const { request } = useApi()
+const { hasWorkspaceContext, requestWorkspaceProjects } = useWorkspaceProjectScopes()
 
 type ArchiveMetadata = {
   archive_id: string
@@ -49,20 +50,21 @@ function statusText(status: string) {
 }
 
 async function loadArchives() {
-  if (!auth.isAuthenticated || !hasProjectContext.value) return
+  if (!auth.isAuthenticated || !hasWorkspaceContext.value) return
   loading.value = true
   error.value = ''
   try {
-    const response = await request<ArchiveListResponse>('/memory/archive/list', {
-      method: 'POST',
-      body: {
-        org_id: context.orgId,
-        project_id: context.projectId,
+    const items = await requestWorkspaceProjects<ArchiveListResponse, ArchiveMetadata>({
+      path: '/memory/archive/list',
+      buildBody: (scope) => ({
+        org_id: scope.org_id,
+        project_id: scope.project_id,
         status: statusFilter.value,
         limit: 50
-      }
+      }),
+      pick: (response) => response.archives || []
     })
-    archives.value = response.archives || []
+    archives.value = items.sort((a, b) => Date.parse(b.updated_at || '') - Date.parse(a.updated_at || ''))
   } catch (err: any) {
     error.value = err.message || 'Archive 加载失败'
   } finally {
@@ -142,7 +144,7 @@ watch(() => [context.orgId, context.projectId, statusFilter.value], () => {
     <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div>
         <h2 class="text-3xl font-black">Markdown 归档库</h2>
-        <p class="mt-2 text-stone-600">连接真实 <code>/memory/archive/list</code> API，按当前组织和项目读取可治理归档。</p>
+        <p class="mt-2 text-stone-600">连接真实 <code>/memory/archive/list</code> API，汇总当前工作区项目内的可治理归档。</p>
       </div>
       <div class="flex flex-wrap gap-2">
         <select v-model="statusFilter" class="rounded-2xl border bg-white px-4 py-2 text-sm font-bold">
@@ -179,7 +181,7 @@ watch(() => [context.orgId, context.projectId, statusFilter.value], () => {
     </details>
 
     <div v-if="loading" class="mt-6 rounded-3xl bg-white p-6 text-stone-600">正在加载 Archive...</div>
-    <div v-else-if="auth.isAuthenticated && hasProjectContext && archives.length === 0" class="mt-6 rounded-3xl bg-white p-6 text-stone-600">当前过滤条件下暂无 Archive。</div>
+    <div v-else-if="auth.isAuthenticated && hasWorkspaceContext && archives.length === 0" class="mt-6 rounded-3xl bg-white p-6 text-stone-600">当前工作区暂无 Archive。</div>
     <div v-else class="mt-6 grid gap-4">
       <NuxtLink v-for="archive in archives" :key="archive.archive_id" :to="`/archive/${archive.archive_id}`" class="rounded-3xl border bg-white p-5 hover:border-orange-300">
         <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">

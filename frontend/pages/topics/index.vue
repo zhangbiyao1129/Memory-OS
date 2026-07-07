@@ -1,7 +1,7 @@
 <script setup lang="ts">
 const auth = useAuthStore()
 const context = useContextStore()
-const { request } = useApi()
+const { hasWorkspaceContext, requestWorkspaceProjects } = useWorkspaceProjectScopes()
 
 type TopicState = {
   id: number
@@ -25,8 +25,6 @@ const error = ref('')
 const topics = ref<TopicState[]>([])
 const sourceKeyFilter = ref('')
 
-const hasProjectContext = computed(() => Boolean(context.orgId && context.projectId))
-
 function formatDate(value?: string) {
   if (!value) return '-'
   const date = new Date(value)
@@ -34,26 +32,23 @@ function formatDate(value?: string) {
   return date.toLocaleString('zh-CN', { hour12: false })
 }
 
-function requestBody(extra: Record<string, unknown> = {}) {
-  return {
-    org_id: context.orgId,
-    project_id: context.projectId,
-    ...extra
-  }
-}
-
 async function loadTopics() {
-  if (!auth.isAuthenticated || !hasProjectContext.value) return
+  if (!auth.isAuthenticated || !hasWorkspaceContext.value) return
   loading.value = true
   error.value = ''
   try {
     const body: Record<string, unknown> = { limit: 50 }
     if (sourceKeyFilter.value) body.source_key = sourceKeyFilter.value
-    const response = await request<TopicListResponse>('/memory/topics/list', {
-      method: 'POST',
-      body: requestBody(body)
+    const items = await requestWorkspaceProjects<TopicListResponse, TopicState>({
+      path: '/memory/topics/list',
+      buildBody: (project) => ({
+        org_id: project.org_id,
+        project_id: project.project_id,
+        ...body
+      }),
+      pick: (response) => response.topics || []
     })
-    topics.value = response.topics || []
+    topics.value = items.sort((a, b) => Date.parse(b.updated_at || '') - Date.parse(a.updated_at || ''))
   } catch (err: any) {
     error.value = err.message || '主题列表加载失败'
   } finally {
@@ -89,7 +84,7 @@ watch(() => [context.orgId, context.projectId], () => {
           source_key
           <input v-model="sourceKeyFilter" class="mt-2 w-full rounded-2xl border p-3 text-sm" placeholder="筛选 source_key" @keyup.enter="loadTopics">
         </label>
-        <button class="self-end rounded-2xl bg-stone-950 px-4 py-3 font-bold text-white disabled:cursor-not-allowed disabled:bg-stone-400" :disabled="loading || !hasProjectContext" @click="loadTopics">查询</button>
+        <button class="self-end rounded-2xl bg-stone-950 px-4 py-3 font-bold text-white disabled:cursor-not-allowed disabled:bg-stone-400" :disabled="loading || !hasWorkspaceContext" @click="loadTopics">查询</button>
       </div>
     </section>
 
@@ -97,7 +92,7 @@ watch(() => [context.orgId, context.projectId], () => {
     <section class="mt-6 rounded-3xl border bg-white p-5">
       <h3 class="text-xl font-black">主题列表（{{ topics.length }}）</h3>
       <div v-if="loading" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">正在加载主题...</div>
-      <div v-else-if="topics.length === 0" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">当前过滤条件下暂无主题。</div>
+      <div v-else-if="topics.length === 0" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">当前工作区暂无主题。</div>
       <div v-else class="mt-4 grid gap-4">
         <article v-for="ts in topics" :key="ts.id" class="rounded-3xl border bg-stone-50 p-5">
           <div class="flex flex-col gap-2 xl:flex-row xl:items-start xl:justify-between">
