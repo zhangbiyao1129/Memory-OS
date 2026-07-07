@@ -10,6 +10,39 @@ DRY_RUN="${DRY_RUN:-0}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+memory_os_write_build_info() {
+  if [[ "$DRY_RUN" == "1" ]]; then
+    return 0
+  fi
+
+  local build_version="${BUILD_VERSION:-0.4.0-dev}"
+  local build_commit="${BUILD_COMMIT:-unknown}"
+  local build_dirty="${BUILD_DIRTY:-unknown}"
+  local build_time="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+
+  if command -v git >/dev/null 2>&1 && git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [[ -z "${BUILD_COMMIT:-}" ]]; then
+      build_commit="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
+    fi
+    if [[ -z "${BUILD_DIRTY:-}" ]]; then
+      if [[ -z "$(git -C "$REPO_ROOT" status --porcelain)" ]]; then
+        build_dirty=false
+      else
+        build_dirty=true
+      fi
+    fi
+  fi
+
+  local remote_file="${TARGET_DIR%/}/.build-info.env"
+  local remote_tmp="${remote_file}.$$"
+  {
+    printf 'BUILD_VERSION=%s\n' "$build_version"
+    printf 'BUILD_COMMIT=%s\n' "$build_commit"
+    printf 'BUILD_DIRTY=%s\n' "$build_dirty"
+    printf 'BUILD_TIME=%s\n' "$build_time"
+  } | ssh "$TARGET_HOST" "umask 077 && cat > $(printf '%q' "$remote_tmp") && mv $(printf '%q' "$remote_tmp") $(printf '%q' "$remote_file")"
+}
+
 RSYNC_ARGS=(
   -az
   --no-owner
@@ -42,3 +75,4 @@ fi
 
 echo "syncing $REPO_ROOT/ -> $TARGET_HOST:$TARGET_DIR"
 rsync "${RSYNC_ARGS[@]}" "$REPO_ROOT/" "$TARGET_HOST:$TARGET_DIR/"
+memory_os_write_build_info

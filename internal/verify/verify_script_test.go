@@ -824,6 +824,8 @@ func TestT480DirectSyncWorkflowIsSafeByDefault(t *testing.T) {
 		`--exclude=artifacts/`,
 		`--exclude=docs/`,
 		`--exclude=specs/`,
+		`memory_os_write_build_info`,
+		`BUILD_COMMIT=`,
 	} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("T480 sync script missing safety marker %q", required)
