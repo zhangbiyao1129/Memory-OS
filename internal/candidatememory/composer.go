@@ -99,7 +99,7 @@ func (c TopicComposer) Compose(ctx context.Context, req ComposeRequest) (Compose
 	}
 
 	for _, cand := range eligible {
-		if _, err := c.repo.UpdateCandidateStatus(ctx, req.OrgID, cand.CandidateID, StatusComposed, cand.Scores); err != nil {
+		if _, err := c.repo.UpdateCandidateStatus(ctx, req.OrgID, cand.CandidateID, StatusComposed, cand.Scores, false); err != nil {
 			return ComposeResult{}, err
 		}
 	}

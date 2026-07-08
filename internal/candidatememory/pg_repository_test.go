@@ -30,7 +30,7 @@ func TestPGRepositoryRequiresPool(t *testing.T) {
 	if _, err := repo.ListCandidates(ctx, ListFilter{OrgID: "o"}); err == nil {
 		t.Fatal("ListCandidates 应在 pool 缺失时报错")
 	}
-	if _, err := repo.UpdateCandidateStatus(ctx, "o", "x", StatusAccepted, Scores{}); err == nil {
+	if _, err := repo.UpdateCandidateStatus(ctx, "o", "x", StatusAccepted, Scores{}, false); err == nil {
 		t.Fatal("UpdateCandidateStatus 应在 pool 缺失时报错")
 	}
 	if _, err := repo.UpsertJob(ctx, Job{IdempotencyKey: "k"}); err == nil {
@@ -112,7 +112,7 @@ func TestPGRepositoryCandidateLifecycle(t *testing.T) {
 		t.Fatalf("期望 1 条,得到 %d", len(listed))
 	}
 
-	updated, err := repo.UpdateCandidateStatus(ctx, orgID, "cand-"+suffix, StatusAccepted, Scores{HotMemoryScore: 0.5})
+	updated, err := repo.UpdateCandidateStatus(ctx, orgID, "cand-"+suffix, StatusAccepted, Scores{HotMemoryScore: 0.5}, false)
 	if err != nil {
 		t.Fatalf("update status: %v", err)
 	}

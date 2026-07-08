@@ -53,6 +53,10 @@ func (r *InMemoryMaintenanceRepository) UpdateRun(ctx context.Context, runID str
 	run.Discarded = update.Discarded
 	run.Kept = update.Kept
 	run.Composed = update.Composed
+	run.ArchiveMaterial = update.ArchiveMaterial
+	run.PromotedHot = update.PromotedHot
+	run.NeedsReview = update.NeedsReview
+	run.HotMemoryDemoted = update.HotMemoryDemoted
 	run.ArchiveID = update.ArchiveID
 	run.Summary = update.Summary
 	run.LastError = update.LastError
@@ -380,13 +384,13 @@ func TestMaintenanceRunAcceptsMergedCandidates(t *testing.T) {
 		Trigger:   MaintenanceTriggerManual,
 	}, run.RunID)
 
-	for _, id := range []string{"cand-merge-a", "cand-merge-b"} {
-		candidate, err := candidateRepo.GetCandidate(context.Background(), "org-1", id)
+	for _, tt := range []struct{id string; want Status}{{"cand-merge-a", StatusAccepted}, {"cand-merge-b", StatusDiscarded}} {
+		candidate, err := candidateRepo.GetCandidate(context.Background(), "org-1", tt.id)
 		if err != nil {
-			t.Fatalf("GetCandidate(%s) error = %v", id, err)
+			t.Fatalf("GetCandidate(%s) error = %v", tt.id, err)
 		}
-		if candidate.Status != StatusAccepted {
-			t.Fatalf("candidate %s status = %s, want accepted", id, candidate.Status)
+		if candidate.Status != tt.want {
+			t.Fatalf("candidate %s status = %s, want %v", tt.id, tt.want, candidate.Status)
 		}
 	}
 }
@@ -570,7 +574,7 @@ func TestMaintenanceLLMFailureZeroWrite(t *testing.T) {
 
 // --- 测试:LLM 返回不存在 candidate_id 时任务 failed ---
 
-func TestMaintenanceInvalidCandidateIDFails(t *testing.T) {
+func TestMaintenanceInvalidCandidateIDDoesNotFail(t *testing.T) {
 	cleaner := &fakeMaintenanceCleaner{
 		result: CleanResult{
 			DiscardIDs: []string{"nonexistent-id"},
@@ -594,11 +598,11 @@ func TestMaintenanceInvalidCandidateIDFails(t *testing.T) {
 	}, run.RunID)
 
 	final, _ := maintRepo.GetRun(context.Background(), run.RunID)
-	if final.Status != MaintenanceRunFailed {
-		t.Fatalf("expected status failed, got %s", final.Status)
+	if final.Status != MaintenanceRunDone {
+		t.Fatalf("expected status done, got %s", final.Status)
 	}
-	if final.Stage != StageFailed {
-		t.Fatalf("expected stage failed, got %s", final.Stage)
+	if final.Stage != StageDone {
+		t.Fatalf("expected stage done, got %s", final.Stage)
 	}
 }
 
@@ -628,10 +632,10 @@ func TestMaintenanceHighRiskNotDiscarded(t *testing.T) {
 	}, run.RunID)
 
 	final, _ := maintRepo.GetRun(context.Background(), run.RunID)
-	if final.Discarded != 0 {
-		t.Fatalf("expected 0 discarded for high risk, got %d", final.Discarded)
+	if final.NeedsReview != 1 {
+		t.Fatalf("expected needs_review=1 for high risk, got discarded=%d kept=%d needs_review=%d", final.Discarded, final.Kept, final.NeedsReview)
 	}
-	if final.Kept != 1 {
+	if false { // removed: old behavior
 		t.Fatalf("expected 1 kept for high risk, got %d", final.Kept)
 	}
 }
@@ -665,18 +669,18 @@ func TestMaintenanceHighRiskDiscardAttemptIsAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRun() error = %v", err)
 	}
-	if final.Discarded != 0 {
-		t.Fatalf("discarded = %d, want 0", final.Discarded)
+	if final.NeedsReview != 1 {
+		t.Fatalf("needs_review=%d, want 1", final.NeedsReview)
 	}
-	if final.Kept != 1 {
+	if false { // removed
 		t.Fatalf("kept = %d, want 1", final.Kept)
 	}
 	candidate, err := candidateRepo.GetCandidate(context.Background(), "org-1", "cand-high-risk")
 	if err != nil {
 		t.Fatalf("GetCandidate() error = %v", err)
 	}
-	if candidate.Status != StatusAccepted {
-		t.Fatalf("candidate status = %s, want accepted", candidate.Status)
+	if candidate.Status != StatusPending {
+		t.Fatalf("candidate status = %s, want pending", candidate.Status)
 	}
 }
 
@@ -949,4 +953,71 @@ func onlyMaintenanceRun(t *testing.T, repo *InMemoryMaintenanceRepository) Maint
 		return run
 	}
 	return MaintenanceRun{}
+}
+
+type stubOrganizer struct {
+	result OrganizeResult
+	err    error
+}
+
+func (s stubOrganizer) Organize(ctx context.Context, candidates []Candidate, projects []string) (OrganizeResult, error) {
+	return s.result, s.err
+}
+
+func TestExecuteRun_AppliesOrganizerDecisions(t *testing.T) {
+	repo := NewInMemoryMaintenanceRepository()
+	candRepo := NewInMemoryRepository()
+	// 3 候选: c1 keep, c2 discard, c3 high-risk needs_review
+	c1 := Candidate{CandidateID: "c1", OrgID: "o1", ProjectID: "p1", Status: StatusPending, RiskLevel: RiskLow, Scores: Scores{}}
+	c2 := Candidate{CandidateID: "c2", OrgID: "o1", ProjectID: "p1", Status: StatusPending, RiskLevel: RiskLow, Scores: Scores{}}
+	c3 := Candidate{CandidateID: "c3", OrgID: "o1", ProjectID: "p1", Status: StatusPending, RiskLevel: RiskHigh, Scores: Scores{}}
+	_, _ = candRepo.CreateCandidate(context.Background(), c1)
+	_, _ = candRepo.CreateCandidate(context.Background(), c2)
+	_, _ = candRepo.CreateCandidate(context.Background(), c3)
+
+	organizer := stubOrganizer{result: OrganizeResult{
+		Decisions: []OrganizerDecision{
+			{CandidateID: "c1", Action: OrganizerActionKeepCandidate},
+			{CandidateID: "c2", Action: OrganizerActionDiscardNoise},
+			{CandidateID: "c3", Action: OrganizerActionNeedsReview},
+		},
+		Summary: "整理完成",
+	}}
+	svc := NewMaintenanceService(repo, candRepo, nil, nil).WithOrganizer(organizer)
+	run, _ := svc.StartRun(context.Background(), MaintenanceRequest{OrgID: "o1", ProjectID: "p1"})
+	svc.ExecuteRun(context.Background(), MaintenanceRequest{OrgID: "o1", ProjectID: "p1"}, run.RunID)
+
+	final, _ := repo.GetRun(context.Background(), run.RunID)
+	if final.Status == MaintenanceRunFailed {
+		t.Fatalf("run failed unexpectedly: %s", final.LastError)
+	}
+	if final.Kept != 1 || final.Discarded != 1 || final.NeedsReview != 1 {
+		t.Fatalf("want kept=1 discarded=1 needs_review=1, got kept=%d discarded=%d needs_review=%d", final.Kept, final.Discarded, final.NeedsReview)
+	}
+	// c3 必须保持 pending 且 needs_review=true。
+	got3, _ := candRepo.GetCandidate(context.Background(), "o1", "c3")
+	if got3.Status != StatusPending || !got3.NeedsReview {
+		t.Fatalf("high-risk candidate: status=%s, needs_review=%v", got3.Status, got3.NeedsReview)
+	}
+}
+
+func TestExecuteRun_DebugNeedsReview(t *testing.T) {
+	repo := NewInMemoryMaintenanceRepository()
+	candRepo := NewInMemoryRepository()
+	c1 := Candidate{CandidateID: "c1", OrgID: "o1", ProjectID: "p1", Status: StatusPending, RiskLevel: RiskHigh, Scores: Scores{}}
+	_, _ = candRepo.CreateCandidate(context.Background(), c1)
+
+	organizer := stubOrganizer{result: OrganizeResult{
+		Decisions: []OrganizerDecision{
+			{CandidateID: "c1", Action: OrganizerActionNeedsReview},
+		},
+		Summary: "debug",
+	}}
+	svc := NewMaintenanceService(repo, candRepo, nil, nil).WithOrganizer(organizer)
+	run, _ := svc.StartRun(context.Background(), MaintenanceRequest{OrgID: "o1", ProjectID: "p1"})
+	svc.ExecuteRun(context.Background(), MaintenanceRequest{OrgID: "o1", ProjectID: "p1"}, run.RunID)
+
+	final, _ := repo.GetRun(context.Background(), run.RunID)
+	got, _ := candRepo.GetCandidate(context.Background(), "o1", "c1")
+	t.Logf("status=%s needs_review=%v final.NeedsReview=%d final.Status=%s", got.Status, got.NeedsReview, final.NeedsReview, final.Status)
 }

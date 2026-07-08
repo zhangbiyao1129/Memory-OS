@@ -101,7 +101,7 @@ func TestInMemoryRepositoryUpdateCandidateStatus(t *testing.T) {
 	repo.CreateCandidate(ctx, testCandidate())
 
 	scores := Scores{HotMemoryScore: 0.9, ComposeScore: 0.1}
-	updated, err := repo.UpdateCandidateStatus(ctx, "org-1", "cand-1", StatusAccepted, scores)
+	updated, err := repo.UpdateCandidateStatus(ctx, "org-1", "cand-1", StatusAccepted, scores, false)
 	if err != nil {
 		t.Fatalf("update status: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestInMemoryRepository_UpdateCandidateStatus_PreservesNeedsReview(t *testin
 	_, _ = repo.CreateCandidate(context.Background(), cand)
 
 	// 状态变更不应丢失 NeedsReview 标记。
-	updated, err := repo.UpdateCandidateStatus(context.Background(), "o1", "c1", StatusAccepted, cand.Scores)
+	updated, err := repo.UpdateCandidateStatus(context.Background(), "o1", "c1", StatusAccepted, cand.Scores, cand.NeedsReview)
 	if err != nil {
 		t.Fatalf("update status: %v", err)
 	}

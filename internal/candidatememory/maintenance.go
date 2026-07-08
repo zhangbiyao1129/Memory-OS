@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"time"
+
 )
 
 // MaintenanceTriggerType 清洗整合触发类型。
@@ -55,6 +56,10 @@ type MaintenanceRun struct {
 	Discarded       int
 	Kept            int
 	Composed        int
+	ArchiveMaterial int
+	PromotedHot     int
+	NeedsReview     int
+	HotMemoryDemoted int
 	ArchiveID       string
 	Summary         string
 	LastError       string
@@ -97,11 +102,15 @@ type MaintenanceRepository interface {
 
 // MaintenanceRunUpdate 清洗整合更新字段。
 type MaintenanceRunUpdate struct {
-	Processed   int
-	Discarded   int
-	Kept        int
-	Composed    int
-	ArchiveID   string
+	Processed       int
+	Discarded       int
+	Kept            int
+	Composed        int
+	ArchiveMaterial int
+	PromotedHot     int
+	NeedsReview     int
+	HotMemoryDemoted int
+	ArchiveID       string
 	Summary     string
 	LastError   string
 	CompletedAt *time.Time
@@ -143,6 +152,10 @@ type MaintenanceStatusDTO struct {
 	Discarded       int     `json:"discarded"`
 	Kept            int     `json:"kept"`
 	Composed        int     `json:"composed"`
+	ArchiveMaterial int     `json:"archive_material"`
+	PromotedHot     int     `json:"promoted_hot"`
+	NeedsReview     int     `json:"needs_review"`
+	HotMemoryDemoted int    `json:"hot_memory_demoted"`
 	ArchiveID       string  `json:"archive_id"`
 	Summary         string  `json:"summary"`
 	LastError       string  `json:"last_error"`
@@ -163,6 +176,10 @@ func (r MaintenanceRun) ToStatusDTO() MaintenanceStatusDTO {
 		Discarded:       r.Discarded,
 		Kept:            r.Kept,
 		Composed:        r.Composed,
+			ArchiveMaterial: r.ArchiveMaterial,
+			PromotedHot:     r.PromotedHot,
+			NeedsReview:     r.NeedsReview,
+			HotMemoryDemoted: r.HotMemoryDemoted,
 		ArchiveID:       r.ArchiveID,
 		Summary:         r.Summary,
 		LastError:       r.LastError,
@@ -182,7 +199,24 @@ type MaintenanceService struct {
 	candidateRepo Repository
 	composer      *TopicComposer
 	cleaner       MaintenanceCleaner
+	organizer     Organizer     // 统一整理决策器(优先于 cleaner)
+	hotMemory     HotMemorySink // promote_hot 复用(triage_service 同包使用)
 	triage        AutoTriage
+}
+
+// Organizer 统一 AI 整理决策器接口(替代 MaintenanceCleaner 主路径)。
+type Organizer interface {
+	Organize(ctx context.Context, candidates []Candidate, projects []string) (OrganizeResult, error)
+}
+
+func (s *MaintenanceService) WithOrganizer(o Organizer) *MaintenanceService {
+	s.organizer = o
+	return s
+}
+
+func (s *MaintenanceService) WithHotMemory(h HotMemorySink) *MaintenanceService {
+	s.hotMemory = h
+	return s
 }
 
 // AutoTriage 是后台清洗前的候选自动整理入口。
@@ -293,70 +327,93 @@ func (s *MaintenanceService) ExecuteRun(ctx context.Context, req MaintenanceRequ
 	// 更新 total_candidates
 	_ = s.repo.UpdateStage(ctx, runID, StageCallingLLM, len(candidates))
 
-	// 2. LLM 清洗(失败时零写入)
-	cleanResult, err := s.cleaner.Clean(ctx, candidates)
-	if err != nil {
-		s.failRun(ctx, runID, err)
+	// 2. AI 整理(失败零写入) — 优先用 organizer,cleaner 作为 fallback/兼容。
+	var organizeResult OrganizeResult
+	if s.organizer != nil {
+		var err error
+		organizeResult, err = s.organizer.Organize(ctx, candidates, nil)
+		if err != nil {
+			s.failRun(ctx, runID, err)
+			return
+		}
+	} else if s.cleaner != nil {
+		cleanRes, err := s.cleaner.Clean(ctx, candidates)
+		if err != nil {
+			s.failRun(ctx, runID, err)
+			return
+		}
+		organizeResult = cleanToOrganizeResult(cleanRes)
+	} else {
+		s.failRun(ctx, runID, errors.New("no organizer or cleaner configured"))
 		return
 	}
 
-	// 3. 校验 candidate_id 是否存在(防幻觉)
+	// 3. 幻觉校验已由 organizer 内部完成(若走 cleaner 兼容路径也通过 applyOrganizerAction 处理)。
 	if err := s.repo.UpdateStage(ctx, runID, StageValidating, len(candidates)); err != nil {
 		return
 	}
-	discardSet := make(map[string]bool, len(cleanResult.DiscardIDs))
-	for _, id := range cleanResult.DiscardIDs {
-		discardSet[id] = true
-	}
 
-	for _, id := range cleanResult.DiscardIDs {
-		if _, err := s.candidateRepo.GetCandidate(ctx, req.OrgID, id); err != nil {
-			s.failRun(ctx, runID, fmt.Errorf("candidate_id %s not found: %w", id, err))
-			return
-		}
-	}
-	for _, id := range cleanResult.KeepIDs {
-		if _, err := s.candidateRepo.GetCandidate(ctx, req.OrgID, id); err != nil {
-			s.failRun(ctx, runID, fmt.Errorf("candidate_id %s not found: %w", id, err))
-			return
-		}
-	}
-
-	// 4. 执行清洗动作
+	// 4. 应用整理决策
 	if err := s.repo.UpdateStage(ctx, runID, StageApplying, len(candidates)); err != nil {
 		return
 	}
-	discarded := 0
-	kept := 0
+	discarded, kept, archiveMaterial, promotedHot, needsReview := 0, 0, 0, 0, 0
+	decisionByID := make(map[string]OrganizerDecision, len(organizeResult.Decisions))
+	for _, d := range organizeResult.Decisions {
+		decisionByID[d.CandidateID] = d
+	}
 	for _, c := range candidates {
-		if discardSet[c.CandidateID] && c.RiskLevel != RiskHigh {
-			if _, err := s.candidateRepo.UpdateCandidateStatus(ctx, req.OrgID, c.CandidateID, StatusDiscarded, c.Scores); err != nil {
-				s.failRun(ctx, runID, fmt.Errorf("discard candidate %s failed: %s", c.CandidateID, err.Error()))
-				return
-			}
-			discarded++
-			continue
+		d, ok := decisionByID[c.CandidateID]
+		if !ok {
+			// 未出决策的候选默认 needs_review(保守)。
+			d = OrganizerDecision{Action: OrganizerActionNeedsReview, CandidateID: c.CandidateID}
 		}
-		if _, err := s.candidateRepo.UpdateCandidateStatus(ctx, req.OrgID, c.CandidateID, StatusAccepted, c.Scores); err != nil {
-			s.failRun(ctx, runID, fmt.Errorf("accept candidate %s failed: %s", c.CandidateID, err.Error()))
+		newStatus, setReview := applyOrganizerAction(d)
+		if setReview {
+			c.NeedsReview = true
+		}
+		// 高风险降级(和 organizer 内部一致): 禁止 discard_noise/promote_hot/archive_material, 强制 needs_review。
+		if c.RiskLevel == RiskHigh {
+			if d.Action == OrganizerActionDiscardNoise || d.Action == OrganizerActionPromoteHot || d.Action == OrganizerActionArchiveMaterial {
+				newStatus = StatusPending
+				c.NeedsReview = true
+			}
+		}
+		if _, err := s.candidateRepo.UpdateCandidateStatus(ctx, req.OrgID, c.CandidateID, newStatus, c.Scores, c.NeedsReview); err != nil {
+			s.failRun(ctx, runID, fmt.Errorf("apply action %s for %s: %w", d.Action, c.CandidateID, err))
 			return
 		}
-		kept++
+		if _, err := s.candidateRepo.UpdateCandidateStatus(ctx, req.OrgID, c.CandidateID, newStatus, c.Scores, c.NeedsReview); err != nil {
+			s.failRun(ctx, runID, fmt.Errorf("apply action %s for %s: %w", d.Action, c.CandidateID, err))
+			return
+		}
+		switch newStatus {
+		case StatusDiscarded:
+			discarded++
+		case StatusAccepted:
+			kept++
+		case StatusInComposePool:
+			archiveMaterial++
+		case StatusPromotedToHot:
+			// counted above
+		case StatusPending:
+			needsReview++
+		}
 	}
 
-	// 5. 触发 TopicComposer 沉淀
+	// 5. 归档: 只对整理后 in_compose_pool 且非空 source+thread 的分组执行,不 Force。
 	if err := s.repo.UpdateStage(ctx, runID, StageComposing, len(candidates)); err != nil {
 		return
 	}
 	composed := 0
 	archiveID := ""
-	if s.composer != nil {
+	if s.composer != nil && req.SourceKey != "" && req.ThreadID != "" {
 		result, err := s.composer.Compose(ctx, ComposeRequest{
 			OrgID:     req.OrgID,
 			ProjectID: req.ProjectID,
 			SourceKey: req.SourceKey,
 			ThreadID:  req.ThreadID,
-			Force:     true,
+			Force:     false, // 自动整理不再 Force
 		})
 		if err == nil && result.Ready {
 			composed = result.Composed
@@ -367,16 +424,61 @@ func (s *MaintenanceService) ExecuteRun(ctx context.Context, req MaintenanceRequ
 	// 6. 更新审计记录(成功)
 	now := time.Now().UTC()
 	_ = s.repo.UpdateRun(ctx, runID, MaintenanceRunDone, MaintenanceRunUpdate{
-		Processed:   len(candidates),
-		Discarded:   discarded,
-		Kept:        kept,
-		Composed:    composed,
-		ArchiveID:   archiveID,
-		Summary:     cleanResult.Summary,
-		CompletedAt: &now,
+		Processed:       len(candidates),
+		Discarded:       discarded,
+		Kept:            kept,
+		Composed:        composed,
+		ArchiveMaterial: archiveMaterial,
+		PromotedHot:     promotedHot,
+		NeedsReview:     needsReview,
+		ArchiveID:       archiveID,
+		Summary:         organizeResult.Summary,
+		CompletedAt:     &now,
 	})
 	// 成功时也更新 stage 为 done
 	_ = s.repo.UpdateStage(ctx, runID, StageDone, len(candidates))
+}
+
+// applyOrganizerAction 把决策动作映射到目标状态 + 是否置 needs_review。
+func applyOrganizerAction(d OrganizerDecision) (Status, bool) {
+	switch d.Action {
+	case OrganizerActionDiscardNoise:
+		return StatusDiscarded, false
+	case OrganizerActionKeepCandidate:
+		return StatusAccepted, false
+	case OrganizerActionArchiveMaterial:
+		return StatusInComposePool, false
+	case OrganizerActionDuplicateOf:
+		return StatusDiscarded, false // 去重: 标记丢弃,summary 写明合并目标
+	case OrganizerActionPromoteHot:
+		return StatusPromotedToHot, false // 实际提升在调用方处理
+	case OrganizerActionNeedsReview:
+		return StatusPending, true
+	default:
+		return StatusPending, true
+	}
+}
+
+// cleanToOrganizeResult 把旧 CleanResult(discard/keep/merge)映射为 OrganizeResult,保持兼容。
+func cleanToOrganizeResult(c CleanResult) OrganizeResult {
+	decisions := make([]OrganizerDecision, 0, len(c.DiscardIDs)+len(c.KeepIDs))
+	for _, id := range c.DiscardIDs {
+		decisions = append(decisions, OrganizerDecision{CandidateID: id, Action: OrganizerActionDiscardNoise})
+	}
+	for _, id := range c.KeepIDs {
+		decisions = append(decisions, OrganizerDecision{CandidateID: id, Action: OrganizerActionKeepCandidate})
+	}
+	for _, group := range c.MergeGroups {
+		if len(group) < 2 {
+			continue
+		}
+		// group[0] 作为合并目标保留。
+		decisions = append(decisions, OrganizerDecision{CandidateID: group[0], Action: OrganizerActionKeepCandidate})
+		for i := 1; i < len(group); i++ {
+			decisions = append(decisions, OrganizerDecision{CandidateID: group[i], Action: OrganizerActionDuplicateOf, MergeTarget: group[0]})
+		}
+	}
+	return OrganizeResult{Decisions: decisions, Summary: c.Summary}
 }
 
 func (s *MaintenanceService) listCleanableCandidates(ctx context.Context, req MaintenanceRequest) ([]Candidate, error) {
@@ -410,6 +512,9 @@ func (s *MaintenanceService) ExecuteWorkspaceRun(ctx context.Context, orgID stri
 	discarded := 0
 	kept := 0
 	composed := 0
+	archiveMaterial := 0
+	promotedHot := 0
+	needsReview := 0
 	projectsWithCandidates := 0
 	for _, projectID := range projectIDs {
 		req := MaintenanceRequest{OrgID: orgID, ProjectID: projectID, Trigger: MaintenanceTriggerManual}
@@ -447,6 +552,9 @@ func (s *MaintenanceService) ExecuteWorkspaceRun(ctx context.Context, orgID stri
 		discarded += final.Discarded
 		kept += final.Kept
 		composed += final.Composed
+		archiveMaterial += final.ArchiveMaterial
+		promotedHot += final.PromotedHot
+		needsReview += final.NeedsReview
 	}
 
 	now := time.Now().UTC()
@@ -459,6 +567,9 @@ func (s *MaintenanceService) ExecuteWorkspaceRun(ctx context.Context, orgID stri
 		Discarded:   discarded,
 		Kept:        kept,
 		Composed:    composed,
+		ArchiveMaterial: archiveMaterial,
+		PromotedHot:     promotedHot,
+		NeedsReview:     needsReview,
 		Summary:     summary,
 		CompletedAt: &now,
 	})

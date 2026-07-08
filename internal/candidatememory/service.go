@@ -53,5 +53,5 @@ func (s *Service) updateStatus(ctx context.Context, orgID, candidateID string, s
 	if err != nil {
 		return Candidate{}, err
 	}
-	return s.repo.UpdateCandidateStatus(ctx, orgID, candidateID, status, existing.Scores)
+	return s.repo.UpdateCandidateStatus(ctx, orgID, candidateID, status, existing.Scores, existing.NeedsReview)
 }

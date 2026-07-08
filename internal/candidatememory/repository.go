@@ -40,7 +40,7 @@ type Repository interface {
 	CreateCandidate(ctx context.Context, c Candidate) (Candidate, error)
 	GetCandidate(ctx context.Context, orgID, candidateID string) (Candidate, error)
 	ListCandidates(ctx context.Context, filter ListFilter) ([]Candidate, error)
-	UpdateCandidateStatus(ctx context.Context, orgID, candidateID string, status Status, scores Scores) (Candidate, error)
+	UpdateCandidateStatus(ctx context.Context, orgID, candidateID string, status Status, scores Scores, needsReview bool) (Candidate, error)
 
 	UpsertJob(ctx context.Context, job Job) (Job, error)
 	LeaseJob(ctx context.Context, now time.Time, lockedBy string, lockTTL time.Duration) (*Job, error)
@@ -151,7 +151,7 @@ func matchCandidate(c Candidate, f ListFilter) bool {
 	return true
 }
 
-func (r *InMemoryRepository) UpdateCandidateStatus(ctx context.Context, orgID, candidateID string, status Status, scores Scores) (Candidate, error) {
+func (r *InMemoryRepository) UpdateCandidateStatus(ctx context.Context, orgID, candidateID string, status Status, scores Scores, needsReview bool) (Candidate, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	key := candidateKey(orgID, candidateID)
@@ -161,6 +161,7 @@ func (r *InMemoryRepository) UpdateCandidateStatus(ctx context.Context, orgID, c
 	}
 	c.Status = status
 	c.Scores = scores
+	c.NeedsReview = needsReview
 	c.UpdatedAt = time.Now().UTC()
 	r.candidates[key] = c
 	return cloneCandidate(c), nil

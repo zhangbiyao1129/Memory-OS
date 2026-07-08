@@ -128,7 +128,7 @@ func (r *PGRepository) ListCandidates(ctx context.Context, filter ListFilter) ([
 	return out, rows.Err()
 }
 
-func (r *PGRepository) UpdateCandidateStatus(ctx context.Context, orgID, candidateID string, status Status, scores Scores) (Candidate, error) {
+func (r *PGRepository) UpdateCandidateStatus(ctx context.Context, orgID, candidateID string, status Status, scores Scores, needsReview bool) (Candidate, error) {
 	if err := r.check(); err != nil {
 		return Candidate{}, err
 	}
@@ -136,9 +136,9 @@ func (r *PGRepository) UpdateCandidateStatus(ctx context.Context, orgID, candida
 	if err != nil {
 		return Candidate{}, err
 	}
-	query := `UPDATE candidate_memories SET status=$1, scores=$2, updated_at=now()
-	WHERE org_id=$3 AND candidate_id=$4 RETURNING ` + candidateColumns
-	row := r.pool.QueryRow(ctx, query, string(status), scoresBytes, orgID, candidateID)
+	query := `UPDATE candidate_memories SET status=$1, scores=$2, needs_review=$3, updated_at=now()
+	WHERE org_id=$4 AND candidate_id=$5 RETURNING ` + candidateColumns
+	row := r.pool.QueryRow(ctx, query, string(status), scoresBytes, needsReview, orgID, candidateID)
 	return scanCandidate(row)
 }
 
