@@ -160,7 +160,7 @@ var newProductionHotMemory = func(cfg config.Config, pool *pgxpool.Pool) (hotmem
 	return hotmemory.NewServiceWithVectorIndex(hotmemory.NewPGRepository(pool), hotmemory.NewQdrantIndex(pool, qdrantClient, embedder, qdrant.DefaultCollectionName)), nil
 }
 
-var newProductionMaintenanceService = func(cfg config.Config, pool *pgxpool.Pool, candidateRepo candidatememory.Repository, composer *candidatememory.TopicComposer) (*candidatememory.MaintenanceService, error) {
+var newProductionMaintenanceService = func(cfg config.Config, pool *pgxpool.Pool, candidateRepo candidatememory.Repository, composer *candidatememory.TopicComposer, hotMemory candidatememory.HotMemorySink) (*candidatememory.MaintenanceService, error) {
 	model := strings.TrimSpace(cfg.LLMModel)
 	if model == "" {
 		model = "MiniMax-M2.7"
@@ -172,8 +172,23 @@ var newProductionMaintenanceService = func(cfg config.Config, pool *pgxpool.Pool
 	if err != nil {
 		return nil, err
 	}
-	cleaner := candidatememory.NewLLMMaintenanceCleaner(client).WithModel(model)
-	return candidatememory.NewMaintenanceService(candidatememory.NewPGMaintenanceRepository(pool), candidateRepo, composer, cleaner), nil
+	organizer := candidatememory.NewLLMOrganizer(client).WithModel(model)
+	return candidatememory.NewMaintenanceService(candidatememory.NewPGMaintenanceRepository(pool), candidateRepo, composer, nil).WithOrganizer(organizer).WithHotMemory(hotMemory), nil
+}
+
+var newProductionArchiveSummarizer = func(cfg config.Config) (candidatememory.ArchiveSummarizer, error) {
+	model := strings.TrimSpace(cfg.LLMModel)
+	if model == "" {
+		model = "MiniMax-M2.7"
+	}
+	if strings.TrimSpace(cfg.LLMBaseURL) == "" || strings.TrimSpace(cfg.LLMAPIKey) == "" || strings.TrimSpace(model) == "" {
+		return nil, nil
+	}
+	client, err := llm.NewOpenAICompatible(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, LLMModel: model, Timeout: 5 * time.Minute})
+	if err != nil {
+		return nil, err
+	}
+	return candidatememory.NewLLMArchiveSummarizer(client).WithModel(model), nil
 }
 
 var newProductionHotMemoryOrganizer = func(cfg config.Config) (hotmemory.Organizer, error) {
@@ -242,8 +257,15 @@ func routerOptions(cfg config.Config, healthService health.Service, pool *pgxpoo
 	archiveIndexQueue := jobs.NewPGArchiveIndexQueue(pool, jobs.PGArchiveIndexQueueOptions{WorkerID: "memory-api"})
 	archiveCreator := jobs.NewProductionArchiveCreator(options.ArchiveService, archiveIndexQueue)
 	composer := candidatememory.NewTopicComposer(candidateRepo, archiveCreator)
+	archiveSummarizer, err := newProductionArchiveSummarizer(cfg)
+	if err != nil {
+		return httpapi.RouterOptions{}, err
+	}
+	if archiveSummarizer != nil {
+		composer = composer.WithSummarizer(archiveSummarizer)
+	}
 	options.TopicComposer = &composer
-	maintenanceService, err := newProductionMaintenanceService(cfg, pool, candidateRepo, &composer)
+	maintenanceService, err := newProductionMaintenanceService(cfg, pool, candidateRepo, &composer, hot)
 	if err != nil {
 		return httpapi.RouterOptions{}, err
 	}

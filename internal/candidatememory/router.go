@@ -31,7 +31,7 @@ func NewRouter(_ any) Router {
 // 分流规则(Phase A):
 //   - 高风险 → pending_review(强制人工确认,不自动入热记忆)
 //   - 低风险短事实/偏好 → pending(阶段 A 禁止自动提升)
-//   - bugfix/decision/risk/follow_up → compose pool(等主题沉淀)
+//   - bugfix/decision/risk/follow_up → compose pool(作为归档素材)
 //   - 其余 → pending
 func (r Router) ApplyRouting(c Candidate) (Candidate, RoutingDecision, error) {
 	if c.RiskLevel == RiskHigh {
@@ -61,7 +61,7 @@ func isShortFact(c Candidate) bool {
 	return len([]rune(c.Content)) <= shortFactMaxRunes
 }
 
-// isComposeType 进入主题沉淀池的类型。
+// isComposeType 进入归档素材池的类型。
 func isComposeType(mt MemoryType) bool {
 	switch mt {
 	case MemoryTypeBugfix, MemoryTypeDecision, MemoryTypeRisk, MemoryTypeFollowUp:

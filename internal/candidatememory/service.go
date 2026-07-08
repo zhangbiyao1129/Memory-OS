@@ -43,7 +43,7 @@ func (s *Service) Discard(ctx context.Context, orgID, candidateID string) (Candi
 	return s.updateStatus(ctx, orgID, candidateID, StatusDiscarded)
 }
 
-// MarkComposed 标记候选已沉淀进 Archive(Phase 5 Composer 调用)。
+// MarkComposed 标记候选已归档进 Archive(Phase 5 Composer 调用)。
 func (s *Service) MarkComposed(ctx context.Context, orgID, candidateID string) (Candidate, error) {
 	return s.updateStatus(ctx, orgID, candidateID, StatusComposed)
 }

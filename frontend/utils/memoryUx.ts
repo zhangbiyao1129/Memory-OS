@@ -92,6 +92,9 @@ export type CandidateMaintenanceSummaryInput = {
   discarded?: number
   kept?: number
   composed?: number
+  archive_material?: number
+  promoted_hot?: number
+  needs_review?: number
 }
 
 function safeCount(value: unknown): number {
@@ -99,7 +102,7 @@ function safeCount(value: unknown): number {
 }
 
 export function formatCandidateMaintenanceSummary(input: CandidateMaintenanceSummaryInput) {
-  return `清洗完成：处理 ${safeCount(input.processed)} 条，丢弃 ${safeCount(input.discarded)} 条，保留 ${safeCount(input.kept)} 条，沉淀 ${safeCount(input.composed)} 条。`
+  return `整理完成：处理 ${safeCount(input.processed)} 条，丢弃 ${safeCount(input.discarded)} 条，保留 ${safeCount(input.kept)} 条，归档素材 ${safeCount(input.archive_material)} 条，写入热记忆 ${safeCount(input.promoted_hot)} 条，待确认 ${safeCount(input.needs_review)} 条，生成归档 ${safeCount(input.composed)} 条。`
 }
 
 type CountMap = Record<string, number>
@@ -110,6 +113,9 @@ type LifecycleStatsLike = {
   candidates: {
     total: number
     actionable_total?: number
+    pending_organize_total?: number
+    archive_material_total?: number
+    needs_review_total?: number
     by_status: CountMap
     by_risk: CountMap
     hot_score_buckets: ScoreBucket[]
@@ -156,6 +162,9 @@ function emptyLifecycleStats(): LifecycleStatsLike {
     candidates: {
       total: 0,
       actionable_total: 0,
+      pending_organize_total: 0,
+      archive_material_total: 0,
+      needs_review_total: 0,
       by_status: {},
       by_risk: {},
       hot_score_buckets: [],
@@ -185,9 +194,12 @@ export function aggregateLifecycleStats(items: LifecycleStatsLike[]) {
     out.hot_memories.total += item.hot_memories.total || 0
     addCounts(out.hot_memories.by_status, item.hot_memories.by_status)
 
-    out.candidates.total += item.candidates.total || 0
-    out.candidates.actionable_total = (out.candidates.actionable_total || 0) + (item.candidates.actionable_total || 0)
-    addCounts(out.candidates.by_status, item.candidates.by_status)
+	    out.candidates.total += item.candidates.total || 0
+	    out.candidates.actionable_total = (out.candidates.actionable_total || 0) + (item.candidates.actionable_total || 0)
+	    out.candidates.pending_organize_total = (out.candidates.pending_organize_total || 0) + (item.candidates.pending_organize_total || 0)
+	    out.candidates.archive_material_total = (out.candidates.archive_material_total || 0) + (item.candidates.archive_material_total || 0)
+	    out.candidates.needs_review_total = (out.candidates.needs_review_total || 0) + (item.candidates.needs_review_total || 0)
+	    addCounts(out.candidates.by_status, item.candidates.by_status)
     addCounts(out.candidates.by_risk, item.candidates.by_risk)
     addBuckets(out.candidates.hot_score_buckets, item.candidates.hot_score_buckets)
     addBuckets(out.candidates.compose_score_buckets, item.candidates.compose_score_buckets)

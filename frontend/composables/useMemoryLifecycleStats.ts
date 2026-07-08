@@ -4,10 +4,13 @@ export type CountMap = Record<string, number>
 export type LifecycleStats = {
   archives: { total: number; by_status: CountMap }
   hot_memories: { total: number; by_status: CountMap }
-  candidates: {
-    total: number
-    actionable_total?: number
-    by_status: CountMap
+	  candidates: {
+	    total: number
+	    actionable_total?: number
+	    pending_organize_total?: number
+	    archive_material_total?: number
+	    needs_review_total?: number
+	    by_status: CountMap
     by_risk: CountMap
     hot_score_buckets: ScoreBucket[]
     compose_score_buckets: ScoreBucket[]

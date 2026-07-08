@@ -324,6 +324,24 @@ func TestBuildWorkerInjectsHotMemoryIntoCandidateRouter(t *testing.T) {
 	}
 }
 
+func TestNewAutoMaintenanceServiceUsesUnifiedOrganizer(t *testing.T) {
+	hot := hotmemory.NewService(hotmemory.NewMemoryRepository())
+	service, err := newAutoMaintenanceService(productionWorkerConfig(), &pgxpool.Pool{}, candidatememory.NewInMemoryRepository(), nil, hot)
+	if err != nil {
+		t.Fatalf("newAutoMaintenanceService() error = %v", err)
+	}
+	maintenance, ok := service.(*candidatememory.MaintenanceService)
+	if !ok || maintenance == nil {
+		t.Fatalf("newAutoMaintenanceService() = %T, want *MaintenanceService", service)
+	}
+	if !maintenance.OrganizerConfigured() {
+		t.Fatal("auto maintenance service did not configure unified organizer")
+	}
+	if !maintenance.HotMemoryConfigured() {
+		t.Fatal("auto maintenance service did not configure hot memory sink")
+	}
+}
+
 func TestBuildWorkerConfiguresAutoMaintenance(t *testing.T) {
 	originalNewPool := newPostgresPool
 	originalRunMigrations := runWorkerMigrations
@@ -373,8 +391,8 @@ func TestBuildWorkerConfiguresAutoMaintenance(t *testing.T) {
 		return llm.NewOpenAICompatible(cfg)
 	}
 	autoMaintenanceCalled := false
-	newAutoMaintenanceService = func(cfg config.Config, pool *pgxpool.Pool, candidateRepo candidatememory.Repository, composer *candidatememory.TopicComposer) (jobs.AutoMaintenance, error) {
-		autoMaintenanceCalled = pool != nil && candidateRepo != nil && composer != nil
+	newAutoMaintenanceService = func(cfg config.Config, pool *pgxpool.Pool, candidateRepo candidatememory.Repository, composer *candidatememory.TopicComposer, hotMemory candidatememory.HotMemorySink) (jobs.AutoMaintenance, error) {
+		autoMaintenanceCalled = pool != nil && candidateRepo != nil && composer != nil && hotMemory != nil
 		return fakeWorkerAutoMaintenance{}, nil
 	}
 

@@ -231,7 +231,7 @@ func TestTriagePageShowsAutomaticOrganizationSignals(t *testing.T) {
 	}
 	page := string(content)
 	required := []string{
-		"自动整理",
+		"整理记录",
 		"跨项目关联",
 		"全局工具记忆",
 		"/memory/triage/list",
@@ -297,7 +297,7 @@ func TestDashboardPageUsesRealAPIStats(t *testing.T) {
 		"useMemoryLifecycleStats",
 		"生命周期",
 		"候选状态",
-		"主题沉淀",
+		"归档任务",
 	} {
 		if !strings.Contains(page, required) {
 			t.Fatalf("dashboard page must use real API stats marker %q", required)
@@ -1503,7 +1503,7 @@ func TestMemoryPageCollectsLifecycleMenusAndCharts(t *testing.T) {
 		"归档库",
 		"热记忆",
 		"候选记忆",
-		"主题沉淀",
+		"归档任务",
 		"<BarChart",
 		"<StackedBar",
 		"<RingMeter",

@@ -2,15 +2,15 @@
 
 Memory OS 是一个原生多 Agent 记忆平台，用于把 Codex、Claude Code、Cursor、opencode、Hermes 等 Agent 的工作过程沉淀为可检索、可追溯、可治理的长期记忆。
 
-v0.9 的重点是把记忆生命周期跑成闭环：事件写入、候选提炼、Hot Memory、候选清洗、主题沉淀、Archive RAG、统一检索、MCP 接入和管理台总览已经形成一条可部署、可验证的生产路径。
+v0.9 的重点是把记忆生命周期跑成闭环：事件写入、候选提炼、Hot Memory、AI 整理、归档任务、Archive RAG、统一检索、MCP 接入和管理台总览已经形成一条可部署、可验证的生产路径。
 
 ## 核心能力
 
 - **统一记忆入口**：HTTP API 和 MCP 都走同一套 Memory OS 后端能力。
 - **用户级总览**：管理台展示当前用户的全部记忆，不按项目或 Agent 分开展示总数。
-- **项目级治理**：记忆写入、清洗、归档和检索仍保留项目维度，用于隔离上下文和权限边界。
+- **项目级治理**：记忆写入、整理、归档和检索仍保留项目维度，用于隔离上下文和权限边界。
 - **Agent 来源标记**：Agent ID 只作为来源 metadata，不作为统计或存储隔离维度。
-- **候选记忆闭环**：TurnEvent 进入候选队列，worker 提炼候选，达到主题阈值后自动清洗并沉淀成 Markdown Archive。
+- **候选记忆闭环**：TurnEvent 进入候选队列，worker 提炼候选；AI 整理把候选分流为待确认、丢弃、Hot Memory 或归档素材，归档任务再写成 Markdown Archive。
 - **Hot Memory**：高价值短期工作记忆可以进入 Hot Memory，并在检索命中后记录使用反馈。
 - **Archive RAG**：长期沉淀以 Markdown 为正文权威源，Qdrant 只保存可重建索引。
 - **Secret 安全边界**：Secret 明文只进入加密存储和本地解密路径，不进入日志、Markdown、Qdrant、Hot Memory 或模型回复。
@@ -33,10 +33,10 @@ TurnEvent -> candidate_memory_jobs -> memory-worker
         |              +-----------------+-----------------+
         |              |                                   |
         v              v                                   v
-   Hot Memory   Auto Maintenance                    Topic Composer
+   Hot Memory      AI Organizer                      Archive Composer
         |              |                                   |
         |              v                                   v
-        |        discard / keep                    Markdown Archive
+        |   discard / review / hot/archive         Markdown Archive
         |                                                  |
         +------------------------+-------------------------+
                                  v
@@ -56,10 +56,10 @@ TurnEvent -> candidate_memory_jobs -> memory-worker
 1. Agent 通过 MCP 或 HTTP 写入 TurnEvent。
 2. API 根据事件类型和价值判断创建 candidate job。
 3. `memory-worker` 消费 job，调用 LLM 提炼候选记忆。
-4. 候选按规则进入 Hot Memory、pending 或 compose pool。
-5. topic 达到沉淀阈值且空闲后，worker 自动触发 maintenance。
-6. maintenance 调用 LLM 清洗候选，执行 discard / keep。
-7. TopicComposer 把可沉淀候选写成 Markdown Archive。
+4. 候选按规则进入 Hot Memory、待整理候选或归档素材池。
+5. worker 按项目串行触发 AI 整理，避免模型 provider 并发过高。
+6. AI 整理调用 LLM 做统一去向决策，执行丢弃、保留、待确认、写入 Hot Memory 或进入归档素材。
+7. Archive Composer 把满足条件的归档素材写成 Markdown Archive。
 8. Archive 进入索引队列，生成 Qdrant chunk 索引。
 9. `/memory/search` 和 MCP `memory_search` 统一检索 Hot Memory + Archive RAG。
 10. 检索使用情况写入反馈，用于后续排序和治理。
@@ -137,7 +137,7 @@ Web 控制台入口：
 展示口径：
 
 - 总览以用户为准，显示当前用户全部记忆。
-- 存储、清洗、归档和检索仍按项目隔离。
+- 存储、整理、归档和检索仍按项目隔离。
 - Agent 只标记来源，不作为展示统计维度。
 
 ## 部署
@@ -151,7 +151,7 @@ Memory OS 可以部署到任意支持 Docker 和 Docker Compose 的 Linux 主机
 | Web | 管理台前端 |
 | API | Memory OS HTTP API |
 | MCP | Streamable HTTP MCP 服务 |
-| Worker | 后台队列、候选提炼、自动清洗沉淀 |
+| Worker | 后台队列、候选提炼、AI 整理和归档 |
 | PostgreSQL | 权威元数据源 |
 | Redis | 队列、锁、缓存和限流 |
 | Qdrant | 可重建向量索引 |
@@ -235,13 +235,13 @@ curl "$MEMORY_OS_API_URL/version"
 ```text
 cmd/
   memory-api           HTTP API 和管理台后端
-  memory-worker        后台队列、候选提炼、自动清洗沉淀
+  memory-worker        后台队列、候选提炼、AI 整理和归档
   memory-mcp           远程 MCP Streamable HTTP 服务
   memory-mcp-local     stdio MCP 本地代理
 
 internal/
   eventlog             TurnEvent 写入和脱敏
-  candidatememory      候选记忆、清洗、主题沉淀
+  candidatememory      候选记忆、AI 整理、归档素材
   hotmemory            热记忆
   archive              Markdown Archive
   retrieval            统一检索

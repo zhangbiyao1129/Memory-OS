@@ -1,6 +1,6 @@
 package candidatememory
 
-// Scorer 为候选打分,分数影响分流(自动热记忆 vs 主题沉淀池)。
+// Scorer 为候选打分,分数影响分流(自动热记忆 vs 归档素材池)。
 // Phase 3 可替换为结合 LLM confidence 与相似度的实现。
 type Scorer interface {
 	Score(c Candidate) Scores
@@ -13,7 +13,7 @@ func (RuleScorer) Score(c Candidate) Scores {
 	hot := 0.0
 	compose := 0.0
 
-	// 类型基础倾向:短事实/偏好 → 热记忆;决策/修复/风险/后续 → 沉淀池
+	// 类型基础倾向:短事实/偏好 → 热记忆;决策/修复/风险/后续 → 归档素材池
 	switch c.MemoryType {
 	case MemoryTypeFact, MemoryTypePreference:
 		hot += 0.5

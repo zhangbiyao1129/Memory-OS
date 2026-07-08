@@ -71,8 +71,8 @@ watch(() => [context.orgId, context.projectId], () => {
   <AppShell>
     <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div>
-        <h2 class="text-3xl font-black">主题沉淀</h2>
-        <p class="mt-2 text-stone-600">候选记忆按 source_key + thread_id 聚合的主题沉淀状态。</p>
+        <h2 class="text-3xl font-black">归档任务</h2>
+        <p class="mt-2 text-stone-600">候选记忆按 source_key + thread_id 聚合后生成长期归档的任务状态。</p>
       </div>
       <button class="rounded-2xl border bg-white px-4 py-2 font-bold" :disabled="loading" @click="loadTopics">{{ loading ? '刷新中...' : '刷新' }}</button>
     </div>
@@ -90,21 +90,21 @@ watch(() => [context.orgId, context.projectId], () => {
 
     <!-- 主题列表 -->
     <section class="mt-6 rounded-3xl border bg-white p-5">
-      <h3 class="text-xl font-black">主题列表（{{ topics.length }}）</h3>
-      <div v-if="loading" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">正在加载主题...</div>
-      <div v-else-if="topics.length === 0" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">当前工作区暂无主题。</div>
+      <h3 class="text-xl font-black">工作区归档任务（{{ topics.length }}）</h3>
+      <div v-if="loading" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">正在加载归档任务...</div>
+      <div v-else-if="topics.length === 0" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">当前工作区暂无归档任务。</div>
       <div v-else class="mt-4 grid gap-4">
         <article v-for="ts in topics" :key="ts.id" class="rounded-3xl border bg-stone-50 p-5">
           <div class="flex flex-col gap-2 xl:flex-row xl:items-start xl:justify-between">
             <div class="flex-1">
               <div class="flex flex-wrap items-center gap-2">
-                <span v-if="ts.ready_to_compose" class="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-bold text-emerald-900">可沉淀</span>
-                <span v-if="ts.composed_archive_id" class="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-bold text-blue-900">已沉淀</span>
+                <span v-if="ts.ready_to_compose" class="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-bold text-emerald-900">可归档</span>
+                <span v-if="ts.composed_archive_id" class="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-bold text-blue-900">已归档</span>
                 <span class="text-sm font-bold text-stone-950">{{ ts.source_key }}</span>
                 <span v-if="ts.thread_id" class="text-xs text-stone-500">· {{ ts.thread_id }}</span>
               </div>
               <p class="mt-2 text-sm text-stone-600">
-                候选 {{ ts.candidate_count }} 条 · 完成分 {{ ts.completion_score.toFixed(2) }}
+                候选 {{ ts.candidate_count }} 条 · 归档准备度 {{ ts.completion_score.toFixed(2) }}
               </p>
               <p class="mt-1 text-xs text-stone-500">
                 最后事件 {{ formatDate(ts.last_event_at) }} · 更新于 {{ formatDate(ts.updated_at) }}

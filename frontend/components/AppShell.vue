@@ -11,7 +11,7 @@ const nav = [
   ['总览', '/'],
   ['记忆', '/memory'],
   ['检索', '/search'],
-  ['自动整理', '/triage'],
+  ['整理记录', '/triage'],
   ['写入诊断', '/diagnostics'],
   ['Secret', '/secrets'],
   ['日志', '/logs'],

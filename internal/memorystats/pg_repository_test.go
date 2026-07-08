@@ -77,11 +77,11 @@ func TestPGRepositorySnapshotCountsLifecycleStatsWithPermissionFilter(t *testing
 	}
 
 	// 插入 candidate_memories: 覆盖不同 status, risk_level, scores
-	_, err = pool.Exec(ctx, `INSERT INTO candidate_memories (candidate_id, user_id, org_id, project_id, source_key, agent_id, thread_id, content, status, risk_level, scores, created_at, updated_at)
-		VALUES ($1, $2, $3, $3, 'sk1', 'agent1', 'thread1', 'c1', 'pending', 'low', '{"hot_memory_score": 0.2, "compose_score": 0.3}', NOW(), NOW()),
-			   ($4, $2, $3, $3, 'sk1', 'agent1', 'thread1', 'c2', 'in_compose_pool', 'low', '{"hot_memory_score": 0.6, "compose_score": 0.8}', NOW(), NOW()),
-			   ($5, $2, $3, $3, 'sk1', 'agent1', 'thread1', 'c3', 'composed', 'medium', '{"hot_memory_score": 0.6, "compose_score": 0.8}', NOW(), NOW()),
-			   ($6, $2, $3, $3, 'sk1', 'agent1', 'thread1', 'c4', 'discarded', 'high', '{"hot_memory_score": 0.9, "compose_score": 0.1}', NOW(), NOW())`,
+	_, err = pool.Exec(ctx, `INSERT INTO candidate_memories (candidate_id, user_id, org_id, project_id, source_key, agent_id, thread_id, content, status, risk_level, scores, needs_review, created_at, updated_at)
+			VALUES ($1, $2, $3, $3, 'sk1', 'agent1', 'thread1', 'c1', 'pending', 'low', '{"hot_memory_score": 0.2, "compose_score": 0.3}', true, NOW(), NOW()),
+				   ($4, $2, $3, $3, 'sk1', 'agent1', 'thread1', 'c2', 'in_compose_pool', 'low', '{"hot_memory_score": 0.6, "compose_score": 0.8}', false, NOW(), NOW()),
+				   ($5, $2, $3, $3, 'sk1', 'agent1', 'thread1', 'c3', 'composed', 'medium', '{"hot_memory_score": 0.6, "compose_score": 0.8}', false, NOW(), NOW()),
+				   ($6, $2, $3, $3, 'sk1', 'agent1', 'thread1', 'c4', 'discarded', 'high', '{"hot_memory_score": 0.9, "compose_score": 0.1}', false, NOW(), NOW())`,
 		"cand_a_"+suffix, userID, orgID, "cand_b_"+suffix, "cand_c_"+suffix, "cand_d_"+suffix)
 	if err != nil {
 		t.Fatalf("insert candidate_memories: %v", err)
@@ -148,8 +148,17 @@ func TestPGRepositorySnapshotCountsLifecycleStatsWithPermissionFilter(t *testing
 	if snapshot.Candidates.Total != 4 {
 		t.Fatalf("candidates total = %d, want 4", snapshot.Candidates.Total)
 	}
-	if snapshot.Candidates.ActionableTotal != 2 {
-		t.Fatalf("candidates actionable_total = %d, want 2 (pending + in_compose_pool)", snapshot.Candidates.ActionableTotal)
+	if snapshot.Candidates.ActionableTotal != 1 {
+		t.Fatalf("candidates actionable_total = %d, want 1 (needs_review only)", snapshot.Candidates.ActionableTotal)
+	}
+	if snapshot.Candidates.PendingOrganizeTotal != 0 {
+		t.Fatalf("candidates pending_organize_total = %d, want 0", snapshot.Candidates.PendingOrganizeTotal)
+	}
+	if snapshot.Candidates.ArchiveMaterialTotal != 1 {
+		t.Fatalf("candidates archive_material_total = %d, want 1", snapshot.Candidates.ArchiveMaterialTotal)
+	}
+	if snapshot.Candidates.NeedsReviewTotal != 1 {
+		t.Fatalf("candidates needs_review_total = %d, want 1", snapshot.Candidates.NeedsReviewTotal)
 	}
 	if snapshot.Candidates.ByStatus["pending"] != 1 {
 		t.Fatalf("candidates by_status[pending] = %d, want 1", snapshot.Candidates.ByStatus["pending"])

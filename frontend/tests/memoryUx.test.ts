@@ -79,10 +79,13 @@ describe('memory UX helpers', () => {
       {
         archives: { total: 1, by_status: { active: 1 } },
         hot_memories: { total: 3, by_status: { active: 3 } },
-        candidates: {
-          total: 5,
-          actionable_total: 2,
-          by_status: { pending: 1, in_compose_pool: 1, promoted_to_hot: 3 },
+	        candidates: {
+	          total: 5,
+	          actionable_total: 2,
+	          pending_organize_total: 1,
+	          archive_material_total: 1,
+	          needs_review_total: 2,
+	          by_status: { pending: 1, in_compose_pool: 1, promoted_to_hot: 3 },
           by_risk: { low: 5 },
           hot_score_buckets: [{ label: 'high', count: 1 }],
           compose_score_buckets: []
@@ -103,10 +106,13 @@ describe('memory UX helpers', () => {
       {
         archives: { total: 2, by_status: { active: 2 } },
         hot_memories: { total: 4, by_status: { active: 4 } },
-        candidates: {
-          total: 6,
-          actionable_total: 3,
-          by_status: { pending: 2, in_compose_pool: 1, promoted_to_hot: 3 },
+	        candidates: {
+	          total: 6,
+	          actionable_total: 3,
+	          pending_organize_total: 2,
+	          archive_material_total: 1,
+	          needs_review_total: 3,
+	          by_status: { pending: 2, in_compose_pool: 1, promoted_to_hot: 3 },
           by_risk: { low: 4, medium: 2 },
           hot_score_buckets: [{ label: 'high', count: 2 }],
           compose_score_buckets: []
@@ -128,8 +134,11 @@ describe('memory UX helpers', () => {
 
     expect(stats.archives.total).toBe(3)
     expect(stats.hot_memories.total).toBe(7)
-    expect(stats.candidates.total).toBe(11)
-    expect(stats.candidates.actionable_total).toBe(5)
+	    expect(stats.candidates.total).toBe(11)
+	    expect(stats.candidates.actionable_total).toBe(5)
+	    expect(stats.candidates.pending_organize_total).toBe(3)
+	    expect(stats.candidates.archive_material_total).toBe(2)
+	    expect(stats.candidates.needs_review_total).toBe(5)
     expect(stats.candidates.by_status.pending).toBe(3)
     expect(stats.candidates.by_status.in_compose_pool).toBe(2)
     expect(stats.candidate_jobs?.total).toBe(9)
@@ -139,17 +148,20 @@ describe('memory UX helpers', () => {
   })
 
   it('formats candidate maintenance results from one shared summary', () => {
-    expect(
-      formatCandidateMaintenanceSummary({
-        processed: 4,
-        discarded: 0,
-        kept: 1,
-        composed: 8
-      })
-    ).toBe('清洗完成：处理 4 条，丢弃 0 条，保留 1 条，沉淀 8 条。')
+	    expect(
+	      formatCandidateMaintenanceSummary({
+	        processed: 4,
+	        discarded: 0,
+	        kept: 1,
+	        composed: 8,
+	        archive_material: 2,
+	        promoted_hot: 1,
+	        needs_review: 1
+	      })
+	    ).toBe('整理完成：处理 4 条，丢弃 0 条，保留 1 条，归档素材 2 条，写入热记忆 1 条，待确认 1 条，生成归档 8 条。')
 
-    expect(formatCandidateMaintenanceSummary({ processed: undefined, discarded: Number.NaN, kept: 1, composed: 0 })).toBe(
-      '清洗完成：处理 0 条，丢弃 0 条，保留 1 条，沉淀 0 条。'
-    )
+	    expect(formatCandidateMaintenanceSummary({ processed: undefined, discarded: Number.NaN, kept: 1, composed: 0 })).toBe(
+	      '整理完成：处理 0 条，丢弃 0 条，保留 1 条，归档素材 0 条，写入热记忆 0 条，待确认 0 条，生成归档 0 条。'
+	    )
   })
 })

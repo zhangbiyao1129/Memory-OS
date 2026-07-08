@@ -9,12 +9,15 @@ const topicsPageSource = readFileSync(resolve(__dirname, '../pages/topics/index.
 const ragSearchWorkbenchSource = readFileSync(resolve(__dirname, '../components/RagSearchWorkbench.vue'), 'utf8')
 
 describe('memory page', () => {
-  it('uses the same user-scoped lifecycle stats as overview', () => {
-    expect(pageSource).toContain('useMemoryLifecycleStats({ userScoped: true })')
-    expect(pageSource).toContain('当前用户全部记忆生命周期')
-    expect(pageSource).not.toContain('当前项目的记忆生命周期')
-    expect(pageSource).not.toContain('请先选择组织和项目')
-  })
+	  it('uses the same user-scoped lifecycle stats as overview', () => {
+	    expect(pageSource).toContain('useMemoryLifecycleStats({ userScoped: true })')
+	    expect(pageSource).toContain('当前用户全部记忆生命周期')
+	    expect(pageSource).toContain('归档任务')
+	    expect(pageSource).toContain('归档完成率')
+	    expect(pageSource).not.toContain('主题沉淀')
+	    expect(pageSource).not.toContain('当前项目的记忆生命周期')
+	    expect(pageSource).not.toContain('请先选择组织和项目')
+	  })
 
   it('loads secondary memory lists across workspace projects', () => {
     for (const source of [archivePageSource, hotMemoryPageSource, topicsPageSource]) {

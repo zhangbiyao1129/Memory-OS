@@ -80,7 +80,7 @@ func TestRouterOptionsConfiguresCoreServicesWhenPostgresPoolExists(t *testing.T)
 	restoreProductionArchiveRAG := stubProductionArchiveRAG(t)
 	restoreProductionHotMemory := stubProductionHotMemory(t)
 
-	options, err := routerOptions(secretVaultTestConfig(), health.NewService(nil), &pgxpool.Pool{})
+	options, err := routerOptions(productionAPIConfig(), health.NewService(nil), &pgxpool.Pool{})
 	if err != nil {
 		t.Fatalf("routerOptions() error = %v", err)
 	}
@@ -109,6 +109,12 @@ func TestRouterOptionsConfiguresCoreServicesWhenPostgresPoolExists(t *testing.T)
 	if !options.ArchiveService.Configured() {
 		t.Fatal("ArchiveService not configured")
 	}
+	if options.TopicComposer == nil {
+		t.Fatal("TopicComposer not configured")
+	}
+	if !options.TopicComposer.SummarizerConfigured() {
+		t.Fatal("TopicComposer did not configure AI archive summarizer")
+	}
 	if options.ArchiveQueue == nil {
 		t.Fatal("ArchiveQueue not configured")
 	}
@@ -136,7 +142,7 @@ func TestRouterOptionsConfiguresMaintenanceServiceWhenLLMConfigured(t *testing.T
 	restoreProductionArchiveRAG := stubProductionArchiveRAG(t)
 	restoreProductionHotMemory := stubProductionHotMemory(t)
 	old := newProductionMaintenanceService
-	newProductionMaintenanceService = func(cfg config.Config, pool *pgxpool.Pool, candidateRepo candidatememory.Repository, composer *candidatememory.TopicComposer) (*candidatememory.MaintenanceService, error) {
+	newProductionMaintenanceService = func(cfg config.Config, pool *pgxpool.Pool, candidateRepo candidatememory.Repository, composer *candidatememory.TopicComposer, hotMemory candidatememory.HotMemorySink) (*candidatememory.MaintenanceService, error) {
 		maintRepo := maintenanceRepoStub{}
 		cleaner := maintenanceCleanerStub{}
 		return candidatememory.NewMaintenanceService(maintRepo, candidateRepo, composer, cleaner), nil
@@ -156,6 +162,23 @@ func TestRouterOptionsConfiguresMaintenanceServiceWhenLLMConfigured(t *testing.T
 	}
 	if !restoreProductionHotMemory.called {
 		t.Fatal("production Hot Memory vector index was not configured")
+	}
+}
+
+func TestNewProductionMaintenanceServiceUsesUnifiedOrganizer(t *testing.T) {
+	hot := hotmemory.NewService(hotmemory.NewMemoryRepository())
+	service, err := newProductionMaintenanceService(productionAPIConfig(), &pgxpool.Pool{}, candidatememory.NewInMemoryRepository(), nil, hot)
+	if err != nil {
+		t.Fatalf("newProductionMaintenanceService() error = %v", err)
+	}
+	if service == nil {
+		t.Fatal("newProductionMaintenanceService() returned nil")
+	}
+	if !service.OrganizerConfigured() {
+		t.Fatal("production maintenance service did not configure unified organizer")
+	}
+	if !service.HotMemoryConfigured() {
+		t.Fatal("production maintenance service did not configure hot memory sink")
 	}
 }
 

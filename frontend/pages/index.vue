@@ -7,8 +7,8 @@ const { stats, loading, error: statsError, loadStats } = useMemoryLifecycleStats
 const assetRows = computed(() => [
   { label: '归档库', value: stats.value?.archives.total || 0, tone: 'bg-sky-600' },
   { label: '热记忆', value: stats.value?.hot_memories.total || 0, tone: 'bg-orange-600' },
-  { label: '待处理候选', value: stats.value?.candidates.actionable_total ?? 0, tone: 'bg-amber-500' },
-  { label: '主题沉淀', value: stats.value?.topics.total || 0, tone: 'bg-emerald-600' }
+  { label: '待确认', value: stats.value?.candidates.actionable_total ?? 0, tone: 'bg-amber-500' },
+  { label: '归档任务', value: stats.value?.topics.total || 0, tone: 'bg-emerald-600' }
 ])
 
 const candidateStatusSegments = computed(() => Object.entries(stats.value?.candidates.by_status || {}).map(([label, value]) => ({
@@ -39,7 +39,7 @@ onMounted(async () => {
         <div>
           <p class="text-xs font-bold uppercase tracking-[0.35em] text-orange-900">原生多 Agent 记忆平台</p>
           <h2 class="mt-3 text-4xl font-black">Memory OS 记忆与检索总览</h2>
-          <p class="mt-2 max-w-2xl text-stone-700">统一管理 Archive RAG、Hot Memory、候选记忆和主题沉淀。</p>
+          <p class="mt-2 max-w-2xl text-stone-700">统一管理 Archive RAG、Hot Memory、候选记忆和归档任务。</p>
         </div>
         <HealthBadge :status="health" />
       </div>
@@ -53,13 +53,13 @@ onMounted(async () => {
       <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <MetricTile label="归档库" :value="stats?.archives.total || 0" detail="长期沉淀" />
         <MetricTile label="热记忆" :value="stats?.hot_memories.total || 0" detail="工作记忆" />
-        <MetricTile label="待处理候选" :value="stats?.candidates.actionable_total ?? 0" detail="需确认/沉淀" />
-        <MetricTile label="主题沉淀" :value="stats?.topics.total || 0" detail="主题进度" />
+        <MetricTile label="待确认" :value="stats?.candidates.actionable_total ?? 0" detail="需人工确认" />
+        <MetricTile label="归档任务" :value="stats?.topics.total || 0" detail="归档进度" />
       </section>
       <section class="grid gap-4 lg:grid-cols-2">
         <BarChart title="生命周期资产" :rows="assetRows" />
         <StackedBar title="候选状态" :segments="candidateStatusSegments" />
-        <RingMeter title="主题沉淀" :value="stats?.topics.composed || 0" :total="stats?.topics.total || 0" label="已沉淀" />
+        <RingMeter title="归档完成率" :value="stats?.topics.composed || 0" :total="stats?.topics.total || 0" label="已归档" />
       </section>
     </section>
   </AppShell>

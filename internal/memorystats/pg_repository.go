@@ -152,8 +152,19 @@ func (r *PGRepository) candidateStats(ctx context.Context, filter Filter) (Candi
 		stats.Total += count
 	}
 
-	// 计算待处理总数(pending + in_compose_pool)
-	stats.ActionableTotal = stats.ByStatus["pending"] + stats.ByStatus["in_compose_pool"]
+	query := `SELECT
+		count(*) FILTER (WHERE status='pending' AND COALESCE(needs_review, false) = false),
+		count(*) FILTER (WHERE status='in_compose_pool'),
+		count(*) FILTER (WHERE status='pending' AND COALESCE(needs_review, false) = true)
+	FROM candidate_memories
+	WHERE ` + candidateWhereClause(filter)
+	err = r.pool.QueryRow(ctx, query, scopedCandidateArgs(filter)...).Scan(&stats.PendingOrganizeTotal, &stats.ArchiveMaterialTotal, &stats.NeedsReviewTotal)
+	if err != nil {
+		return stats, err
+	}
+
+	// actionable_total 只表示需要人工确认的候选,归档素材单独统计。
+	stats.ActionableTotal = stats.NeedsReviewTotal
 
 	return stats, nil
 }

@@ -146,6 +146,8 @@ func RegisterRoutes(engine *route.Engine, options RouterOptions) {
 		engine.POST("/memory/candidates/maintenance/status", MaintenanceStatusHandler(options.MaintenanceService, options.AuthService, options.TenantService))
 		engine.POST("/memory/candidates/maintenance/workspace/run", WorkspaceMaintenanceRunHandler(options.MaintenanceService, options.AuthService, options.TenantService))
 		engine.POST("/memory/candidates/maintenance/workspace/status", WorkspaceMaintenanceStatusHandler(options.MaintenanceService, options.AuthService, options.TenantService))
+		engine.POST("/memory/organize/workspace/run", WorkspaceMaintenanceRunHandler(options.MaintenanceService, options.AuthService, options.TenantService))
+		engine.POST("/memory/organize/workspace/status", WorkspaceMaintenanceStatusHandler(options.MaintenanceService, options.AuthService, options.TenantService))
 	}
 	engine.POST("/memory/secrets/create", SecretCreateHandler(options.SecretStore, options.AuthService, options.TenantService))
 	engine.POST("/memory/secrets/list", SecretListHandler(options.SecretStore, options.AuthService, options.TenantService))
@@ -580,6 +582,22 @@ func OpenAPIHandler() app.HandlerFunc {
 						"summary": "Query workspace-wide maintenance progress and status",
 						"responses": map[string]any{
 							"200": map[string]any{"description": "Workspace maintenance status DTO"},
+						},
+					},
+				},
+				"/memory/organize/workspace/run": map[string]any{
+					"post": map[string]any{
+						"summary": "Start workspace-wide AI memory organization",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Workspace organization status DTO"},
+						},
+					},
+				},
+				"/memory/organize/workspace/status": map[string]any{
+					"post": map[string]any{
+						"summary": "Query workspace-wide AI memory organization progress and status",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Workspace organization status DTO"},
 						},
 					},
 				},
@@ -4769,7 +4787,7 @@ func DevHotMemorySmokeHandler() app.HandlerFunc {
 	}
 }
 
-// --- 候选记忆清洗整合 API ---
+// --- 候选记忆整理归档 API ---
 
 type maintenanceRunRequest struct {
 	OrgID     string `json:"org_id"`
@@ -4806,7 +4824,7 @@ func MaintenanceRunHandler(service *candidatememory.MaintenanceService, authServ
 			c.JSON(consts.StatusBadRequest, map[string]string{"error": "maintenance_run_rejected", "message": err.Error()})
 			return
 		}
-		// 后台执行清洗,不阻塞 HTTP 请求
+		// 后台执行整理,不阻塞 HTTP 请求
 		go service.ExecuteRun(context.Background(), candidatememory.MaintenanceRequest{
 			OrgID:     request.OrgID,
 			ProjectID: request.ProjectID,
@@ -4860,7 +4878,7 @@ func WorkspaceMaintenanceRunHandler(service *candidatememory.MaintenanceService,
 	}
 }
 
-// --- 候选记忆清洗整合状态查询 API ---
+// --- 候选记忆整理归档状态查询 API ---
 
 type maintenanceStatusRequest struct {
 	OrgID     string `json:"org_id"`

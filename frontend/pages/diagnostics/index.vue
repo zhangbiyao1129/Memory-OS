@@ -52,7 +52,7 @@ onMounted(async () => {
     <section class="mt-6 rounded-3xl border bg-white p-5">
       <h3 class="text-xl font-black">当前判断</h3>
       <p v-if="(stats?.archives.total || 0) === 0" class="mt-3 rounded-2xl bg-amber-50 p-4 text-sm text-amber-900">
-        Archive 为空不代表没写入，可能停在候选或热记忆层。先看候选和热记忆，再决定是否执行清洗沉淀。
+        Archive 为空不代表没写入，可能停在候选或热记忆层。先看候选和热记忆，再决定是否执行 AI 整理和归档。
       </p>
       <p v-else class="mt-3 rounded-2xl bg-emerald-50 p-4 text-sm text-emerald-900">当前项目已有长期归档，可以继续用检索验证召回效果。</p>
       <div class="mt-4 flex flex-wrap gap-3">

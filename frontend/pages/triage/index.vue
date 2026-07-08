@@ -91,7 +91,7 @@ async function loadTriage() {
     })
     results.value = items.sort((a, b) => Date.parse(b.updated_at || '') - Date.parse(a.updated_at || ''))
   } catch (err: any) {
-    error.value = err.message || '自动整理结果加载失败'
+    error.value = err.message || '整理记录加载失败'
   } finally {
     loading.value = false
   }
@@ -112,8 +112,8 @@ watch(() => [context.orgId, context.projectId], () => {
   <AppShell>
     <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div>
-        <h2 class="text-3xl font-black">自动整理</h2>
-        <p class="mt-2 text-stone-600">这里是系统自动整理结果；无需手动归档。</p>
+        <h2 class="text-3xl font-black">整理记录</h2>
+        <p class="mt-2 text-stone-600">展示 AI 对候选的去向判断、跨项目关联和热记忆投递结果。</p>
       </div>
       <button class="rounded-xl border bg-white px-4 py-2 font-bold" :disabled="loading" @click="loadTriage">{{ loading ? '刷新中...' : '刷新' }}</button>
     </div>
@@ -154,9 +154,9 @@ watch(() => [context.orgId, context.projectId], () => {
     <p v-if="error" class="mt-4 rounded-xl bg-red-50 p-3 text-sm font-semibold text-red-700">{{ error }}</p>
 
     <section class="mt-6 rounded-xl border bg-white p-5">
-      <h3 class="text-xl font-black">自动整理结果（{{ results.length }}）</h3>
-      <div v-if="loading" class="mt-4 rounded-xl bg-stone-50 p-4 text-stone-600">正在加载自动整理结果...</div>
-      <div v-else-if="results.length === 0" class="mt-4 rounded-xl bg-stone-50 p-4 text-stone-600">当前工作区暂无自动整理结果。</div>
+      <h3 class="text-xl font-black">整理记录（{{ results.length }}）</h3>
+      <div v-if="loading" class="mt-4 rounded-xl bg-stone-50 p-4 text-stone-600">正在加载整理记录...</div>
+      <div v-else-if="results.length === 0" class="mt-4 rounded-xl bg-stone-50 p-4 text-stone-600">当前工作区暂无整理记录。</div>
       <div v-else class="mt-4 grid gap-4">
         <article v-for="item in results" :key="item.candidate_id" class="rounded-xl border bg-stone-50 p-5">
           <div class="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">

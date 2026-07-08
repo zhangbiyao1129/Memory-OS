@@ -6,8 +6,8 @@ const pageSource = readFileSync(resolve(__dirname, '../pages/candidates/index.vu
 
 describe('candidates page', () => {
   it('keeps candidate maintenance self-driven without manual filter controls', () => {
-    expect(pageSource).toContain('候选维护')
-    expect(pageSource).toContain('AI 清洗')
+    expect(pageSource).toContain('记忆整理')
+    expect(pageSource).toContain('AI 整理')
 
     expect(pageSource).not.toContain('statusFilter')
     expect(pageSource).not.toContain('riskFilter')
@@ -20,23 +20,24 @@ describe('candidates page', () => {
     expect(pageSource).not.toContain('强制沉淀')
   })
 
-  it('loads only actionable candidates by default', () => {
-    expect(pageSource).toContain("ACTIONABLE_CANDIDATE_STATUSES = ['pending', 'in_compose_pool']")
-    expect(pageSource).toContain('ACTIONABLE_CANDIDATE_STATUSES.map')
+  it('loads pending and archive material candidates by default without calling them all actionable', () => {
+    expect(pageSource).toContain("VISIBLE_CANDIDATE_STATUSES = ['pending', 'in_compose_pool']")
+    expect(pageSource).toContain('VISIBLE_CANDIDATE_STATUSES.map')
     expect(pageSource).toContain('loadProjectScopes()')
     expect(pageSource).toContain('useMemoryLifecycleStats({ userScoped: true })')
-    expect(pageSource).toContain('全部工作区待处理候选')
+    expect(pageSource).toContain('全部工作区待确认')
+    expect(pageSource).toContain('归档素材')
     expect(pageSource).toContain('status')
-    expect(pageSource).toContain('待处理候选列表')
+    expect(pageSource).toContain('待整理候选与归档素材')
     expect(pageSource).toContain('refreshCandidateView()')
     expect(pageSource).not.toContain('<h3 class="text-xl font-black">候选列表（当前页')
   })
 
   it('starts one workspace maintenance run instead of project fan-out', () => {
     expect(pageSource).toContain('async function runMaintenance()')
-    expect(pageSource).toContain("'/memory/candidates/maintenance/workspace/run'")
-    expect(pageSource).toContain("'/memory/candidates/maintenance/workspace/status'")
-    expect(pageSource).toContain('系统按全部工作区项目自动清洗、合并，并触发主题沉淀。')
+    expect(pageSource).toContain("'/memory/organize/workspace/run'")
+    expect(pageSource).toContain("'/memory/organize/workspace/status'")
+    expect(pageSource).toContain('系统按全部工作区项目自动整理候选')
 
     const runMaintenanceSource = pageSource.slice(
       pageSource.indexOf('async function runMaintenance()'),
@@ -44,6 +45,7 @@ describe('candidates page', () => {
     )
     expect(runMaintenanceSource).not.toContain('body: requestBody()')
     expect(runMaintenanceSource).not.toContain("'/memory/candidates/maintenance/run'")
+    expect(runMaintenanceSource).not.toContain("'/memory/candidates/maintenance/workspace/run'")
     expect(runMaintenanceSource).not.toContain('scopes.map')
   })
 })

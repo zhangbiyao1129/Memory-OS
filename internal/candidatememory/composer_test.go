@@ -2,6 +2,7 @@ package candidatememory
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,18 @@ func newTestComposer() (TopicComposer, *InMemoryRepository, *fakeArchiveCreator)
 	repo := NewInMemoryRepository()
 	creator := &fakeArchiveCreator{}
 	return NewTopicComposer(repo, creator), repo, creator
+}
+
+type fakeArchiveSummarizer struct {
+	markdown string
+	err      error
+}
+
+func (f fakeArchiveSummarizer) SummarizeArchive(ctx context.Context, req ComposeRequest, candidates []Candidate) (string, error) {
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.markdown, nil
 }
 
 func seedCandidate(t *testing.T, repo *InMemoryRepository, c Candidate) {
@@ -162,5 +175,40 @@ func TestComposerMarkdownHasFixedStructure(t *testing.T) {
 	}
 	if !strings.Contains(md, "修复 Y") || !strings.Contains(md, "决策 X") {
 		t.Fatalf("Markdown 应含候选内容:\n%s", md)
+	}
+}
+
+func TestComposerUsesAISummarizerWhenConfigured(t *testing.T) {
+	composer, repo, creator := newTestComposer()
+	composer = composer.WithSummarizer(fakeArchiveSummarizer{markdown: "# AI 归档\n\n## 结论\n- 已整理"})
+	seedCandidate(t, repo, Candidate{Content: "候选 A", MemoryType: MemoryTypeFact, RiskLevel: RiskLow})
+
+	res, err := composer.Compose(context.Background(), composeReq(true))
+	if err != nil {
+		t.Fatalf("compose: %v", err)
+	}
+	if !res.Ready {
+		t.Fatal("Force 应 ready")
+	}
+	if creator.last.Markdown != "# AI 归档\n\n## 结论\n- 已整理" {
+		t.Fatalf("Markdown = %q, want AI summary", creator.last.Markdown)
+	}
+}
+
+func TestComposerSummarizerFailureDoesNotCreateArchiveOrMarkComposed(t *testing.T) {
+	composer, repo, creator := newTestComposer()
+	composer = composer.WithSummarizer(fakeArchiveSummarizer{err: errors.New("llm down")})
+	seedCandidate(t, repo, Candidate{Content: "候选 A", MemoryType: MemoryTypeFact, RiskLevel: RiskLow})
+
+	_, err := composer.Compose(context.Background(), composeReq(true))
+	if err == nil {
+		t.Fatal("compose error = nil, want summarizer failure")
+	}
+	if creator.last.ArchiveID != "" {
+		t.Fatalf("archive should not be created on summarizer failure: %+v", creator.last)
+	}
+	candidates, _ := repo.ListCandidates(context.Background(), ListFilter{OrgID: "o", ProjectID: "p", SourceKey: "sk", ThreadID: "th"})
+	if candidates[0].Status == StatusComposed {
+		t.Fatal("candidate should not be marked composed on summarizer failure")
 	}
 }

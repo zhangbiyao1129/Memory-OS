@@ -135,6 +135,11 @@ func TestOpenAPIJSON(t *testing.T) {
 			t.Fatalf("openapi missing %s path", path)
 		}
 	}
+	for _, path := range []string{"/memory/organize/workspace/run", "/memory/organize/workspace/status"} {
+		if _, ok := paths[path]; !ok {
+			t.Fatalf("openapi missing %s path", path)
+		}
+	}
 	if _, ok := paths["/memory/qdrant/status"]; !ok {
 		t.Fatal("openapi missing /memory/qdrant/status path")
 	}

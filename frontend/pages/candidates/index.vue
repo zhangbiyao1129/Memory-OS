@@ -29,7 +29,7 @@ type Candidate = {
 
 type CandidateListResponse = { candidates: Candidate[] }
 
-const ACTIONABLE_CANDIDATE_STATUSES = ['pending', 'in_compose_pool']
+const VISIBLE_CANDIDATE_STATUSES = ['pending', 'in_compose_pool']
 
 type MaintenanceStatus = {
   active: boolean
@@ -42,6 +42,10 @@ type MaintenanceStatus = {
   discarded: number
   kept: number
   composed: number
+  archive_material: number
+  promoted_hot: number
+  needs_review: number
+  hot_memory_demoted: number
   archive_id: string
   summary: string
   last_error: string
@@ -60,8 +64,8 @@ function stageLabel(stage: string): string {
     loading_candidates: '加载候选',
     calling_llm: '模型处理中',
     validating: '校验结果',
-    applying: '执行清洗',
-    composing: '沉淀归档',
+    applying: '应用整理',
+    composing: '生成归档',
     done: '已完成',
     failed: '失败'
   }
@@ -88,12 +92,12 @@ function formatDate(value?: string) {
 
 function statusText(status: string) {
   const labels: Record<string, string> = {
-    pending: '待处理',
+    pending: '待整理',
     accepted: '已接受',
     discarded: '已丢弃',
     promoted_to_hot: '已提升热记忆',
-    in_compose_pool: '沉淀池',
-    composed: '已沉淀'
+    in_compose_pool: '归档素材',
+    composed: '已归档'
   }
   return labels[status] || status
 }
@@ -159,7 +163,7 @@ function startPolling(runID?: string) {
     try {
       const body: Record<string, unknown> = { org_id: context.orgId }
       if (runID) body.run_id = runID
-      const status = await request<MaintenanceStatus>('/memory/candidates/maintenance/workspace/status', {
+      const status = await request<MaintenanceStatus>('/memory/organize/workspace/status', {
         method: 'POST',
         body
       })
@@ -195,7 +199,7 @@ async function restoreMaintenanceTask() {
   try {
     const body: Record<string, unknown> = { org_id: context.orgId }
     if (savedRunID) body.run_id = savedRunID
-    const status = await request<MaintenanceStatus>('/memory/candidates/maintenance/workspace/status', {
+    const status = await request<MaintenanceStatus>('/memory/organize/workspace/status', {
       method: 'POST',
       body
     })
@@ -224,7 +228,7 @@ async function loadCandidates() {
   error.value = ''
   try {
     const scopes = await loadProjectScopes()
-    const requests = scopes.flatMap((project) => ACTIONABLE_CANDIDATE_STATUSES.map((status) => {
+    const requests = scopes.flatMap((project) => VISIBLE_CANDIDATE_STATUSES.map((status) => {
       return request<CandidateListResponse>('/memory/candidates/list', {
         method: 'POST',
         body: {
@@ -290,7 +294,7 @@ async function runMaintenance() {
   success.value = ''
   maintenanceStatus.value = null
   try {
-    const result = await request<MaintenanceStatus>('/memory/candidates/maintenance/workspace/run', {
+    const result = await request<MaintenanceStatus>('/memory/organize/workspace/run', {
       method: 'POST',
       body: {
         org_id: context.orgId
@@ -307,7 +311,7 @@ async function runMaintenance() {
       cleaning.value = false
     }
   } catch (err: any) {
-    error.value = err.message || '清洗失败'
+    error.value = err.message || '整理失败'
     cleaning.value = false
   }
 }
@@ -335,7 +339,7 @@ onBeforeUnmount(() => {
     <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div>
         <h2 class="text-3xl font-black">候选记忆</h2>
-        <p class="mt-2 text-stone-600">候选提炼结果，支持接受/丢弃；清洗和沉淀由系统自动完成。</p>
+        <p class="mt-2 text-stone-600">候选提炼结果，支持接受/丢弃；AI 会自动丢弃噪声、保留有效信息，并把可复用内容写入热记忆或长期归档。</p>
       </div>
       <button class="rounded-2xl border bg-white px-4 py-2 font-bold" :disabled="loading" @click="loadCandidates">{{ loading ? '刷新中...' : '刷新' }}</button>
     </div>
@@ -347,11 +351,11 @@ onBeforeUnmount(() => {
     <section class="mt-6 rounded-3xl border bg-white p-5">
       <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
         <div>
-          <h3 class="text-lg font-black">候选维护</h3>
-          <p class="mt-1 text-sm text-stone-600">系统按全部工作区项目自动清洗、合并，并触发主题沉淀。</p>
+          <h3 class="text-lg font-black">记忆整理</h3>
+          <p class="mt-1 text-sm text-stone-600">系统按全部工作区项目自动整理候选，分流到待确认、热记忆、归档素材或丢弃。</p>
         </div>
         <button class="rounded-2xl bg-orange-600 px-4 py-3 text-sm font-bold text-white disabled:cursor-not-allowed disabled:bg-stone-400" :disabled="cleaning || !hasWorkspaceContext" @click="runMaintenance">
-          {{ cleaning ? '清洗中...' : 'AI 清洗' }}
+          {{ cleaning ? '整理中...' : 'AI 整理' }}
         </button>
       </div>
 
@@ -374,7 +378,7 @@ onBeforeUnmount(() => {
 
       <!-- 失败原因 -->
       <div v-if="maintenanceStatus && maintenanceStatus.status === 'failed'" class="mt-4 rounded-2xl bg-red-50 p-4">
-        <p class="text-sm font-bold text-red-900">清洗失败：{{ maintenanceStatus.last_error || '未知错误' }}</p>
+        <p class="text-sm font-bold text-red-900">整理失败：{{ maintenanceStatus.last_error || '未知错误' }}</p>
       </div>
 
       <!-- 完成统计 -->
@@ -387,9 +391,9 @@ onBeforeUnmount(() => {
 
     <!-- 候选列表 -->
     <section class="mt-6 rounded-3xl border bg-white p-5">
-      <h3 class="text-xl font-black">待处理候选列表（当前页 {{ candidates.length }} 条）</h3>
+      <h3 class="text-xl font-black">待整理候选与归档素材（当前页 {{ candidates.length }} 条）</h3>
       <p class="mt-2 text-sm text-stone-500">
-        仅显示待处理和沉淀池候选；已沉淀、已丢弃和已提升热记忆不会出现在这里。全部工作区待处理候选 {{ n(lifecycleStats?.candidates?.actionable_total) }} 条。
+        仅显示待整理候选和归档素材；已归档、已丢弃和已提升热记忆不会出现在这里。全部工作区待确认 {{ n(lifecycleStats?.candidates?.actionable_total) }} 条，归档素材 {{ n(lifecycleStats?.candidates?.archive_material_total) }} 条。
       </p>
       <div v-if="loading" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">正在加载候选记忆...</div>
       <div v-else-if="candidates.length === 0" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">当前暂无候选记忆。</div>

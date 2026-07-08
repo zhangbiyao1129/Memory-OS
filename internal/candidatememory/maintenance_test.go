@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"memory-os/internal/hotmemory"
 )
 
 // InMemoryMaintenanceRepository 内存版 MaintenanceRepository。
@@ -135,7 +137,7 @@ func (r *InMemoryMaintenanceRepository) MarkStaleRunningAsFailed(ctx context.Con
 	return count, nil
 }
 
-// fakeMaintenanceCleaner 测试用 LLM 清洗器。
+// fakeMaintenanceCleaner 测试用旧版 LLM 整理器。
 type fakeMaintenanceCleaner struct {
 	result CleanResult
 	err    error
@@ -174,7 +176,7 @@ func (k *keepingMaintenanceCleaner) Clean(ctx context.Context, candidates []Cand
 		ids = append(ids, candidate.CandidateID)
 	}
 	k.batches = append(k.batches, ids)
-	return CleanResult{KeepIDs: ids, Summary: "保留可沉淀候选"}, nil
+	return CleanResult{KeepIDs: ids, Summary: "保留可归档候选"}, nil
 }
 
 func (f *fakeAutoTriage) RunAutoTriage(ctx context.Context, filter TriageScanFilter) (TriageRunResult, error) {
@@ -249,7 +251,7 @@ func TestMaintenanceStartRunReturnsImmediately(t *testing.T) {
 		t.Fatal("cleaner should not be called yet")
 	}
 
-	// 执行后台清洗
+	// 执行后台整理
 	service.ExecuteRun(context.Background(), MaintenanceRequest{
 		OrgID:     "org-1",
 		ProjectID: "proj-1",
@@ -384,7 +386,10 @@ func TestMaintenanceRunAcceptsMergedCandidates(t *testing.T) {
 		Trigger:   MaintenanceTriggerManual,
 	}, run.RunID)
 
-	for _, tt := range []struct{id string; want Status}{{"cand-merge-a", StatusAccepted}, {"cand-merge-b", StatusDiscarded}} {
+	for _, tt := range []struct {
+		id   string
+		want Status
+	}{{"cand-merge-a", StatusAccepted}, {"cand-merge-b", StatusDiscarded}} {
 		candidate, err := candidateRepo.GetCandidate(context.Background(), "org-1", tt.id)
 		if err != nil {
 			t.Fatalf("GetCandidate(%s) error = %v", tt.id, err)
@@ -803,12 +808,12 @@ func TestShouldAutoClean(t *testing.T) {
 	cleaner := &fakeMaintenanceCleaner{result: CleanResult{Summary: "ok"}}
 	service, _ := newTestMaintenanceService(t, cleaner)
 
-	// 不足主题沉淀阈值
+	// 不足归档阈值
 	if service.ShouldAutoClean(context.Background(), "org-1", "proj-1") {
 		t.Fatal("should not auto clean with less than compose threshold candidates")
 	}
 
-	// 创建达到主题沉淀阈值的候选
+	// 创建达到归档阈值的候选
 	for i := 0; i < composeMinCandidates; i++ {
 		service.candidateRepo.CreateCandidate(context.Background(), Candidate{
 			CandidateID: "cand-" + string(rune('a'+i%26)) + string(rune('0'+i/26)),
@@ -863,7 +868,7 @@ func TestRunAutoCleanComposesReadyTopic(t *testing.T) {
 		t.Fatalf("seed topic: %v", err)
 	}
 	service := NewMaintenanceService(maintRepo, candidateRepo, &composer, fakeMaintenanceCleaner{
-		result: CleanResult{KeepIDs: keepIDs, Summary: "自动清洗完成"},
+		result: CleanResult{KeepIDs: keepIDs, Summary: "自动整理完成"},
 	})
 
 	started, err := service.RunAutoClean(ctx)
@@ -964,6 +969,16 @@ func (s stubOrganizer) Organize(ctx context.Context, candidates []Candidate, pro
 	return s.result, s.err
 }
 
+type countingCandidateRepository struct {
+	*InMemoryRepository
+	statusUpdates int
+}
+
+func (r *countingCandidateRepository) UpdateCandidateStatus(ctx context.Context, orgID, candidateID string, status Status, scores Scores, needsReview bool) (Candidate, error) {
+	r.statusUpdates++
+	return r.InMemoryRepository.UpdateCandidateStatus(ctx, orgID, candidateID, status, scores, needsReview)
+}
+
 func TestExecuteRun_AppliesOrganizerDecisions(t *testing.T) {
 	repo := NewInMemoryMaintenanceRepository()
 	candRepo := NewInMemoryRepository()
@@ -998,6 +1013,75 @@ func TestExecuteRun_AppliesOrganizerDecisions(t *testing.T) {
 	got3, _ := candRepo.GetCandidate(context.Background(), "o1", "c3")
 	if got3.Status != StatusPending || !got3.NeedsReview {
 		t.Fatalf("high-risk candidate: status=%s, needs_review=%v", got3.Status, got3.NeedsReview)
+	}
+}
+
+func TestExecuteRun_UpdatesEachCandidateOnce(t *testing.T) {
+	ctx := context.Background()
+	repo := NewInMemoryMaintenanceRepository()
+	candRepo := &countingCandidateRepository{InMemoryRepository: NewInMemoryRepository()}
+	_, _ = candRepo.CreateCandidate(ctx, Candidate{CandidateID: "c1", OrgID: "o1", ProjectID: "p1", Status: StatusPending, RiskLevel: RiskLow})
+
+	organizer := stubOrganizer{result: OrganizeResult{
+		Decisions: []OrganizerDecision{{CandidateID: "c1", Action: OrganizerActionKeepCandidate}},
+		Summary:   "整理完成",
+	}}
+	svc := NewMaintenanceService(repo, candRepo, nil, nil).WithOrganizer(organizer)
+	run, _ := svc.StartRun(ctx, MaintenanceRequest{OrgID: "o1", ProjectID: "p1"})
+	svc.ExecuteRun(ctx, MaintenanceRequest{OrgID: "o1", ProjectID: "p1"}, run.RunID)
+
+	if candRepo.statusUpdates != 1 {
+		t.Fatalf("status updates = %d, want 1", candRepo.statusUpdates)
+	}
+}
+
+func TestExecuteRun_PromotesHotMemoryDecision(t *testing.T) {
+	ctx := context.Background()
+	repo := NewInMemoryMaintenanceRepository()
+	candRepo := NewInMemoryRepository()
+	hotSink := &fakeHotMemorySink{}
+	_, _ = candRepo.CreateCandidate(ctx, Candidate{
+		CandidateID:    "c-hot",
+		OrgID:          "o1",
+		ProjectID:      "p1",
+		UserID:         "u1",
+		AgentID:        "codex",
+		SourceEventIDs: []string{"event-1"},
+		Content:        "Memory OS 部署必须先读 DEPLOYMENT.md",
+		Status:         StatusPending,
+		RiskLevel:      RiskLow,
+	})
+
+	organizer := stubOrganizer{result: OrganizeResult{
+		Decisions: []OrganizerDecision{{
+			CandidateID: "c-hot",
+			Action:      OrganizerActionPromoteHot,
+			Scope:       "global",
+			Confidence:  0.93,
+		}},
+		Summary: "整理完成",
+	}}
+	svc := NewMaintenanceService(repo, candRepo, nil, nil).WithOrganizer(organizer).WithHotMemory(hotSink)
+	run, _ := svc.StartRun(ctx, MaintenanceRequest{OrgID: "o1", ProjectID: "p1"})
+	svc.ExecuteRun(ctx, MaintenanceRequest{OrgID: "o1", ProjectID: "p1"}, run.RunID)
+
+	final, _ := repo.GetRun(ctx, run.RunID)
+	if final.Status != MaintenanceRunDone {
+		t.Fatalf("status = %s, error = %s", final.Status, final.LastError)
+	}
+	if final.PromotedHot != 1 {
+		t.Fatalf("promoted_hot = %d, want 1", final.PromotedHot)
+	}
+	if len(hotSink.requests) != 1 {
+		t.Fatalf("hot memory requests = %d, want 1", len(hotSink.requests))
+	}
+	req := hotSink.requests[0]
+	if req.ProjectID != GlobalHotMemoryProjectID || req.Scope != hotmemory.ScopeUser || req.Visibility != "private" {
+		t.Fatalf("hot memory request = %#v", req)
+	}
+	got, _ := candRepo.GetCandidate(ctx, "o1", "c-hot")
+	if got.Status != StatusPromotedToHot {
+		t.Fatalf("candidate status = %s, want promoted_to_hot", got.Status)
 	}
 }
 

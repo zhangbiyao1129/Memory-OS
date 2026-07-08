@@ -31,7 +31,7 @@ const (
 	StatusAccepted      Status = "accepted"        // 用户确认接受
 	StatusDiscarded     Status = "discarded"       // 用户丢弃
 	StatusPromotedToHot Status = "promoted_to_hot" // 自动/手动提升为热记忆
-	StatusInComposePool Status = "in_compose_pool" // 归档素材池(原主题沉淀池)
+	StatusInComposePool Status = "in_compose_pool" // 归档素材池
 	StatusComposed      Status = "composed"        // 已归档进 Archive
 )
 
@@ -103,7 +103,7 @@ type Job struct {
 	CompletedAt    *time.Time
 }
 
-// TopicState 主题沉淀状态(org+project+source_key+thread 维度,对应 topic_memory_states 表)。
+// TopicState 归档任务状态(org+project+source_key+thread 维度,对应 topic_memory_states 表)。
 type TopicState struct {
 	ID                int64
 	OrgID             string

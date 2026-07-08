@@ -26,12 +26,15 @@ type HotMemoryStats struct {
 }
 
 type CandidateStats struct {
-	Total               int64            `json:"total"`
-	ActionableTotal     int64            `json:"actionable_total"`
-	ByStatus            map[string]int64 `json:"by_status"`
-	ByRisk              map[string]int64 `json:"by_risk"`
-	HotScoreBuckets     []ScoreBucket    `json:"hot_score_buckets"`
-	ComposeScoreBuckets []ScoreBucket    `json:"compose_score_buckets"`
+	Total                int64            `json:"total"`
+	ActionableTotal      int64            `json:"actionable_total"`
+	PendingOrganizeTotal int64            `json:"pending_organize_total"`
+	ArchiveMaterialTotal int64            `json:"archive_material_total"`
+	NeedsReviewTotal     int64            `json:"needs_review_total"`
+	ByStatus             map[string]int64 `json:"by_status"`
+	ByRisk               map[string]int64 `json:"by_risk"`
+	HotScoreBuckets      []ScoreBucket    `json:"hot_score_buckets"`
+	ComposeScoreBuckets  []ScoreBucket    `json:"compose_score_buckets"`
 }
 
 // CandidateJobStats 候选提炼任务健康统计。
