@@ -62,8 +62,24 @@ func (r *PGMaintenanceRepository) GetRunningRun(ctx context.Context, orgID, proj
 	if r == nil || r.pool == nil {
 		return nil, errors.New("maintenance repository is not configured")
 	}
-	query := "SELECT " + maintenanceRunColumns + " FROM candidate_maintenance_runs WHERE org_id=$1 AND project_id=$2 AND status='running' LIMIT 1"
+	query := "SELECT " + maintenanceRunColumns + " FROM candidate_maintenance_runs WHERE org_id=$1 AND project_id=$2 AND status='running' ORDER BY started_at DESC LIMIT 1"
 	row := r.pool.QueryRow(ctx, query, orgID, projectID)
+	run, err := scanMaintenanceRun(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &run, nil
+}
+
+func (r *PGMaintenanceRepository) GetRunningRunInScope(ctx context.Context, orgID, projectID, sourceKey, threadID string) (*MaintenanceRun, error) {
+	if r == nil || r.pool == nil {
+		return nil, errors.New("maintenance repository is not configured")
+	}
+	query := "SELECT " + maintenanceRunColumns + " FROM candidate_maintenance_runs WHERE org_id=$1 AND project_id=$2 AND source_key=$3 AND thread_id=$4 AND status='running' LIMIT 1"
+	row := r.pool.QueryRow(ctx, query, orgID, projectID, sourceKey, threadID)
 	run, err := scanMaintenanceRun(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

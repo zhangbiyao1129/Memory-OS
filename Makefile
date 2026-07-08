@@ -5,7 +5,7 @@ COMPOSE_T480_FILE := deploy/docker-compose.t480.yml
 GOPROXY ?= https://goproxy.cn,direct
 NO_PROXY ?= localhost,127.0.0.1,postgres,redis,qdrant,memory-api,memory-web,memory-mcp,memory-llm-mock
 
-.PHONY: test build-web smoke dev-up prod-up prod-up-services post-deploy-verify verify-light dev-down preflight secret-scan secret-injection-audit backup restore backup-restore-dry-run restore-rehearsal-preflight restore-rehearsal-dry-run docker-cleanup-plan docker-cleanup-images install-docker-cleanup-cron install-backup-cron verify audit-report final-delivery-report lint seed-dev t480-sync t480-build-check t480-deploy t480-deploy-api-fast t480-deploy-web-fast t480-deploy-api-web-fast t480-verify-light
+.PHONY: test build-web smoke dev-up prod-up prod-build-backend prod-build-web prod-up-services post-deploy-verify verify-light dev-down preflight secret-scan secret-injection-audit backup restore backup-restore-dry-run restore-rehearsal-preflight restore-rehearsal-dry-run docker-cleanup-plan docker-cleanup-images install-docker-cleanup-cron install-backup-cron verify audit-report final-delivery-report lint seed-dev deploy-safety-check t480-sync t480-build-check t480-deploy t480-deploy-dry-run t480-deploy-auto t480-deploy-full t480-deploy-api-fast t480-deploy-web-fast t480-deploy-api-web-fast t480-verify-light
 
 test:
 	@if command -v go >/dev/null 2>&1 && go version | grep -q 'go1\.25'; then \
@@ -70,23 +70,52 @@ prod-up-mock:
 	$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) up -d --build memory-api memory-worker memory-mcp memory-web memory-llm-mock
 
 prod-up:
+	set -euo pipefail; \
 	. scripts/load-prod-env.sh && \
 	. scripts/load-build-info.sh && \
 	APP_ENV=production ALLOW_EXISTING_DEPLOYMENT=1 scripts/preflight.sh && \
+	$(MAKE) prod-build-backend && \
+	$(MAKE) prod-build-web && \
 	export COMPOSE_PROJECT_NAME=deploy && \
 	APP_ENV=production ENABLE_DEV_ENDPOINTS=false \
-	$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) up -d --build memory-api memory-worker memory-mcp memory-web && \
-	DRY_RUN=0 DOCKER_IMAGE_CLEANUP_MODE=dangling CONFIRM_DOCKER_IMAGE_CLEANUP=I_UNDERSTAND_IMAGE_DELETE bash scripts/docker-cleanup-images.sh
+	$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) up -d --no-build qdrant memory-api memory-worker memory-mcp memory-web; \
+	if [[ "$${CLEANUP_IMAGES:-0}" == "1" ]]; then \
+		DRY_RUN=0 DOCKER_IMAGE_CLEANUP_MODE=dangling CONFIRM_DOCKER_IMAGE_CLEANUP=I_UNDERSTAND_IMAGE_DELETE bash scripts/docker-cleanup-images.sh; \
+	fi
 
 SERVICES ?= memory-api memory-worker memory-mcp memory-web
 CLEANUP_IMAGES ?= 0
+prod-build-backend:
+	set -euo pipefail; \
+	. scripts/load-prod-env.sh && \
+	. scripts/load-build-info.sh && \
+	export COMPOSE_PROJECT_NAME=deploy && \
+	APP_ENV=production ENABLE_DEV_ENDPOINTS=false \
+	$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) build memory-api
+
+prod-build-web:
+	set -euo pipefail; \
+	. scripts/load-prod-env.sh && \
+	. scripts/load-build-info.sh && \
+	export COMPOSE_PROJECT_NAME=deploy && \
+	APP_ENV=production ENABLE_DEV_ENDPOINTS=false \
+	$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) build memory-web
+
 prod-up-services:
+	set -euo pipefail; \
 	. scripts/load-prod-env.sh && \
 	. scripts/load-build-info.sh && \
 	APP_ENV=production ALLOW_EXISTING_DEPLOYMENT=1 scripts/preflight.sh && \
+	services=" $(SERVICES) "; \
+	if [[ "$$services" == *" memory-api "* || "$$services" == *" memory-worker "* || "$$services" == *" memory-mcp "* ]]; then \
+		$(MAKE) prod-build-backend; \
+	fi; \
+	if [[ "$$services" == *" memory-web "* ]]; then \
+		$(MAKE) prod-build-web; \
+	fi; \
 	export COMPOSE_PROJECT_NAME=deploy && \
 	APP_ENV=production ENABLE_DEV_ENDPOINTS=false \
-	$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) up -d --build $(SERVICES); \
+	$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) up -d --no-build $(SERVICES); \
 	if [[ "$(CLEANUP_IMAGES)" == "1" ]]; then \
 		DRY_RUN=0 DOCKER_IMAGE_CLEANUP_MODE=dangling CONFIRM_DOCKER_IMAGE_CLEANUP=I_UNDERSTAND_IMAGE_DELETE bash scripts/docker-cleanup-images.sh; \
 	fi
@@ -155,14 +184,38 @@ audit-report:
 final-delivery-report:
 	scripts/final-delivery-report.sh
 
+deploy-safety-check:
+	scripts/deploy-safety-check.sh
+
 t480-sync:
 	bash scripts/sync-t480.sh
 
 t480-build-check: t480-sync
 	ssh $${TARGET_HOST:-thinkpad} 'cd $${TARGET_DIR:-/opt/memory-os} && make test && make build-web'
 
-t480-deploy: t480-sync
-	ssh $${TARGET_HOST:-thinkpad} 'cd $${TARGET_DIR:-/opt/memory-os} && make prod-up && make post-deploy-verify'
+t480-deploy: t480-deploy-auto
+
+t480-deploy-dry-run:
+	set -euo pipefail; \
+	eval "$$(scripts/classify-deploy-changes.sh)"; \
+	printf 'deploy plan\n  services: %s\n  verify_mode: %s\n  target: %s:%s\n  mode: dry-run\n' "$$SERVICES" "$$VERIFY_MODE" "$${TARGET_HOST:-thinkpad}" "$${TARGET_DIR:-/opt/memory-os}"; \
+	DRY_RUN=1 bash scripts/sync-t480.sh; \
+	ssh $${TARGET_HOST:-thinkpad} 'cd $${TARGET_DIR:-/opt/memory-os} && . scripts/load-prod-env.sh && docker-compose -f deploy/docker-compose.yml -f deploy/docker-compose.t480.yml config >/tmp/memory-os-compose-check.yml && rm -f /tmp/memory-os-compose-check.yml'
+
+t480-deploy-auto:
+	set -euo pipefail; \
+	eval "$$(scripts/classify-deploy-changes.sh)"; \
+	printf 'deploy plan\n  services: %s\n  verify_mode: %s\n  target: %s:%s\n  mode: apply\n' "$$SERVICES" "$$VERIFY_MODE" "$${TARGET_HOST:-thinkpad}" "$${TARGET_DIR:-/opt/memory-os}"; \
+	$(MAKE) deploy-safety-check; \
+	deploy_timing_dir="artifacts/deploy-timing-$$(date -u +%Y%m%dT%H%M%SZ)"; \
+	bash scripts/sync-t480.sh; \
+	services_q="$$(printf '%q' "$$SERVICES")"; \
+	verify_q="$$(printf '%q' "$$VERIFY_MODE")"; \
+	timing_q="$$(printf '%q' "$$deploy_timing_dir")"; \
+	ssh $${TARGET_HOST:-thinkpad} "cd $${TARGET_DIR:-/opt/memory-os} && DEPLOY_TIMING_DIR=$$timing_q scripts/measure-deploy-step.sh prod-up-services env SERVICES=$$services_q VERIFY_MODE=$$verify_q make prod-up-services && DEPLOY_TIMING_DIR=$$timing_q scripts/measure-deploy-step.sh post-deploy-verify env VERIFY_MODE=$$verify_q make post-deploy-verify"
+
+t480-deploy-full: t480-sync
+	ssh $${TARGET_HOST:-thinkpad} 'cd $${TARGET_DIR:-/opt/memory-os} && scripts/measure-deploy-step.sh prod-up make prod-up && scripts/measure-deploy-step.sh post-deploy-verify env VERIFY_MODE=full make post-deploy-verify'
 
 t480-deploy-api-fast: t480-sync
 	ssh $${TARGET_HOST:-thinkpad} 'cd $${TARGET_DIR:-/opt/memory-os} && SERVICES="memory-api" make prod-up-services && make verify-light'

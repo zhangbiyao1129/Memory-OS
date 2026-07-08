@@ -14,6 +14,10 @@ services:
   qdrant:
     environment:
       QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS: 2
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
 
   memory-worker:
     environment:

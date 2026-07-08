@@ -54,6 +54,8 @@ type SourceRef struct {
 	ArchiveID      string     `json:"archive_id,omitempty"`
 	ChunkID        string     `json:"chunk_id,omitempty"`
 	SourceEventIDs []string   `json:"source_event_ids,omitempty"`
+	Scope          string     `json:"scope,omitempty"`
+	ProjectID      string     `json:"project_id,omitempty"`
 }
 
 type candidate struct {

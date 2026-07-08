@@ -100,6 +100,60 @@ func TestPostDeployVerifyRunsRuntimeGatesInOrder(t *testing.T) {
 	}
 }
 
+func TestPostDeployVerifyLightModeSkipsSlowGates(t *testing.T) {
+	steps := runPostDeployVerifyForMode(t, "light")
+	want := []string{"compose-ps", "version", "healthz"}
+	if strings.Join(steps, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("light steps = %v, want %v", steps, want)
+	}
+}
+
+func TestPostDeployVerifySmokeModeSkipsPipelineE2E(t *testing.T) {
+	steps := runPostDeployVerifyForMode(t, "smoke")
+	want := []string{"compose-ps", "version", "healthz", "openapi", "openapi-validate", "smoke"}
+	if strings.Join(steps, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("smoke steps = %v, want %v", steps, want)
+	}
+}
+
+func runPostDeployVerifyForMode(t *testing.T, mode string) []string {
+	t.Helper()
+	repoRoot := findRepoRoot(t)
+	scriptPath := filepath.Join(repoRoot, "scripts", "post-deploy-verify.sh")
+	tempDir := t.TempDir()
+	stepsPath := filepath.Join(tempDir, "steps.log")
+	mark := func(name string) string {
+		return "printf '%s\\n' " + name + " >> " + shellQuote(stepsPath)
+	}
+
+	cmd := exec.Command("bash", scriptPath)
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), testProductionEnv()...)
+	cmd.Env = append(cmd.Env,
+		"VERIFY_MODE="+mode,
+		"COMPOSE_PS_CMD="+mark("compose-ps"),
+		"VERSION_CMD="+mark("version"),
+		"HEALTHZ_CMD="+mark("healthz"),
+		"OPENAPI_CMD="+mark("openapi"),
+		"OPENAPI_VALIDATE_CMD="+mark("openapi-validate"),
+		"SMOKE_CMD="+mark("smoke"),
+		"PIPELINE_E2E_CMD="+mark("pipeline-e2e"),
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("post deploy verify script failed: %v\n%s", err, output)
+	}
+	data, err := os.ReadFile(stepsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "\n")
+}
+
 func TestPostDeployVerifyValidatesOpenAPIContent(t *testing.T) {
 	repoRoot := findRepoRoot(t)
 	content, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "post-deploy-verify.sh"))
@@ -754,7 +808,15 @@ func TestProductionCommandsLoadEnvironmentWithoutInliningSecrets(t *testing.T) {
 	if !strings.Contains(makefile, ". scripts/load-prod-env.sh") {
 		t.Fatal("prod-up must source scripts/load-prod-env.sh before docker-compose")
 	}
-	if !strings.Contains(makefile, "prod-up:\n\t. scripts/load-prod-env.sh && \\") {
+	prodUpIndex := strings.Index(makefile, "prod-up:")
+	servicesIndex := strings.Index(makefile, "SERVICES ?=")
+	if prodUpIndex < 0 || servicesIndex < 0 || servicesIndex <= prodUpIndex {
+		t.Fatal("Makefile must define prod-up before SERVICES")
+	}
+	prodUpBlock := makefile[prodUpIndex:servicesIndex]
+	loadEnvIndex := strings.Index(prodUpBlock, ". scripts/load-prod-env.sh")
+	preflightIndex := strings.Index(prodUpBlock, "ALLOW_EXISTING_DEPLOYMENT=1 scripts/preflight.sh")
+	if loadEnvIndex < 0 || preflightIndex < loadEnvIndex {
 		t.Fatal("prod-up must source scripts/load-prod-env.sh before production preflight")
 	}
 	if !strings.Contains(makefile, ". scripts/load-build-info.sh") {
@@ -763,8 +825,11 @@ func TestProductionCommandsLoadEnvironmentWithoutInliningSecrets(t *testing.T) {
 	if !strings.Contains(makefile, "ALLOW_EXISTING_DEPLOYMENT=1 scripts/preflight.sh && \\") {
 		t.Fatal("prod-up must run preflight with ALLOW_EXISTING_DEPLOYMENT=1 before docker-compose build")
 	}
+	if !strings.Contains(makefile, `if [[ "$${CLEANUP_IMAGES:-0}" == "1" ]]`) {
+		t.Fatal("prod-up must keep Docker image cleanup behind CLEANUP_IMAGES=1")
+	}
 	if !strings.Contains(makefile, "DRY_RUN=0 DOCKER_IMAGE_CLEANUP_MODE=dangling CONFIRM_DOCKER_IMAGE_CLEANUP=I_UNDERSTAND_IMAGE_DELETE bash scripts/docker-cleanup-images.sh") {
-		t.Fatal("prod-up must prune dangling Docker images through bash after successful compose build")
+		t.Fatal("prod-up must keep an explicit Docker image cleanup command available")
 	}
 	if !strings.Contains(postDeploy, ". scripts/load-prod-env.sh") {
 		t.Fatal("post-deploy-verify must source scripts/load-prod-env.sh before compose checks")
@@ -855,7 +920,11 @@ func TestMakefileExposesT480DirectWorkflowTargets(t *testing.T) {
 		"t480-build-check:",
 		"make test && make build-web",
 		"t480-deploy:",
-		"make prod-up && make post-deploy-verify",
+		"t480-deploy-auto:",
+		"scripts/classify-deploy-changes.sh",
+		"scripts/measure-deploy-step.sh prod-up-services",
+		"t480-deploy-full:",
+		"scripts/measure-deploy-step.sh prod-up make prod-up",
 	} {
 		if !strings.Contains(makefile, required) {
 			t.Fatalf("Makefile missing T480 workflow marker %q", required)

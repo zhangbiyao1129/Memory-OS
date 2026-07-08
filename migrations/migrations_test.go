@@ -246,6 +246,21 @@ func TestHotMemoryMigrationContainsRequiredTablesAndIndexes(t *testing.T) {
 	}
 }
 
+func TestCandidateMaintenanceScopeLockMigrationNarrowsRunningUniqueIndex(t *testing.T) {
+	sql := readMigration(t, "000026_candidate_maintenance_scope_lock.sql")
+	required := []string{
+		"DROP INDEX IF EXISTS candidate_maintenance_runs_running_project_unique",
+		"candidate_maintenance_runs_running_scope_unique",
+		"ON candidate_maintenance_runs (org_id, project_id, source_key, thread_id)",
+		"WHERE status = 'running'",
+	}
+	for _, item := range required {
+		if !strings.Contains(sql, item) {
+			t.Fatalf("maintenance scope lock migration missing %q", item)
+		}
+	}
+}
+
 func TestHotMemoryQdrantMigrationContainsRequiredPointTracking(t *testing.T) {
 	sql := readMigration(t, "000017_hot_memory_qdrant_points.sql")
 
@@ -454,6 +469,27 @@ func TestCandidateMemoriesMigrationContainsRequiredTablesAndIndexes(t *testing.T
 	for _, forbidden := range []string{"DROP TABLE", "DROP COLUMN"} {
 		if strings.Contains(strings.ToUpper(sql), forbidden) {
 			t.Fatalf("candidate memories migration contains destructive statement %q", forbidden)
+		}
+	}
+}
+
+func TestCandidateTriageMigrationContainsRequiredTablesAndIndexes(t *testing.T) {
+	sql := readMigration(t, "000025_candidate_triage.sql")
+
+	required := []string{
+		"CREATE TABLE IF NOT EXISTS candidate_triage_results",
+		"CREATE TABLE IF NOT EXISTS candidate_project_links",
+		"candidate_id TEXT NOT NULL",
+		"triage_scope TEXT NOT NULL",
+		"review_state TEXT NOT NULL DEFAULT 'weak'",
+		"promoted_hot_memory_ids TEXT[] NOT NULL DEFAULT '{}'",
+		"CREATE UNIQUE INDEX IF NOT EXISTS candidate_triage_results_candidate_unique",
+		"CREATE UNIQUE INDEX IF NOT EXISTS candidate_project_links_unique",
+		"CREATE INDEX IF NOT EXISTS candidate_project_links_project_idx",
+	}
+	for _, item := range required {
+		if !strings.Contains(sql, item) {
+			t.Fatalf("candidate triage migration missing %q", item)
 		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"memory-os/internal/archive"
+	"memory-os/internal/candidatememory"
 	"memory-os/internal/hotmemory"
 	"memory-os/internal/rag"
 )
@@ -242,6 +243,68 @@ func TestSearchDoesNotReturnDifferentUserMemory(t *testing.T) {
 	}
 	if len(response.Results) != 0 {
 		t.Fatalf("results len = %d, want 0", len(response.Results))
+	}
+}
+
+func TestSearchAlsoRecallsUserGlobalHotMemory(t *testing.T) {
+	hot := hotmemory.NewService(hotmemory.NewMemoryRepository())
+	if _, err := hot.Upsert(hotmemory.UpsertRequest{
+		OrgID:            "org_1",
+		ProjectID:        "project_1",
+		UserID:           "user_1",
+		AgentID:          "codex",
+		Scope:            hotmemory.ScopeProject,
+		Visibility:       "project",
+		PermissionLabels: []string{"project:project_1:read"},
+		Fact:             "project tooling fact",
+		SourceType:       hotmemory.SourceTurnEvent,
+		SourceRef:        "event_project",
+		Confidence:       0.8,
+	}); err != nil {
+		t.Fatalf("Upsert project memory: %v", err)
+	}
+	if _, err := hot.Upsert(hotmemory.UpsertRequest{
+		OrgID:      "org_1",
+		ProjectID:  candidatememory.GlobalHotMemoryProjectID,
+		UserID:     "user_1",
+		AgentID:    "codex",
+		Scope:      hotmemory.ScopeUser,
+		Visibility: "private",
+		Fact:       "global tooling fact",
+		SourceType: hotmemory.SourceTurnEvent,
+		SourceRef:  "event_global",
+		Confidence: 0.9,
+	}); err != nil {
+		t.Fatalf("Upsert global memory: %v", err)
+	}
+	service := NewService(Options{HotMemory: hot})
+
+	resp, err := service.Search(SearchRequest{
+		RequestID:        "req_global_hot",
+		Query:            "tooling",
+		Actor:            Actor{UserID: "user_1", OrgID: "org_1", ProjectID: "project_1", AgentID: "codex"},
+		Scope:            hotmemory.ScopeProject,
+		Visibility:       "project",
+		PermissionLabels: []string{"project:project_1:read"},
+		MaxContextBytes:  4096,
+	})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(resp.Results) != 2 {
+		t.Fatalf("results = %#v, want project and global hot memory", resp.Results)
+	}
+	globalFound := false
+	for _, result := range resp.Results {
+		if result.Source.ProjectID == candidatememory.GlobalHotMemoryProjectID {
+			globalFound = true
+			if result.Source.Scope != string(hotmemory.ScopeUser) {
+				t.Fatalf("global source = %#v, want scope user", result.Source)
+			}
+		}
+	}
+	if !globalFound {
+		t.Fatalf("global hot memory not returned: %#v", resp.Results)
 	}
 }
 

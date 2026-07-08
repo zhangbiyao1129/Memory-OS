@@ -321,6 +321,10 @@ func (maintenanceRepoStub) GetRunningRun(ctx context.Context, orgID, projectID s
 	return nil, nil
 }
 
+func (maintenanceRepoStub) GetRunningRunInScope(ctx context.Context, orgID, projectID, sourceKey, threadID string) (*candidatememory.MaintenanceRun, error) {
+	return nil, nil
+}
+
 func (maintenanceRepoStub) UpdateStage(ctx context.Context, runID string, stage candidatememory.MaintenanceRunStage, totalCandidates int) error {
 	return nil
 }

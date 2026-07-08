@@ -20,6 +20,7 @@ import (
 	"memory-os/internal/logger"
 	"memory-os/internal/qdrant"
 	"memory-os/internal/rag"
+	"memory-os/internal/tenant"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -90,6 +91,27 @@ var newAutoMaintenanceService = func(cfg config.Config, pool *pgxpool.Pool, cand
 	}
 	cleaner := candidatememory.NewLLMMaintenanceCleaner(client).WithModel(model)
 	return candidatememory.NewMaintenanceService(candidatememory.NewPGMaintenanceRepository(pool), candidateRepo, composer, cleaner), nil
+}
+
+type tenantProjectCatalog struct {
+	repo tenant.Repository
+}
+
+func (c tenantProjectCatalog) ListProjectsForTriage(userID, orgID string) ([]candidatememory.TriageProject, error) {
+	projects, err := c.repo.ListProjects(userID, orgID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]candidatememory.TriageProject, 0, len(projects))
+	for _, project := range projects {
+		out = append(out, candidatememory.TriageProject{
+			ProjectID: project.ID,
+			Name:      project.Name,
+			Slug:      project.Slug,
+			SourceKey: project.SourceKey,
+		})
+	}
+	return out, nil
 }
 
 // eventlogCandidateLoader 把候选任务转换为提炼请求:从 eventlog 加载已保存(已脱敏)事件。
@@ -196,6 +218,7 @@ func buildWorker(cfg config.Config) (*jobs.Runner, error) {
 
 		// 候选记忆链路(Phase 4):queue 始终装配(memory-api enqueue 用),worker 需 LLM。
 		candidateRepo := candidatememory.NewPGRepository(pool)
+		triageRepo := candidatememory.NewPGTriageRepository(pool)
 		candidateQueue = jobs.NewPGCandidateMemoryQueue(candidateRepo, jobs.PGCandidateMemoryQueueOptions{WorkerID: "memory-worker"})
 		if llmClient, llmErr := newOpenAICompatibleClient(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, LLMModel: cfg.LLMModel, EmbeddingModel: cfg.EmbeddingModel}); llmErr == nil {
 			hotMemoryService, err := newHotMemoryService(context.Background(), cfg, pool)
@@ -210,10 +233,20 @@ func buildWorker(cfg config.Config) (*jobs.Runner, error) {
 			candidateWorker = &worker
 			archiveCreator := jobs.NewProductionArchiveCreator(archiveService, ragIndexQueue)
 			composer := candidatememory.NewTopicComposer(candidateRepo, archiveCreator)
+			triageService := candidatememory.NewTriageService(candidatememory.TriageServiceOptions{
+				Repo:           triageRepo,
+				Classifier:     candidatememory.NewLLMTriageClassifier(llmClient).WithModel(cfg.LLMModel),
+				Fallback:       candidatememory.RuleTriageClassifier{},
+				ProjectCatalog: tenantProjectCatalog{repo: tenant.NewPGRepository(pool)},
+				HotMemory:      hotMemoryService,
+			})
 			autoMaintenance, err = newAutoMaintenanceService(cfg, pool, candidateRepo, &composer)
 			if err != nil {
 				closePostgresPool(pool)
 				return nil, err
+			}
+			if service, ok := autoMaintenance.(*candidatememory.MaintenanceService); ok {
+				service.WithTriage(triageService)
 			}
 		}
 	}

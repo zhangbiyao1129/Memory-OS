@@ -176,6 +176,21 @@ var newProductionMaintenanceService = func(cfg config.Config, pool *pgxpool.Pool
 	return candidatememory.NewMaintenanceService(candidatememory.NewPGMaintenanceRepository(pool), candidateRepo, composer, cleaner), nil
 }
 
+var newProductionHotMemoryOrganizer = func(cfg config.Config) (hotmemory.Organizer, error) {
+	model := strings.TrimSpace(cfg.LLMModel)
+	if model == "" {
+		model = "MiniMax-M2.7"
+	}
+	if strings.TrimSpace(cfg.LLMBaseURL) == "" || strings.TrimSpace(cfg.LLMAPIKey) == "" || strings.TrimSpace(model) == "" {
+		return nil, nil
+	}
+	client, err := llm.NewOpenAICompatible(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, LLMModel: model, Timeout: 5 * time.Minute})
+	if err != nil {
+		return nil, err
+	}
+	return hotmemory.NewLLMOrganizer(client).WithModel(model), nil
+}
+
 var newProductionReranker = func(cfg config.Config) retrieval.Reranker {
 	client, err := llm.NewOpenAICompatible(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, RerankModel: cfg.RerankModel})
 	if err != nil {
@@ -195,6 +210,13 @@ func routerOptions(cfg config.Config, healthService health.Service, pool *pgxpoo
 	hot, err := newProductionHotMemory(cfg, pool)
 	if err != nil {
 		return httpapi.RouterOptions{}, err
+	}
+	hotOrganizer, err := newProductionHotMemoryOrganizer(cfg)
+	if err != nil {
+		return httpapi.RouterOptions{}, err
+	}
+	if hotOrganizer != nil {
+		hot = hot.WithOrganizer(hotOrganizer)
 	}
 	archiveRAG, err := newProductionArchiveRAG(cfg, pool)
 	if err != nil {
@@ -216,6 +238,7 @@ func routerOptions(cfg config.Config, healthService health.Service, pool *pgxpoo
 	options.CandidateQueue = jobs.NewPGCandidateMemoryQueue(candidateRepo, jobs.PGCandidateMemoryQueueOptions{WorkerID: "memory-api"})
 	options.CandidateService = candidatememory.NewService(candidateRepo, candidatememory.RuleScorer{})
 	options.TopicRepository = candidateRepo
+	options.TriageRepository = candidatememory.NewPGTriageRepository(pool)
 	archiveIndexQueue := jobs.NewPGArchiveIndexQueue(pool, jobs.PGArchiveIndexQueueOptions{WorkerID: "memory-api"})
 	archiveCreator := jobs.NewProductionArchiveCreator(options.ArchiveService, archiveIndexQueue)
 	composer := candidatememory.NewTopicComposer(candidateRepo, archiveCreator)

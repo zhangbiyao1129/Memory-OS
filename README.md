@@ -156,21 +156,7 @@ Memory OS 可以部署到任意支持 Docker 和 Docker Compose 的 Linux 主机
 | Redis | 队列、锁、缓存和限流 |
 | Qdrant | 可重建向量索引 |
 
-基础流程：
-
-```bash
-# 复制环境变量模板并填写生产配置
-cp .env.example .env
-
-# 构建并启动服务
-APP_ENV=production ENABLE_DEV_ENDPOINTS=false \
-docker-compose -f deploy/docker-compose.yml up -d --build
-
-# 部署后验证
-make post-deploy-verify
-```
-
-如果需要远程主机部署，可以使用 `rsync`、CI/CD、镜像仓库或自己的发布脚本把源码或镜像同步到目标主机；不要把本地私有路径、主机名或密钥写入仓库。
+部署、重启、验证和 T480 日常发布统一按 [DEPLOYMENT.md](DEPLOYMENT.md) 执行。不要把本地私有路径、主机名或密钥写入仓库。
 
 ## 本地验证
 
@@ -209,7 +195,7 @@ curl -X POST "$MEMORY_OS_MCP_URL/mcp" \
 部署后：
 
 ```bash
-make post-deploy-verify
+VERIFY_MODE=full make post-deploy-verify
 ```
 
 ## 版本

@@ -224,6 +224,26 @@ func TestSearchTestPageUsesAuthenticatedRuntimeContext(t *testing.T) {
 	}
 }
 
+func TestTriagePageShowsAutomaticOrganizationSignals(t *testing.T) {
+	content, err := os.ReadFile("../../frontend/pages/triage/index.vue")
+	if err != nil {
+		t.Fatalf("read triage page: %v", err)
+	}
+	page := string(content)
+	required := []string{
+		"自动整理",
+		"跨项目关联",
+		"全局工具记忆",
+		"/memory/triage/list",
+		"promoted_hot_memory_ids",
+	}
+	for _, marker := range required {
+		if !strings.Contains(page, marker) {
+			t.Fatalf("triage page missing marker %q", marker)
+		}
+	}
+}
+
 func TestSearchTestPageDisplaysUnifiedRetrievalEvidence(t *testing.T) {
 	content, err := os.ReadFile("../../frontend/components/RagSearchWorkbench.vue")
 	if err != nil {
@@ -1068,22 +1088,20 @@ func TestBackendDockerfilesInjectBuildInfo(t *testing.T) {
 }
 
 func TestBackendDockerfilesConfigureGoModuleProxy(t *testing.T) {
-	for _, path := range []string{"../../deploy/backend/Dockerfile.api", "../../deploy/backend/Dockerfile.worker", "../../deploy/backend/Dockerfile.mcp"} {
-		content, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		dockerfile := string(content)
-		for _, marker := range []string{
-			"ARG GOPROXY=https://goproxy.cn,direct",
-			"ARG NO_PROXY=" + backendNoProxyDefault,
-			"ENV GOPROXY=${GOPROXY}",
-			"ENV NO_PROXY=${NO_PROXY}",
-			"ENV no_proxy=${NO_PROXY}",
-		} {
-			if !strings.Contains(dockerfile, marker) {
-				t.Fatalf("%s missing go module proxy marker %q", path, marker)
-			}
+	content, err := os.ReadFile("../../deploy/backend/Dockerfile.backend")
+	if err != nil {
+		t.Fatalf("read Dockerfile.backend: %v", err)
+	}
+	dockerfile := string(content)
+	for _, marker := range []string{
+		"ARG GOPROXY=https://goproxy.cn,direct",
+		"ARG NO_PROXY=" + backendNoProxyDefault,
+		"ENV GOPROXY=${GOPROXY}",
+		"ENV NO_PROXY=${NO_PROXY}",
+		"ENV no_proxy=${NO_PROXY}",
+	} {
+		if !strings.Contains(dockerfile, marker) {
+			t.Fatalf("Dockerfile.backend missing go module proxy marker %q", marker)
 		}
 	}
 }
@@ -1100,8 +1118,8 @@ func TestComposePassesBackendBuildInfoArgs(t *testing.T) {
 		"BUILD_TIME: ${BUILD_TIME:-unknown}",
 		"BUILD_DIRTY: ${BUILD_DIRTY:-unknown}",
 	} {
-		if strings.Count(compose, marker) < 3 {
-			t.Fatalf("compose must pass backend build arg %q to api/worker/mcp", marker)
+		if strings.Count(compose, marker) != 1 {
+			t.Fatalf("compose must pass backend build arg %q exactly once to unified backend image", marker)
 		}
 	}
 }
@@ -1116,8 +1134,8 @@ func TestComposePassesBackendBuildProxyArgs(t *testing.T) {
 		"GOPROXY: ${GOPROXY:-https://goproxy.cn,direct}",
 		"NO_PROXY: ${NO_PROXY:-" + backendNoProxyDefault + "}",
 	} {
-		if strings.Count(compose, marker) < 3 {
-			t.Fatalf("compose must pass backend build proxy arg %q to api/worker/mcp", marker)
+		if !strings.Contains(compose, marker) {
+			t.Fatalf("compose must pass backend build proxy arg %q to unified backend image", marker)
 		}
 	}
 }
@@ -1223,10 +1241,79 @@ func TestMakefileProductionDeployTargetSetsBuildInfo(t *testing.T) {
 	for _, marker := range []string{
 		"prod-up:",
 		". scripts/load-build-info.sh && \\",
-		"up -d --build memory-api memory-worker memory-mcp memory-web",
+		"up -d --no-build qdrant memory-api memory-worker memory-mcp memory-web",
+		"prod-build-backend",
+		"prod-build-web",
 	} {
 		if !strings.Contains(makefile, marker) {
 			t.Fatalf("Makefile prod-up target missing %q", marker)
+		}
+	}
+}
+
+func TestProdUpDoesNotPruneDockerImagesByDefault(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join(findRepoRoot(t), "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	makefile := string(content)
+	prodUpIndex := strings.Index(makefile, "\nprod-up:")
+	servicesIndex := strings.Index(makefile, "\nSERVICES ?=")
+	if prodUpIndex < 0 || servicesIndex < 0 || servicesIndex <= prodUpIndex {
+		t.Fatal("Makefile must define prod-up before SERVICES")
+	}
+	prodUp := makefile[prodUpIndex:servicesIndex]
+	if !strings.Contains(prodUp, `if [[ "$${CLEANUP_IMAGES:-0}" == "1" ]]`) {
+		t.Fatal("prod-up must keep cleanup available behind CLEANUP_IMAGES=1")
+	}
+	if strings.Contains(prodUp, "&& \\\n\tDRY_RUN=0 DOCKER_IMAGE_CLEANUP_MODE=dangling") {
+		t.Fatal("prod-up must not chain unconditional Docker image cleanup after compose up")
+	}
+}
+
+func TestBackendServicesReuseSingleBackendImage(t *testing.T) {
+	composeContent, err := os.ReadFile("../../deploy/docker-compose.yml")
+	if err != nil {
+		t.Fatalf("read docker-compose.yml: %v", err)
+	}
+	dockerfileContent, err := os.ReadFile("../../deploy/backend/Dockerfile.backend")
+	if err != nil {
+		t.Fatalf("read Dockerfile.backend: %v", err)
+	}
+	compose := string(composeContent)
+	dockerfile := string(dockerfileContent)
+
+	for _, required := range []string{
+		"dockerfile: deploy/backend/Dockerfile.backend",
+		"image: deploy-memory-backend",
+		`command: ["memory-api"]`,
+		`command: ["memory-worker"]`,
+		`command: ["memory-mcp"]`,
+	} {
+		if !strings.Contains(compose, required) {
+			t.Fatalf("compose missing unified backend marker %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"dockerfile: deploy/backend/Dockerfile.api",
+		"dockerfile: deploy/backend/Dockerfile.worker",
+		"dockerfile: deploy/backend/Dockerfile.mcp",
+	} {
+		if strings.Contains(compose, forbidden) {
+			t.Fatalf("compose must not use per-service backend Dockerfile marker %q", forbidden)
+		}
+	}
+	for _, required := range []string{
+		"go build",
+		"-o /out/memory-api ./cmd/memory-api",
+		"-o /out/memory-worker ./cmd/memory-worker",
+		"-o /out/memory-mcp ./cmd/memory-mcp",
+		"COPY --from=build /out/memory-api /usr/local/bin/memory-api",
+		"COPY --from=build /out/memory-worker /usr/local/bin/memory-worker",
+		"COPY --from=build /out/memory-mcp /usr/local/bin/memory-mcp",
+	} {
+		if !strings.Contains(dockerfile, required) {
+			t.Fatalf("Dockerfile.backend missing marker %q", required)
 		}
 	}
 }
@@ -1241,11 +1328,17 @@ func TestMakefileProvidesFastT480DeployTargets(t *testing.T) {
 		"prod-up-services:",
 		"SERVICES ?= memory-api memory-worker memory-mcp memory-web",
 		"CLEANUP_IMAGES ?= 0",
-		"$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) up -d --build $(SERVICES)",
+		"$(COMPOSE) -f $(COMPOSE_FILE) -f $(COMPOSE_T480_FILE) up -d --no-build $(SERVICES)",
+		"prod-build-backend:",
+		"prod-build-web:",
+		"t480-deploy-auto:",
+		"t480-deploy-full:",
+		"t480-deploy-dry-run:",
 		"t480-deploy-api-fast:",
 		"t480-deploy-web-fast:",
 		"t480-deploy-api-web-fast:",
 		"t480-verify-light:",
+		"deploy-safety-check:",
 		"scripts/verify-light.sh",
 	} {
 		if !strings.Contains(makefile, marker) {
@@ -1260,6 +1353,95 @@ func TestMakefileProvidesFastT480DeployTargets(t *testing.T) {
 	}
 	if !strings.Contains(makefile, "SERVICES=\"memory-api memory-web\" make prod-up-services") {
 		t.Fatal("Makefile fast api-web deploy must rebuild only memory-api and memory-web")
+	}
+}
+
+func TestT480AutoDeployClassifiesChangesBeforeSync(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join(findRepoRoot(t), "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	makefile := string(content)
+	autoIndex := strings.Index(makefile, "\nt480-deploy-auto:")
+	fullIndex := strings.Index(makefile, "\nt480-deploy-full:")
+	if autoIndex < 0 || fullIndex < 0 || fullIndex <= autoIndex {
+		t.Fatal("Makefile must define t480-deploy-auto before t480-deploy-full")
+	}
+	autoTarget := makefile[autoIndex:fullIndex]
+	classifyIndex := strings.Index(autoTarget, `eval "$$(scripts/classify-deploy-changes.sh)"`)
+	safetyIndex := strings.Index(autoTarget, "$(MAKE) deploy-safety-check")
+	syncIndex := strings.Index(autoTarget, "bash scripts/sync-t480.sh")
+	sshIndex := strings.Index(autoTarget, "ssh $${TARGET_HOST:-thinkpad}")
+	if classifyIndex < 0 || safetyIndex < 0 || syncIndex < 0 || sshIndex < 0 {
+		t.Fatalf("t480-deploy-auto missing classify/safety/sync/ssh sequence:\n%s", autoTarget)
+	}
+	if !(classifyIndex < safetyIndex && safetyIndex < syncIndex && syncIndex < sshIndex) {
+		t.Fatalf("t480-deploy-auto must classify locally, run safety checks, then sync and remote deploy:\n%s", autoTarget)
+	}
+	for _, marker := range []string{
+		"deploy plan",
+		"services: %s",
+		"verify_mode: %s",
+		"target: %s:%s",
+	} {
+		if !strings.Contains(autoTarget, marker) {
+			t.Fatalf("t480-deploy-auto must print deploy plan marker %q:\n%s", marker, autoTarget)
+		}
+	}
+	if !strings.Contains(autoTarget, "deploy_timing_dir=") || strings.Count(autoTarget, "DEPLOY_TIMING_DIR=$$timing_q") != 2 {
+		t.Fatalf("t480-deploy-auto must reuse one DEPLOY_TIMING_DIR for deploy and verify timings:\n%s", autoTarget)
+	}
+	if strings.Contains(autoTarget, `ssh $${TARGET_HOST:-thinkpad} 'cd $${TARGET_DIR:-/opt/memory-os} && eval "$$(scripts/classify-deploy-changes.sh)"`) {
+		t.Fatal("t480-deploy-auto must not classify on remote /opt/memory-os because sync excludes .git")
+	}
+}
+
+func TestT480DeployDryRunDoesNotRestartServices(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join(findRepoRoot(t), "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	makefile := string(content)
+	dryRunIndex := strings.Index(makefile, "\nt480-deploy-dry-run:")
+	autoIndex := strings.Index(makefile, "\nt480-deploy-auto:")
+	if dryRunIndex < 0 || autoIndex < 0 || autoIndex <= dryRunIndex {
+		t.Fatal("Makefile must define t480-deploy-dry-run before t480-deploy-auto")
+	}
+	dryRunTarget := makefile[dryRunIndex:autoIndex]
+	for _, marker := range []string{
+		`eval "$$(scripts/classify-deploy-changes.sh)"`,
+		"deploy plan",
+		"DRY_RUN=1 bash scripts/sync-t480.sh",
+		"docker-compose -f deploy/docker-compose.yml -f deploy/docker-compose.t480.yml config",
+	} {
+		if !strings.Contains(dryRunTarget, marker) {
+			t.Fatalf("t480-deploy-dry-run missing marker %q:\n%s", marker, dryRunTarget)
+		}
+	}
+	for _, forbidden := range []string{"prod-up-services", "up -d", "post-deploy-verify"} {
+		if strings.Contains(dryRunTarget, forbidden) {
+			t.Fatalf("t480-deploy-dry-run must not mutate deployment via %q:\n%s", forbidden, dryRunTarget)
+		}
+	}
+}
+
+func TestDeploySafetyCheckScriptCoversShellAndDeployDryRuns(t *testing.T) {
+	content, err := os.ReadFile("../../scripts/deploy-safety-check.sh")
+	if err != nil {
+		t.Fatalf("read deploy-safety-check.sh: %v", err)
+	}
+	script := string(content)
+	for _, marker := range []string{
+		"bash -n",
+		"scripts/deploy_classifier_test.sh",
+		"t480-deploy-dry-run:",
+		"t480-deploy-auto:",
+		"$(MAKE) deploy-safety-check",
+		"command -v shellcheck",
+	} {
+		if !strings.Contains(script, marker) {
+			t.Fatalf("deploy safety check missing marker %q", marker)
+		}
 	}
 }
 

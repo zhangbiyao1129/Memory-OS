@@ -48,6 +48,11 @@ func TestEnsureCollectionSchemaCreatesCollectionAndPayloadIndexes(t *testing.T) 
 		payload map[string]any
 	}{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/collections/memory_os" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"result":{"status":"green","points_count":0,"vectors_count":0,"indexed_vectors_count":0,"segments_count":1,"config":{"params":{"vectors":{"size":1024,"distance":"Cosine"}}},"payload_schema":{}}}`))
+			return
+		}
 		var payload map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatalf("decode body: %v", err)
@@ -85,6 +90,46 @@ func TestEnsureCollectionSchemaCreatesCollectionAndPayloadIndexes(t *testing.T) 
 		if request.payload["field_schema"] != cfg.FieldSchema {
 			t.Fatalf("payload index field_schema[%d] = %v, want %q", index, request.payload["field_schema"], cfg.FieldSchema)
 		}
+	}
+}
+
+func TestEnsurePayloadIndexesSkipsExistingSchemas(t *testing.T) {
+	indexRequests := []map[string]any{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/collections/memory_os":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"result":{"status":"green","points_count":0,"vectors_count":0,"indexed_vectors_count":0,"segments_count":1,"config":{"params":{"vectors":{"size":1024,"distance":"Cosine"}}},"payload_schema":{"doc_type":{},"user_id":{}}}}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/collections/memory_os/index":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			indexRequests = append(indexRequests, payload)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	err = client.EnsurePayloadIndexes(t.Context(), DefaultCollectionName, []PayloadIndexConfig{
+		{FieldName: "doc_type", FieldSchema: PayloadSchemaKeyword},
+		{FieldName: "user_id", FieldSchema: PayloadSchemaKeyword},
+		{FieldName: "status", FieldSchema: PayloadSchemaKeyword},
+	})
+	if err != nil {
+		t.Fatalf("EnsurePayloadIndexes() error = %v", err)
+	}
+	if len(indexRequests) != 1 {
+		t.Fatalf("index request count = %d, want 1", len(indexRequests))
+	}
+	if indexRequests[0]["field_name"] != "status" {
+		t.Fatalf("created field = %v, want status", indexRequests[0]["field_name"])
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"memory-os/internal/candidatememory"
 	"memory-os/internal/hotmemory"
 	"memory-os/internal/qdrant"
 	"memory-os/internal/rag"
@@ -121,8 +122,7 @@ func (s Service) collect(request SearchRequest) ([]candidate, error) {
 			return nil, err
 		}
 		for _, result := range results {
-			memory := result.Memory
-			candidates = append(candidates, candidate{id: "hot_memory:" + memory.MemoryID, text: memory.Fact, score: result.Score, source: SourceRef{Kind: SourceHotMemory, MemoryID: memory.MemoryID}})
+			candidates = append(candidates, hotMemoryCandidate("hot_memory:", result, result.Score))
 		}
 		if request.Scope != hotmemory.ScopeAgentSpecific {
 			agentFilter, err := hotmemory.BuildFilter(hotmemory.FilterContext{OrgID: request.Actor.OrgID, ProjectID: request.Actor.ProjectID, UserID: request.Actor.UserID, AgentID: request.Actor.AgentID, Scope: hotmemory.ScopeAgentSpecific, Visibility: request.Visibility, PermissionLabels: request.PermissionLabels})
@@ -134,8 +134,30 @@ func (s Service) collect(request SearchRequest) ([]candidate, error) {
 				return nil, err
 			}
 			for _, result := range agentResults {
+				candidates = append(candidates, hotMemoryCandidate("hot_memory:", result, result.Score))
+			}
+		}
+		if request.Scope == hotmemory.ScopeProject {
+			globalFilter, err := hotmemory.BuildFilter(hotmemory.FilterContext{
+				OrgID:      request.Actor.OrgID,
+				UserID:     request.Actor.UserID,
+				AgentID:    request.Actor.AgentID,
+				Scope:      hotmemory.ScopeUser,
+				Visibility: "private",
+			})
+			if err != nil {
+				return nil, err
+			}
+			globalResults, err := s.hotMemory.Search(hotmemory.SearchRequest{Query: recallQuery, Filter: globalFilter})
+			if err != nil {
+				return nil, err
+			}
+			for _, result := range globalResults {
 				memory := result.Memory
-				candidates = append(candidates, candidate{id: "hot_memory:" + memory.MemoryID, text: memory.Fact, score: result.Score, source: SourceRef{Kind: SourceHotMemory, MemoryID: memory.MemoryID}})
+				if memory.ProjectID != candidatememory.GlobalHotMemoryProjectID || memory.Scope != hotmemory.ScopeUser {
+					continue
+				}
+				candidates = append(candidates, hotMemoryCandidate("hot_memory_global:", result, result.Score*0.72))
 			}
 		}
 	}
@@ -175,6 +197,21 @@ func (s Service) collect(request SearchRequest) ([]candidate, error) {
 		boostCandidate(&candidates[i])
 	}
 	return dedupeCandidates(candidates), nil
+}
+
+func hotMemoryCandidate(prefix string, result hotmemory.SearchResult, score float64) candidate {
+	memory := result.Memory
+	return candidate{
+		id:    prefix + memory.MemoryID,
+		text:  memory.Fact,
+		score: score,
+		source: SourceRef{
+			Kind:      SourceHotMemory,
+			MemoryID:  memory.MemoryID,
+			Scope:     string(memory.Scope),
+			ProjectID: memory.ProjectID,
+		},
+	}
 }
 
 func (s Service) markReturnedHotResults(results []SearchResult) int {

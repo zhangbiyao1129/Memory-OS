@@ -24,6 +24,13 @@ describe('memory page', () => {
     }
   })
 
+  it('runs hot memory AI maintenance across workspace projects serially', () => {
+    expect(hotMemoryPageSource).toContain('/memory/hot-memory/maintenance/run')
+    expect(hotMemoryPageSource).toContain('loadProjectScopes')
+    expect(hotMemoryPageSource).toContain('for (const project of projects)')
+    expect(hotMemoryPageSource).not.toContain("Promise.all(projects.map((project) => request<HotMemoryMaintenanceResult>('/memory/hot-memory/maintenance/run'")
+  })
+
   it('runs the search workbench across all loaded workspace projects', () => {
     expect(ragSearchWorkbenchSource).toContain('searchProjectScopes')
     expect(ragSearchWorkbenchSource).toContain('SEARCH_PROJECT_CONCURRENCY = 3')

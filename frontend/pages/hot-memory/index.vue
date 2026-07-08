@@ -2,7 +2,7 @@
 const auth = useAuthStore()
 const context = useContextStore()
 const { request } = useApi()
-const { hasWorkspaceContext, requestWorkspaceProjects } = useWorkspaceProjectScopes()
+const { hasWorkspaceContext, loadProjectScopes, requestWorkspaceProjects } = useWorkspaceProjectScopes()
 
 type HotMemory = {
   memory_id: string
@@ -29,9 +29,16 @@ type HotMemory = {
 }
 
 type HotMemoryListResponse = { memories: HotMemory[] }
+type HotMemoryMaintenanceResult = {
+  processed: number
+  demoted: number
+  kept: number
+  summary: string
+}
 
 const loading = ref(false)
 const creating = ref(false)
+const organizing = ref(false)
 const error = ref('')
 const success = ref('')
 const memories = ref<HotMemory[]>([])
@@ -213,6 +220,43 @@ async function updateMemory(endpoint: string, memoryID: string) {
   }
 }
 
+async function runHotMemoryMaintenance() {
+  if (!auth.isAuthenticated || !hasWorkspaceContext.value) return
+  organizing.value = true
+  error.value = ''
+  success.value = ''
+  try {
+    const projects = await loadProjectScopes()
+    let processed = 0
+    let demoted = 0
+    let kept = 0
+    const summaries: string[] = []
+    for (const project of projects) {
+      const result = await request<HotMemoryMaintenanceResult>('/memory/hot-memory/maintenance/run', {
+        method: 'POST',
+        body: {
+          org_id: project.org_id,
+          project_id: project.project_id,
+          agent_id: context.agentId,
+          scope: scope.value,
+          visibility: visibility.value,
+          limit: 50
+        }
+      })
+      processed += Number(result.processed || 0)
+      demoted += Number(result.demoted || 0)
+      kept += Number(result.kept || 0)
+      if (result.summary) summaries.push(result.summary)
+    }
+    success.value = `AI 整理完成：处理 ${processed} 条，降权 ${demoted} 条，保留 ${kept} 条。${summaries[0] || ''}`
+    await loadMemories()
+  } catch (err: any) {
+    error.value = err.message || 'Hot Memory AI 整理失败'
+  } finally {
+    organizing.value = false
+  }
+}
+
 onMounted(async () => {
   auth.initFromStorage()
   context.initFromStorage()
@@ -235,6 +279,7 @@ watch(() => [context.orgId, context.projectId, context.agentId, scope.value, vis
       <div class="flex flex-wrap gap-2">
         <NuxtLink class="rounded-2xl border bg-white px-4 py-2 font-bold" to="/candidates">去候选记忆</NuxtLink>
         <NuxtLink class="rounded-2xl border bg-white px-4 py-2 font-bold" to="/archive">去归档库</NuxtLink>
+        <button class="rounded-2xl border bg-white px-4 py-2 font-bold disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-stone-500" :disabled="organizing || loading || !auth.isAuthenticated || !hasWorkspaceContext" @click="runHotMemoryMaintenance">{{ organizing ? '整理中...' : 'AI 整理' }}</button>
         <button class="rounded-2xl border bg-white px-4 py-2 font-bold" :disabled="loading" @click="loadMemories">{{ loading ? '刷新中...' : '刷新' }}</button>
       </div>
     </div>

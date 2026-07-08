@@ -73,6 +73,17 @@ func (r *InMemoryMaintenanceRepository) GetRunningRun(ctx context.Context, orgID
 	return nil, nil
 }
 
+func (r *InMemoryMaintenanceRepository) GetRunningRunInScope(ctx context.Context, orgID, projectID, sourceKey, threadID string) (*MaintenanceRun, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, run := range r.runs {
+		if run.OrgID == orgID && run.ProjectID == projectID && run.SourceKey == sourceKey && run.ThreadID == threadID && run.Status == MaintenanceRunRunning {
+			return &run, nil
+		}
+	}
+	return nil, nil
+}
+
 func (r *InMemoryMaintenanceRepository) ListRunningRuns(ctx context.Context, orgID, projectID string) ([]MaintenanceRun, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -140,6 +151,33 @@ type trackingMaintenanceCleaner struct {
 	err    error
 }
 
+type fakeAutoTriage struct {
+	called int
+}
+
+type keepingMaintenanceCleaner struct {
+	mu      sync.Mutex
+	calls   int
+	batches [][]string
+}
+
+func (k *keepingMaintenanceCleaner) Clean(ctx context.Context, candidates []Candidate) (CleanResult, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.calls++
+	ids := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		ids = append(ids, candidate.CandidateID)
+	}
+	k.batches = append(k.batches, ids)
+	return CleanResult{KeepIDs: ids, Summary: "保留可沉淀候选"}, nil
+}
+
+func (f *fakeAutoTriage) RunAutoTriage(ctx context.Context, filter TriageScanFilter) (TriageRunResult, error) {
+	f.called++
+	return TriageRunResult{Processed: 1, Triaged: 1}, nil
+}
+
 func (t *trackingMaintenanceCleaner) Clean(ctx context.Context, candidates []Candidate) (CleanResult, error) {
 	t.called = true
 	if t.err != nil {
@@ -157,6 +195,16 @@ func newTestMaintenanceService(t *testing.T, cleaner MaintenanceCleaner, candida
 	}
 	composer := NewTopicComposer(candidateRepo, nil) // nil ArchiveCreator
 	return NewMaintenanceService(maintRepo, candidateRepo, &composer, cleaner), maintRepo
+}
+
+func newTestMaintenanceServiceWithoutComposer(t *testing.T, cleaner MaintenanceCleaner, candidates ...Candidate) (*MaintenanceService, *InMemoryMaintenanceRepository, *InMemoryRepository) {
+	t.Helper()
+	maintRepo := NewInMemoryMaintenanceRepository()
+	candidateRepo := NewInMemoryRepository()
+	for _, c := range candidates {
+		candidateRepo.CreateCandidate(context.Background(), c)
+	}
+	return NewMaintenanceService(maintRepo, candidateRepo, nil, cleaner), maintRepo, candidateRepo
 }
 
 // --- 测试:创建任务后立即返回,不等待 LLM ---
@@ -226,6 +274,123 @@ func TestMaintenanceStartRunReturnsImmediately(t *testing.T) {
 	}
 }
 
+func TestMaintenanceRunIncludesComposePoolCandidates(t *testing.T) {
+	cleaner := &keepingMaintenanceCleaner{}
+	service, maintRepo := newTestMaintenanceService(t, cleaner,
+		Candidate{CandidateID: "cand-pending", OrgID: "org-1", ProjectID: "proj-1", Status: StatusPending, RiskLevel: RiskLow},
+		Candidate{CandidateID: "cand-compose", OrgID: "org-1", ProjectID: "proj-1", Status: StatusInComposePool, RiskLevel: RiskLow},
+	)
+
+	run, err := service.StartRun(context.Background(), MaintenanceRequest{
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+		Trigger:   MaintenanceTriggerManual,
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	service.ExecuteRun(context.Background(), MaintenanceRequest{
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+		Trigger:   MaintenanceTriggerManual,
+	}, run.RunID)
+
+	final, err := maintRepo.GetRun(context.Background(), run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if final.Status != MaintenanceRunDone {
+		t.Fatalf("status = %s, want done: %s", final.Status, final.LastError)
+	}
+	if final.Processed != 2 {
+		t.Fatalf("processed = %d, want 2", final.Processed)
+	}
+	if cleaner.calls != 1 || len(cleaner.batches) != 1 || len(cleaner.batches[0]) != 2 {
+		t.Fatalf("cleaner calls/batches = %d/%v, want one batch with two candidates", cleaner.calls, cleaner.batches)
+	}
+}
+
+func TestMaintenanceRunAcceptsKeptCandidates(t *testing.T) {
+	cleaner := &fakeMaintenanceCleaner{
+		result: CleanResult{
+			KeepIDs: []string{"cand-keep"},
+			Summary: "保留候选",
+		},
+	}
+	service, maintRepo, candidateRepo := newTestMaintenanceServiceWithoutComposer(t, cleaner,
+		Candidate{CandidateID: "cand-keep", OrgID: "org-1", ProjectID: "proj-1", Status: StatusPending, RiskLevel: RiskLow},
+	)
+
+	run, err := service.StartRun(context.Background(), MaintenanceRequest{
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+		Trigger:   MaintenanceTriggerManual,
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	service.ExecuteRun(context.Background(), MaintenanceRequest{
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+		Trigger:   MaintenanceTriggerManual,
+	}, run.RunID)
+
+	final, err := maintRepo.GetRun(context.Background(), run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if final.Status != MaintenanceRunDone {
+		t.Fatalf("status = %s, want done: %s", final.Status, final.LastError)
+	}
+	if final.Kept != 1 {
+		t.Fatalf("kept = %d, want 1", final.Kept)
+	}
+	candidate, err := candidateRepo.GetCandidate(context.Background(), "org-1", "cand-keep")
+	if err != nil {
+		t.Fatalf("GetCandidate() error = %v", err)
+	}
+	if candidate.Status != StatusAccepted {
+		t.Fatalf("candidate status = %s, want accepted", candidate.Status)
+	}
+}
+
+func TestMaintenanceRunAcceptsMergedCandidates(t *testing.T) {
+	cleaner := &fakeMaintenanceCleaner{
+		result: CleanResult{
+			MergeGroups: [][]string{{"cand-merge-a", "cand-merge-b"}},
+			Summary:     "合并重复候选",
+		},
+	}
+	service, _, candidateRepo := newTestMaintenanceServiceWithoutComposer(t, cleaner,
+		Candidate{CandidateID: "cand-merge-a", OrgID: "org-1", ProjectID: "proj-1", Status: StatusPending, RiskLevel: RiskLow},
+		Candidate{CandidateID: "cand-merge-b", OrgID: "org-1", ProjectID: "proj-1", Status: StatusPending, RiskLevel: RiskLow},
+	)
+
+	run, err := service.StartRun(context.Background(), MaintenanceRequest{
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+		Trigger:   MaintenanceTriggerManual,
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	service.ExecuteRun(context.Background(), MaintenanceRequest{
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+		Trigger:   MaintenanceTriggerManual,
+	}, run.RunID)
+
+	for _, id := range []string{"cand-merge-a", "cand-merge-b"} {
+		candidate, err := candidateRepo.GetCandidate(context.Background(), "org-1", id)
+		if err != nil {
+			t.Fatalf("GetCandidate(%s) error = %v", id, err)
+		}
+		if candidate.Status != StatusAccepted {
+			t.Fatalf("candidate %s status = %s, want accepted", id, candidate.Status)
+		}
+	}
+}
+
 // --- 测试:已有 running 任务时返回已有任务 ---
 
 func TestMaintenanceAlreadyRunningReturnsExisting(t *testing.T) {
@@ -239,6 +404,8 @@ func TestMaintenanceAlreadyRunningReturnsExisting(t *testing.T) {
 		RunID:     "existing-run",
 		OrgID:     "org-1",
 		ProjectID: "proj-1",
+		SourceKey: "source-1",
+		ThreadID:  "thread-1",
 		Status:    MaintenanceRunRunning,
 		Stage:     StageCallingLLM,
 	})
@@ -247,6 +414,8 @@ func TestMaintenanceAlreadyRunningReturnsExisting(t *testing.T) {
 	run, err := service.StartRun(context.Background(), MaintenanceRequest{
 		OrgID:     "org-1",
 		ProjectID: "proj-1",
+		SourceKey: "source-1",
+		ThreadID:  "thread-1",
 		Trigger:   MaintenanceTriggerManual,
 	})
 	if err != nil {
@@ -254,6 +423,37 @@ func TestMaintenanceAlreadyRunningReturnsExisting(t *testing.T) {
 	}
 	if run.RunID != "existing-run" {
 		t.Fatalf("expected existing run_id, got %s", run.RunID)
+	}
+}
+
+func TestMaintenanceRunningLockIsScopedBySourceAndThread(t *testing.T) {
+	cleaner := &fakeMaintenanceCleaner{result: CleanResult{Summary: "ok"}}
+	service, maintRepo := newTestMaintenanceService(t, cleaner)
+	_, err := maintRepo.CreateRun(context.Background(), MaintenanceRun{
+		RunID:     "existing-run",
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+		SourceKey: "source-1",
+		ThreadID:  "thread-1",
+		Status:    MaintenanceRunRunning,
+		Stage:     StageCallingLLM,
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	run, err := service.StartRun(context.Background(), MaintenanceRequest{
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+		SourceKey: "source-2",
+		ThreadID:  "thread-2",
+		Trigger:   MaintenanceTriggerManual,
+	})
+	if err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	if run.RunID == "existing-run" {
+		t.Fatal("StartRun returned existing run from a different source/thread scope")
 	}
 }
 
@@ -433,6 +633,50 @@ func TestMaintenanceHighRiskNotDiscarded(t *testing.T) {
 	}
 	if final.Kept != 1 {
 		t.Fatalf("expected 1 kept for high risk, got %d", final.Kept)
+	}
+}
+
+func TestMaintenanceHighRiskDiscardAttemptIsAccepted(t *testing.T) {
+	cleaner := &fakeMaintenanceCleaner{
+		result: CleanResult{
+			DiscardIDs: []string{"cand-high-risk"},
+			Summary:    "高风险不自动丢弃",
+		},
+	}
+	service, maintRepo, candidateRepo := newTestMaintenanceServiceWithoutComposer(t, cleaner,
+		Candidate{CandidateID: "cand-high-risk", OrgID: "org-1", ProjectID: "proj-1", Status: StatusPending, RiskLevel: RiskHigh},
+	)
+
+	run, err := service.StartRun(context.Background(), MaintenanceRequest{
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+		Trigger:   MaintenanceTriggerManual,
+	})
+	if err != nil {
+		t.Fatalf("StartRun() error = %v", err)
+	}
+	service.ExecuteRun(context.Background(), MaintenanceRequest{
+		OrgID:     "org-1",
+		ProjectID: "proj-1",
+		Trigger:   MaintenanceTriggerManual,
+	}, run.RunID)
+
+	final, err := maintRepo.GetRun(context.Background(), run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if final.Discarded != 0 {
+		t.Fatalf("discarded = %d, want 0", final.Discarded)
+	}
+	if final.Kept != 1 {
+		t.Fatalf("kept = %d, want 1", final.Kept)
+	}
+	candidate, err := candidateRepo.GetCandidate(context.Background(), "org-1", "cand-high-risk")
+	if err != nil {
+		t.Fatalf("GetCandidate() error = %v", err)
+	}
+	if candidate.Status != StatusAccepted {
+		t.Fatalf("candidate status = %s, want accepted", candidate.Status)
 	}
 }
 
@@ -640,6 +884,57 @@ func TestRunAutoCleanComposesReadyTopic(t *testing.T) {
 	}
 	if run.Status != MaintenanceRunDone || run.Composed != composeMinCandidates || run.ArchiveID == "" {
 		t.Fatalf("maintenance run not completed with composed archive: %+v", run)
+	}
+}
+
+func TestMaintenanceRunAutoCleanRunsTriageBeforeClean(t *testing.T) {
+	ctx := context.Background()
+	candidateRepo := NewInMemoryRepository()
+	maintRepo := NewInMemoryMaintenanceRepository()
+	triage := &fakeAutoTriage{}
+	service := NewMaintenanceService(maintRepo, candidateRepo, nil, fakeMaintenanceCleaner{}).WithTriage(triage)
+
+	if _, err := service.RunAutoClean(ctx); err != nil {
+		t.Fatalf("RunAutoClean: %v", err)
+	}
+	if triage.called != 1 {
+		t.Fatalf("triage called = %d, want 1", triage.called)
+	}
+}
+
+func TestWorkspaceMaintenanceSkipsEmptyProjectsAndAggregatesResults(t *testing.T) {
+	ctx := context.Background()
+	cleaner := &keepingMaintenanceCleaner{}
+	candidateRepo := NewInMemoryRepository()
+	_, _ = candidateRepo.CreateCandidate(ctx, Candidate{CandidateID: "cand-pool", OrgID: "org-1", ProjectID: "proj-a", Status: StatusInComposePool, RiskLevel: RiskLow})
+	_, _ = candidateRepo.CreateCandidate(ctx, Candidate{CandidateID: "cand-pending", OrgID: "org-1", ProjectID: "proj-c", Status: StatusPending, RiskLevel: RiskLow})
+	maintRepo := NewInMemoryMaintenanceRepository()
+	service := NewMaintenanceService(maintRepo, candidateRepo, nil, cleaner)
+
+	run, err := service.StartWorkspaceRun(ctx, "org-1")
+	if err != nil {
+		t.Fatalf("StartWorkspaceRun() error = %v", err)
+	}
+	service.ExecuteWorkspaceRun(ctx, "org-1", []string{"proj-empty", "proj-a", "proj-c"}, run.RunID)
+
+	final, err := maintRepo.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun(workspace) error = %v", err)
+	}
+	if final.Status != MaintenanceRunDone {
+		t.Fatalf("workspace status = %s, want done: %s", final.Status, final.LastError)
+	}
+	if final.Processed != 2 || final.Kept != 2 {
+		t.Fatalf("workspace aggregate processed/kept = %d/%d, want 2/2", final.Processed, final.Kept)
+	}
+	if cleaner.calls != 2 {
+		t.Fatalf("cleaner calls = %d, want one call per non-empty project", cleaner.calls)
+	}
+
+	for _, run := range maintRepo.runs {
+		if run.Status == MaintenanceRunFailed && run.LastError == ErrNoCandidatesToClean.Error() {
+			t.Fatalf("empty project should be skipped instead of failed: %+v", run)
+		}
 	}
 }
 

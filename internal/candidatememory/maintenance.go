@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -89,6 +90,7 @@ type MaintenanceRepository interface {
 	GetRun(ctx context.Context, runID string) (MaintenanceRun, error)
 	UpdateRun(ctx context.Context, runID string, status MaintenanceRunStatus, result MaintenanceRunUpdate) error
 	GetRunningRun(ctx context.Context, orgID, projectID string) (*MaintenanceRun, error)
+	GetRunningRunInScope(ctx context.Context, orgID, projectID, sourceKey, threadID string) (*MaintenanceRun, error)
 	UpdateStage(ctx context.Context, runID string, stage MaintenanceRunStage, totalCandidates int) error
 	MarkStaleRunningAsFailed(ctx context.Context, before time.Time) (int, error)
 }
@@ -180,6 +182,12 @@ type MaintenanceService struct {
 	candidateRepo Repository
 	composer      *TopicComposer
 	cleaner       MaintenanceCleaner
+	triage        AutoTriage
+}
+
+// AutoTriage 是后台清洗前的候选自动整理入口。
+type AutoTriage interface {
+	RunAutoTriage(ctx context.Context, filter TriageScanFilter) (TriageRunResult, error)
 }
 
 // MaintenanceCleaner LLM 清洗器接口。
@@ -210,6 +218,11 @@ func NewMaintenanceService(
 	}
 }
 
+func (s *MaintenanceService) WithTriage(triage AutoTriage) *MaintenanceService {
+	s.triage = triage
+	return s
+}
+
 var (
 	// ErrMaintenanceAlreadyRunning 同项目已有运行中的清洗任务。
 	ErrMaintenanceAlreadyRunning = errors.New("maintenance already running")
@@ -220,11 +233,12 @@ var (
 )
 
 const autoCleanIdleThreshold = 5 * time.Minute
+const workspaceMaintenanceSourceKey = "__workspace__"
 
 // StartRun 创建清洗任务并返回,实际执行由 ExecuteRun 在后台完成。
 func (s *MaintenanceService) StartRun(ctx context.Context, req MaintenanceRequest) (MaintenanceRun, error) {
-	// 1. 检查是否有运行中的任务(项目级防重入),返回已有任务
-	if existing, err := s.repo.GetRunningRun(ctx, req.OrgID, req.ProjectID); err == nil && existing != nil {
+	// 1. 检查是否有同 scope 运行中的任务,返回已有任务。
+	if existing, err := s.repo.GetRunningRunInScope(ctx, req.OrgID, req.ProjectID, req.SourceKey, req.ThreadID); err == nil && existing != nil {
 		return *existing, nil
 	}
 
@@ -247,6 +261,16 @@ func (s *MaintenanceService) StartRun(ctx context.Context, req MaintenanceReques
 	return run, nil
 }
 
+// StartWorkspaceRun 创建一个工作区级清洗任务,具体项目由 ExecuteWorkspaceRun 串行处理。
+func (s *MaintenanceService) StartWorkspaceRun(ctx context.Context, orgID string) (MaintenanceRun, error) {
+	return s.StartRun(ctx, MaintenanceRequest{
+		OrgID:     orgID,
+		ProjectID: "",
+		SourceKey: workspaceMaintenanceSourceKey,
+		Trigger:   MaintenanceTriggerManual,
+	})
+}
+
 // ExecuteRun 在后台执行清洗整合逻辑,阶段会持久化到数据库。
 func (s *MaintenanceService) ExecuteRun(ctx context.Context, req MaintenanceRequest, runID string) {
 	// 0. 清理超时 running 任务(服务重启保护)
@@ -256,13 +280,7 @@ func (s *MaintenanceService) ExecuteRun(ctx context.Context, req MaintenanceRequ
 	if err := s.repo.UpdateStage(ctx, runID, StageLoadingCandidates, 0); err != nil {
 		return
 	}
-	candidates, err := s.candidateRepo.ListCandidates(ctx, ListFilter{
-		OrgID:     req.OrgID,
-		ProjectID: req.ProjectID,
-		SourceKey: req.SourceKey,
-		ThreadID:  req.ThreadID,
-		Status:    StatusPending,
-	})
+	candidates, err := s.listCleanableCandidates(ctx, req)
 	if err != nil {
 		s.failRun(ctx, runID, err)
 		return
@@ -290,10 +308,6 @@ func (s *MaintenanceService) ExecuteRun(ctx context.Context, req MaintenanceRequ
 	for _, id := range cleanResult.DiscardIDs {
 		discardSet[id] = true
 	}
-	keepSet := make(map[string]bool, len(cleanResult.KeepIDs))
-	for _, id := range cleanResult.KeepIDs {
-		keepSet[id] = true
-	}
 
 	for _, id := range cleanResult.DiscardIDs {
 		if _, err := s.candidateRepo.GetCandidate(ctx, req.OrgID, id); err != nil {
@@ -315,20 +329,19 @@ func (s *MaintenanceService) ExecuteRun(ctx context.Context, req MaintenanceRequ
 	discarded := 0
 	kept := 0
 	for _, c := range candidates {
-		if discardSet[c.CandidateID] {
-			// 高风险候选不能被 AI 自动丢弃
-			if c.RiskLevel == RiskHigh {
-				kept++
-				continue
-			}
+		if discardSet[c.CandidateID] && c.RiskLevel != RiskHigh {
 			if _, err := s.candidateRepo.UpdateCandidateStatus(ctx, req.OrgID, c.CandidateID, StatusDiscarded, c.Scores); err != nil {
 				s.failRun(ctx, runID, fmt.Errorf("discard candidate %s failed: %s", c.CandidateID, err.Error()))
 				return
 			}
 			discarded++
-		} else if keepSet[c.CandidateID] {
-			kept++
+			continue
 		}
+		if _, err := s.candidateRepo.UpdateCandidateStatus(ctx, req.OrgID, c.CandidateID, StatusAccepted, c.Scores); err != nil {
+			s.failRun(ctx, runID, fmt.Errorf("accept candidate %s failed: %s", c.CandidateID, err.Error()))
+			return
+		}
+		kept++
 	}
 
 	// 5. 触发 TopicComposer 沉淀
@@ -366,6 +379,92 @@ func (s *MaintenanceService) ExecuteRun(ctx context.Context, req MaintenanceRequ
 	_ = s.repo.UpdateStage(ctx, runID, StageDone, len(candidates))
 }
 
+func (s *MaintenanceService) listCleanableCandidates(ctx context.Context, req MaintenanceRequest) ([]Candidate, error) {
+	candidates := []Candidate{}
+	for _, status := range []Status{StatusPending, StatusInComposePool} {
+		items, err := s.candidateRepo.ListCandidates(ctx, ListFilter{
+			OrgID:     req.OrgID,
+			ProjectID: req.ProjectID,
+			SourceKey: req.SourceKey,
+			ThreadID:  req.ThreadID,
+			Status:    status,
+		})
+		if err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, items...)
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].CreatedAt.After(candidates[j].CreatedAt) })
+	return candidates, nil
+}
+
+// ExecuteWorkspaceRun 按项目串行执行清洗,空项目跳过,避免模型 provider 并发打爆。
+func (s *MaintenanceService) ExecuteWorkspaceRun(ctx context.Context, orgID string, projectIDs []string, runID string) {
+	_, _ = s.repo.MarkStaleRunningAsFailed(ctx, time.Now().Add(-10*time.Minute))
+	if err := s.repo.UpdateStage(ctx, runID, StageLoadingCandidates, 0); err != nil {
+		return
+	}
+
+	totalCandidates := 0
+	processed := 0
+	discarded := 0
+	kept := 0
+	composed := 0
+	projectsWithCandidates := 0
+	for _, projectID := range projectIDs {
+		req := MaintenanceRequest{OrgID: orgID, ProjectID: projectID, Trigger: MaintenanceTriggerManual}
+		candidates, err := s.listCleanableCandidates(ctx, req)
+		if err != nil {
+			s.failRun(ctx, runID, err)
+			return
+		}
+		if len(candidates) == 0 {
+			continue
+		}
+		if existing, err := s.repo.GetRunningRunInScope(ctx, orgID, projectID, "", ""); err == nil && existing != nil {
+			continue
+		}
+		projectsWithCandidates++
+		totalCandidates += len(candidates)
+		_ = s.repo.UpdateStage(ctx, runID, StageCallingLLM, totalCandidates)
+
+		child, err := s.StartRun(ctx, req)
+		if err != nil {
+			s.failRun(ctx, runID, err)
+			return
+		}
+		s.ExecuteRun(ctx, req, child.RunID)
+		final, err := s.repo.GetRun(ctx, child.RunID)
+		if err != nil {
+			s.failRun(ctx, runID, err)
+			return
+		}
+		if final.Status == MaintenanceRunFailed {
+			s.failRun(ctx, runID, errors.New(final.LastError))
+			return
+		}
+		processed += final.Processed
+		discarded += final.Discarded
+		kept += final.Kept
+		composed += final.Composed
+	}
+
+	now := time.Now().UTC()
+	summary := fmt.Sprintf("工作区清洗完成：处理 %d 个项目，跳过 %d 个空项目。", projectsWithCandidates, len(projectIDs)-projectsWithCandidates)
+	if projectsWithCandidates == 0 {
+		summary = "工作区没有可清洗候选。"
+	}
+	_ = s.repo.UpdateRun(ctx, runID, MaintenanceRunDone, MaintenanceRunUpdate{
+		Processed:   processed,
+		Discarded:   discarded,
+		Kept:        kept,
+		Composed:    composed,
+		Summary:     summary,
+		CompletedAt: &now,
+	})
+	_ = s.repo.UpdateStage(ctx, runID, StageDone, totalCandidates)
+}
+
 // failRun 标记任务失败。
 func (s *MaintenanceService) failRun(ctx context.Context, runID string, err error) {
 	_ = s.repo.UpdateRun(ctx, runID, MaintenanceRunFailed, MaintenanceRunUpdate{
@@ -388,6 +487,9 @@ func (s *MaintenanceService) GetRun(ctx context.Context, runID string) (Maintena
 func (s *MaintenanceService) RunAutoClean(ctx context.Context) (int, error) {
 	if s == nil || s.candidateRepo == nil {
 		return 0, errors.New("maintenance service is not configured")
+	}
+	if s.triage != nil {
+		_, _ = s.triage.RunAutoTriage(ctx, TriageScanFilter{Limit: defaultTriageScanLimit})
 	}
 	topics, err := s.candidateRepo.ListTopicStates(ctx, TopicStateFilter{Limit: 1000})
 	if err != nil {
@@ -426,7 +528,7 @@ func (s *MaintenanceService) ShouldAutoClean(ctx context.Context, orgID, project
 
 func (s *MaintenanceService) shouldAutoCleanScope(ctx context.Context, orgID, projectID, sourceKey, threadID string) bool {
 	// 检查是否有运行中的任务
-	if existing, err := s.repo.GetRunningRun(ctx, orgID, projectID); err == nil && existing != nil {
+	if existing, err := s.repo.GetRunningRunInScope(ctx, orgID, projectID, sourceKey, threadID); err == nil && existing != nil {
 		return false
 	}
 

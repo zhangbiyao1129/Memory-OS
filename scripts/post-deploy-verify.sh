@@ -37,6 +37,15 @@ OPENAPI_CMD="${OPENAPI_CMD:-curl -fsS "$API_BASE/openapi.json"}"
 OPENAPI_VALIDATE_CMD="${OPENAPI_VALIDATE_CMD:-python3 scripts/validate-openapi-runtime.py $(shell_quote "$OPENAPI_SPEC_SOURCE")}"
 SMOKE_CMD="${SMOKE_CMD:-make smoke}"
 PIPELINE_E2E_CMD="${PIPELINE_E2E_CMD:-}"
+VERIFY_MODE="${VERIFY_MODE:-full}"
+
+case "$VERIFY_MODE" in
+  light|smoke|full) ;;
+  *)
+    echo "unsupported VERIFY_MODE: $VERIFY_MODE" >&2
+    exit 1
+    ;;
+esac
 
 run_step() {
   local name="$1"
@@ -87,10 +96,20 @@ run_pipeline_e2e() {
 run_step "compose-ps" "$COMPOSE_PS_CMD"
 run_step "version" "$VERSION_CMD"
 run_step "healthz" "$HEALTHZ_CMD"
+
+if [[ "$VERIFY_MODE" == "light" ]]; then
+  report_log_dir
+  echo "post deploy verify completed"
+  exit 0
+fi
+
 run_step "openapi" "$OPENAPI_CMD"
 run_step "openapi-validate" "$OPENAPI_VALIDATE_CMD"
 run_step "smoke" "$SMOKE_CMD"
-run_pipeline_e2e
+
+if [[ "$VERIFY_MODE" == "full" ]]; then
+  run_pipeline_e2e
+fi
 
 report_log_dir
 echo "post deploy verify completed"

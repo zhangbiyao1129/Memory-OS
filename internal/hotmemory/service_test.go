@@ -1,6 +1,7 @@
 package hotmemory
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"sync"
@@ -9,6 +10,20 @@ import (
 
 	"memory-os/internal/eventlog"
 )
+
+type fakeOrganizer struct {
+	result OrganizeDecision
+	err    error
+	seen   []Memory
+}
+
+func (f *fakeOrganizer) Organize(ctx context.Context, memories []Memory) (OrganizeDecision, error) {
+	f.seen = append([]Memory(nil), memories...)
+	if f.err != nil {
+		return OrganizeDecision{}, f.err
+	}
+	return f.result, nil
+}
 
 func TestSetPinnedTogglesPinAndBoostsHotScore(t *testing.T) {
 	service := NewService(NewMemoryRepository())
@@ -69,6 +84,52 @@ func TestUsageSignalsAreAtomicUnderConcurrency(t *testing.T) {
 	}
 	if got.UsedCount != workers {
 		t.Fatalf("used count = %d, want %d (lost updates under concurrency)", got.UsedCount, workers)
+	}
+}
+
+func TestServiceOrganizeDemotesAISelectedActiveMemories(t *testing.T) {
+	repo := NewMemoryRepository()
+	organizer := &fakeOrganizer{result: OrganizeDecision{DemoteIDs: []string{"hm_noise"}, KeepIDs: []string{"hm_keep"}, Summary: "降权低信号热记忆"}}
+	service := NewService(repo).WithOrganizer(organizer)
+	noise := Memory{MemoryID: "hm_noise", OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "低价值噪声", FactHash: "hash_noise", Status: StatusActive}
+	keep := Memory{MemoryID: "hm_keep", OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "稳定事实", FactHash: "hash_keep", Status: StatusActive}
+	pinned := Memory{MemoryID: "hm_pinned", OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "固定事实", FactHash: "hash_pinned", Status: StatusActive, Pinned: true}
+	for _, memory := range []Memory{noise, keep, pinned} {
+		if _, err := repo.Upsert(memory); err != nil {
+			t.Fatalf("Upsert(%s) error = %v", memory.MemoryID, err)
+		}
+	}
+
+	result, err := service.Organize(context.Background(), OrganizeRequest{Filter: map[string][]string{
+		"doc_type":          {"hot_memory"},
+		"org_id":            {"org_1"},
+		"project_id":        {"project_1"},
+		"user_id":           {"user_1"},
+		"scope":             {string(ScopeProject)},
+		"visibility":        {"project"},
+		"permission_labels": {"project:project_1:read"},
+		"status":            {string(StatusActive)},
+	}, Limit: 50})
+	if err != nil {
+		t.Fatalf("Organize() error = %v", err)
+	}
+	if result.Processed != 2 || result.Demoted != 1 || result.Kept != 1 {
+		t.Fatalf("result = %#v, want processed=2 demoted=1 kept=1", result)
+	}
+	if len(organizer.seen) != 2 {
+		t.Fatalf("organizer saw %d memories, want 2 active unpinned memories", len(organizer.seen))
+	}
+	gotNoise, _ := service.Get("hm_noise")
+	if gotNoise.Status != StatusDemoted {
+		t.Fatalf("noise status = %s, want demoted", gotNoise.Status)
+	}
+	gotKeep, _ := service.Get("hm_keep")
+	if gotKeep.Status != StatusActive {
+		t.Fatalf("keep status = %s, want active", gotKeep.Status)
+	}
+	gotPinned, _ := service.Get("hm_pinned")
+	if gotPinned.Status != StatusActive {
+		t.Fatalf("pinned status = %s, want active", gotPinned.Status)
 	}
 }
 

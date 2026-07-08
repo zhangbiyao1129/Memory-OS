@@ -1,10 +1,12 @@
 package hotmemory
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 type Service struct {
 	repository  Repository
 	vectorIndex VectorIndex
+	organizer   Organizer
 }
 
 func NewService(repository Repository) Service {
@@ -22,6 +25,11 @@ func NewService(repository Repository) Service {
 
 func NewServiceWithVectorIndex(repository Repository, vectorIndex VectorIndex) Service {
 	return Service{repository: repository, vectorIndex: vectorIndex}
+}
+
+func (s Service) WithOrganizer(organizer Organizer) Service {
+	s.organizer = organizer
+	return s
 }
 
 func (s Service) Configured() bool {
@@ -194,6 +202,102 @@ func (s Service) Delete(memoryID string) error {
 		return s.vectorIndex.Delete(updated)
 	}
 	return nil
+}
+
+type Organizer interface {
+	Organize(ctx context.Context, memories []Memory) (OrganizeDecision, error)
+}
+
+type OrganizeRequest struct {
+	Filter map[string][]string
+	Limit  int
+}
+
+type OrganizeDecision struct {
+	DemoteIDs   []string
+	KeepIDs     []string
+	MergeGroups [][]string
+	Summary     string
+}
+
+type OrganizeResult struct {
+	Processed int
+	Demoted   int
+	Kept      int
+	Summary   string
+}
+
+func (s Service) Organize(ctx context.Context, request OrganizeRequest) (OrganizeResult, error) {
+	if !s.Configured() {
+		return OrganizeResult{}, errors.New("hot memory service is not configured")
+	}
+	if s.organizer == nil {
+		return OrganizeResult{}, errors.New("hot memory organizer is not configured")
+	}
+	if len(request.Filter) == 0 {
+		return OrganizeResult{}, errors.New("hot memory filter is required")
+	}
+	memories := s.repository.Search(request.Filter)
+	candidates := organizeCandidates(memories, request.Limit)
+	if len(candidates) == 0 {
+		return OrganizeResult{Summary: "没有需要整理的热记忆。"}, nil
+	}
+	decision, err := s.organizer.Organize(ctx, candidates)
+	if err != nil {
+		return OrganizeResult{}, err
+	}
+	candidateByID := make(map[string]Memory, len(candidates))
+	for _, memory := range candidates {
+		candidateByID[memory.MemoryID] = memory
+	}
+	demoteSet := make(map[string]bool, len(decision.DemoteIDs))
+	for _, id := range decision.DemoteIDs {
+		if _, ok := candidateByID[id]; !ok {
+			return OrganizeResult{}, fmt.Errorf("memory_id %s not found in organize candidates", id)
+		}
+		demoteSet[id] = true
+	}
+	demoted := 0
+	for id := range demoteSet {
+		memory := candidateByID[id]
+		memory.Status = StatusDemoted
+		if _, err := s.repository.Update(memory); err != nil {
+			return OrganizeResult{}, err
+		}
+		demoted++
+	}
+	return OrganizeResult{
+		Processed: len(candidates),
+		Demoted:   demoted,
+		Kept:      len(candidates) - demoted,
+		Summary:   decision.Summary,
+	}, nil
+}
+
+func organizeCandidates(memories []Memory, limit int) []Memory {
+	candidates := make([]Memory, 0, len(memories))
+	for _, memory := range memories {
+		if memory.Status != StatusActive || memory.Pinned {
+			continue
+		}
+		candidates = append(candidates, memory)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].UsedCount != candidates[j].UsedCount {
+			return candidates[i].UsedCount < candidates[j].UsedCount
+		}
+		if candidates[i].ReturnedCount != candidates[j].ReturnedCount {
+			return candidates[i].ReturnedCount < candidates[j].ReturnedCount
+		}
+		if candidates[i].AccessCount != candidates[j].AccessCount {
+			return candidates[i].AccessCount < candidates[j].AccessCount
+		}
+		return candidates[i].UpdatedAt.Before(candidates[j].UpdatedAt)
+	})
+	if limit > 0 && len(candidates) > limit {
+		return candidates[:limit]
+	}
+	return candidates
 }
 
 func validateUpsert(request UpsertRequest) error {

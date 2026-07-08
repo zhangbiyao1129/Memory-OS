@@ -4,6 +4,7 @@ import { formatCandidateMaintenanceSummary } from '~/utils/memoryUx'
 const auth = useAuthStore()
 const context = useContextStore()
 const { request } = useApi()
+const { hasWorkspaceContext, loadProjectScopes } = useWorkspaceProjectScopes()
 
 type Candidate = {
   candidate_id: string
@@ -72,13 +73,11 @@ const error = ref('')
 const success = ref('')
 const candidates = ref<Candidate[]>([])
 const cleaning = ref(false)
-const { stats: lifecycleStats, loadStats: loadLifecycleStats } = useMemoryLifecycleStats()
+const { stats: lifecycleStats, loadStats: loadLifecycleStats } = useMemoryLifecycleStats({ userScoped: true })
 
 // 维护任务状态
 const maintenanceStatus = ref<MaintenanceStatus | null>(null)
 let pollTimer: ReturnType<typeof setInterval> | null = null
-
-const hasProjectContext = computed(() => Boolean(context.orgId && context.projectId))
 
 function formatDate(value?: string) {
   if (!value) return '-'
@@ -130,7 +129,7 @@ function requestBody(extra: Record<string, unknown> = {}) {
 
 // localStorage key
 function maintenanceKey(): string {
-  return `maintenance_run:${context.orgId}:${context.projectId}`
+  return `workspace_maintenance_run:${context.orgId}`
 }
 
 function saveRunID(runID: string) {
@@ -158,14 +157,11 @@ function startPolling(runID?: string) {
   stopPolling()
   pollTimer = setInterval(async () => {
     try {
-      const body: Record<string, unknown> = {
-        org_id: context.orgId,
-        project_id: context.projectId
-      }
+      const body: Record<string, unknown> = { org_id: context.orgId }
       if (runID) body.run_id = runID
-      const status = await request<MaintenanceStatus>('/memory/candidates/maintenance/status', {
+      const status = await request<MaintenanceStatus>('/memory/candidates/maintenance/workspace/status', {
         method: 'POST',
-        body: requestBody(body)
+        body
       })
       maintenanceStatus.value = status
       if (status.status === 'done') {
@@ -197,14 +193,11 @@ function stopPolling() {
 async function restoreMaintenanceTask() {
   const savedRunID = loadSavedRunID()
   try {
-    const body: Record<string, unknown> = {
-      org_id: context.orgId,
-      project_id: context.projectId
-    }
+    const body: Record<string, unknown> = { org_id: context.orgId }
     if (savedRunID) body.run_id = savedRunID
-    const status = await request<MaintenanceStatus>('/memory/candidates/maintenance/status', {
+    const status = await request<MaintenanceStatus>('/memory/candidates/maintenance/workspace/status', {
       method: 'POST',
-      body: requestBody(body)
+      body
     })
     if (status && status.active) {
       maintenanceStatus.value = status
@@ -226,21 +219,26 @@ async function restoreMaintenanceTask() {
 }
 
 async function loadCandidates() {
-  if (!auth.isAuthenticated || !hasProjectContext.value) return
+  if (!auth.isAuthenticated || !hasWorkspaceContext.value) return
   loading.value = true
   error.value = ''
   try {
-    const responses = await Promise.all(ACTIONABLE_CANDIDATE_STATUSES.map((status) => {
-      const body: Record<string, unknown> = { limit: 50, status }
+    const scopes = await loadProjectScopes()
+    const requests = scopes.flatMap((project) => ACTIONABLE_CANDIDATE_STATUSES.map((status) => {
       return request<CandidateListResponse>('/memory/candidates/list', {
         method: 'POST',
-        body: requestBody(body)
+        body: {
+          org_id: project.org_id,
+          project_id: project.project_id,
+          limit: 200,
+          status
+        }
       })
     }))
+    const responses = await Promise.all(requests)
     candidates.value = responses
       .flatMap((response) => response.candidates || [])
       .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-      .slice(0, 50)
   } catch (err: any) {
     error.value = err.message || '候选记忆加载失败'
   } finally {
@@ -283,8 +281,8 @@ async function discardCandidate(candidateID: string) {
 }
 
 async function runMaintenance() {
-  if (!hasProjectContext.value) {
-    error.value = '请先选择组织和项目'
+  if (!hasWorkspaceContext.value) {
+    error.value = '请先选择组织'
     return
   }
   cleaning.value = true
@@ -292,19 +290,18 @@ async function runMaintenance() {
   success.value = ''
   maintenanceStatus.value = null
   try {
-    const result = await request<MaintenanceStatus>('/memory/candidates/maintenance/run', {
+    const result = await request<MaintenanceStatus>('/memory/candidates/maintenance/workspace/run', {
       method: 'POST',
-      body: requestBody()
+      body: {
+        org_id: context.orgId
+      }
     })
+    maintenanceStatus.value = result
     if (result && result.active) {
-      // 任务已启动或已有运行中任务
-      maintenanceStatus.value = result
       saveRunID(result.run_id)
       startPolling(result.run_id)
     } else if (result && result.status === 'done') {
-      // 已有完成的任务直接返回
       cleaning.value = false
-      maintenanceStatus.value = result
       await refreshCandidateView()
     } else {
       cleaning.value = false
@@ -351,14 +348,14 @@ onBeforeUnmount(() => {
       <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
         <div>
           <h3 class="text-lg font-black">候选维护</h3>
-          <p class="mt-1 text-sm text-stone-600">系统按当前记忆上下文自动清洗、合并，并触发主题沉淀。</p>
+          <p class="mt-1 text-sm text-stone-600">系统按全部工作区项目自动清洗、合并，并触发主题沉淀。</p>
         </div>
-        <button class="rounded-2xl bg-orange-600 px-4 py-3 text-sm font-bold text-white disabled:cursor-not-allowed disabled:bg-stone-400" :disabled="cleaning || !hasProjectContext" @click="runMaintenance">
+        <button class="rounded-2xl bg-orange-600 px-4 py-3 text-sm font-bold text-white disabled:cursor-not-allowed disabled:bg-stone-400" :disabled="cleaning || !hasWorkspaceContext" @click="runMaintenance">
           {{ cleaning ? '清洗中...' : 'AI 清洗' }}
         </button>
       </div>
 
-      <p v-if="!hasProjectContext" class="mt-3 rounded-2xl bg-amber-50 p-3 text-sm text-amber-800">请先选择组织和项目。</p>
+      <p v-if="!hasWorkspaceContext" class="mt-3 rounded-2xl bg-amber-50 p-3 text-sm text-amber-800">请先选择组织。</p>
 
       <!-- 进度条 -->
       <div v-if="maintenanceStatus && maintenanceStatus.active" class="mt-4 rounded-2xl bg-orange-50 p-4">
@@ -392,7 +389,7 @@ onBeforeUnmount(() => {
     <section class="mt-6 rounded-3xl border bg-white p-5">
       <h3 class="text-xl font-black">待处理候选列表（当前页 {{ candidates.length }} 条）</h3>
       <p class="mt-2 text-sm text-stone-500">
-        仅显示待处理和沉淀池候选；已沉淀、已丢弃和已提升热记忆不会出现在这里。当前项目待处理候选 {{ n(lifecycleStats?.candidates?.actionable_total) }} 条。
+        仅显示待处理和沉淀池候选；已沉淀、已丢弃和已提升热记忆不会出现在这里。全部工作区待处理候选 {{ n(lifecycleStats?.candidates?.actionable_total) }} 条。
       </p>
       <div v-if="loading" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">正在加载候选记忆...</div>
       <div v-else-if="candidates.length === 0" class="mt-4 rounded-2xl bg-stone-50 p-4 text-stone-600">当前暂无候选记忆。</div>

@@ -55,6 +55,7 @@ type RouterOptions struct {
 	CandidateService       *candidatememory.Service
 	TopicComposer          *candidatememory.TopicComposer
 	TopicRepository        candidatememory.Repository
+	TriageRepository       candidatememory.TriageRepository
 	LegacyTurnEventArchive bool
 	ArchiveIndexQueue      archiveIndexQueue
 	QdrantStatusService    qdrant.StatusService
@@ -118,6 +119,7 @@ func RegisterRoutes(engine *route.Engine, options RouterOptions) {
 	engine.POST("/memory/archive/index-status", ArchiveIndexStatusHandler(options.ArchiveService, options.QdrantStatusService, options.AuthService, options.TenantService))
 	engine.POST("/memory/hot-memory/create", HotMemoryCreateHandler(options.HotMemoryService, options.AuthService, options.TenantService))
 	engine.POST("/memory/hot-memory/list", HotMemoryListHandler(options.HotMemoryService, options.AuthService, options.TenantService))
+	engine.POST("/memory/hot-memory/maintenance/run", HotMemoryMaintenanceRunHandler(options.HotMemoryService, options.AuthService, options.TenantService))
 	engine.POST("/memory/hot-memory/edit", HotMemoryEditHandler(options.HotMemoryService, options.AuthService, options.TenantService))
 	engine.POST("/memory/hot-memory/promote", HotMemoryPromoteHandler(options.HotMemoryService, options.AuthService, options.TenantService, options.AuditService))
 	engine.POST("/memory/hot-memory/demote", HotMemoryDemoteHandler(options.HotMemoryService, options.AuthService, options.TenantService, options.AuditService))
@@ -136,9 +138,14 @@ func RegisterRoutes(engine *route.Engine, options RouterOptions) {
 	if options.TopicRepository != nil {
 		engine.POST("/memory/topics/list", TopicListHandler(options.TopicRepository, options.AuthService, options.TenantService))
 	}
+	if options.TriageRepository != nil {
+		engine.POST("/memory/triage/list", TriageListHandler(options.TriageRepository, options.AuthService, options.TenantService))
+	}
 	if options.MaintenanceService != nil {
 		engine.POST("/memory/candidates/maintenance/run", MaintenanceRunHandler(options.MaintenanceService, options.AuthService, options.TenantService))
 		engine.POST("/memory/candidates/maintenance/status", MaintenanceStatusHandler(options.MaintenanceService, options.AuthService, options.TenantService))
+		engine.POST("/memory/candidates/maintenance/workspace/run", WorkspaceMaintenanceRunHandler(options.MaintenanceService, options.AuthService, options.TenantService))
+		engine.POST("/memory/candidates/maintenance/workspace/status", WorkspaceMaintenanceStatusHandler(options.MaintenanceService, options.AuthService, options.TenantService))
 	}
 	engine.POST("/memory/secrets/create", SecretCreateHandler(options.SecretStore, options.AuthService, options.TenantService))
 	engine.POST("/memory/secrets/list", SecretListHandler(options.SecretStore, options.AuthService, options.TenantService))
@@ -448,6 +455,14 @@ func OpenAPIHandler() app.HandlerFunc {
 						},
 					},
 				},
+				"/memory/hot-memory/maintenance/run": map[string]any{
+					"post": map[string]any{
+						"summary": "Run AI maintenance for Hot Memory facts",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Hot Memory maintenance result"},
+						},
+					},
+				},
 				"/memory/hot-memory/edit": map[string]any{
 					"post": map[string]any{
 						"summary": "Edit a Hot Memory fact",
@@ -552,11 +567,35 @@ func OpenAPIHandler() app.HandlerFunc {
 						},
 					},
 				},
+				"/memory/candidates/maintenance/workspace/run": map[string]any{
+					"post": map[string]any{
+						"summary": "Start workspace-wide AI maintenance",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Workspace maintenance status DTO"},
+						},
+					},
+				},
+				"/memory/candidates/maintenance/workspace/status": map[string]any{
+					"post": map[string]any{
+						"summary": "Query workspace-wide maintenance progress and status",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Workspace maintenance status DTO"},
+						},
+					},
+				},
 				"/memory/topics/list": map[string]any{
 					"post": map[string]any{
 						"summary": "List topic memory states",
 						"responses": map[string]any{
 							"200": map[string]any{"description": "Topic state list"},
+						},
+					},
+				},
+				"/memory/triage/list": map[string]any{
+					"post": map[string]any{
+						"summary": "List automatic candidate triage results",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Triage result list"},
 						},
 					},
 				},
@@ -1478,6 +1517,15 @@ type hotMemoryListRequest struct {
 	Limit      int    `json:"limit"`
 }
 
+type hotMemoryMaintenanceRequest struct {
+	OrgID      string `json:"org_id"`
+	ProjectID  string `json:"project_id"`
+	AgentID    string `json:"agent_id"`
+	Scope      string `json:"scope"`
+	Visibility string `json:"visibility"`
+	Limit      int    `json:"limit"`
+}
+
 type hotMemoryActionRequest struct {
 	MemoryID string `json:"memory_id"`
 }
@@ -1574,6 +1622,49 @@ func HotMemoryListHandler(service hotmemory.Service, authService auth.Service, t
 			return
 		}
 		c.JSON(consts.StatusOK, map[string]any{"memories": hotMemoryListResponse(filterHotMemories(items, request.Status, request.Limit))})
+	}
+}
+
+func HotMemoryMaintenanceRunHandler(service hotmemory.Service, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		if !service.Configured() {
+			c.JSON(consts.StatusServiceUnavailable, map[string]string{"error": "hot_memory_not_configured"})
+			return
+		}
+		var request hotMemoryMaintenanceRequest
+		if err := c.BindAndValidate(&request); err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_hot_memory_maintenance_request"})
+			return
+		}
+		permissions, ok := authorizeProjectScope(c, authService, tenantService, request.OrgID, request.ProjectID, "memory:write", "project:"+request.ProjectID+":write", "hot_memory_forbidden")
+		if !ok {
+			return
+		}
+		scope := hotmemory.Scope(request.Scope)
+		if scope == "" {
+			scope = hotmemory.ScopeProject
+		}
+		visibility := request.Visibility
+		if visibility == "" {
+			visibility = "project"
+		}
+		filter, err := hotmemory.BuildFilter(hotmemory.FilterContext{OrgID: request.OrgID, ProjectID: request.ProjectID, UserID: permissions.UserID, AgentID: request.AgentID, Scope: scope, Visibility: visibility, PermissionLabels: permissions.PermissionLabels})
+		if err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "hot_memory_maintenance_rejected", "message": err.Error()})
+			return
+		}
+		filter.Must["status"] = []string{string(hotmemory.StatusActive)}
+		result, err := service.Organize(ctx, hotmemory.OrganizeRequest{Filter: filter.Must, Limit: request.Limit})
+		if err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "hot_memory_maintenance_rejected", "message": err.Error()})
+			return
+		}
+		c.JSON(consts.StatusOK, map[string]any{
+			"processed": result.Processed,
+			"demoted":   result.Demoted,
+			"kept":      result.Kept,
+			"summary":   result.Summary,
+		})
 	}
 }
 
@@ -1729,6 +1820,14 @@ type topicListRequest struct {
 	Limit     int    `json:"limit"`
 }
 
+type triageListRequest struct {
+	OrgID     string `json:"org_id"`
+	ProjectID string `json:"project_id"`
+	SourceKey string `json:"source_key"`
+	Limit     int    `json:"limit"`
+	Offset    int    `json:"offset"`
+}
+
 func CandidateListHandler(service *candidatememory.Service, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var request candidateListRequest
@@ -1862,10 +1961,80 @@ func TopicListHandler(repo candidatememory.Repository, authService auth.Service,
 	}
 }
 
+func TriageListHandler(repo candidatememory.TriageRepository, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		var request triageListRequest
+		if err := c.BindAndValidate(&request); err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_triage_list_request"})
+			return
+		}
+		permissions, ok := authorizeProjectScope(c, authService, tenantService, request.OrgID, request.ProjectID, "memory:read", "", "triage_forbidden")
+		if !ok {
+			return
+		}
+		results, err := repo.ListTriageResults(ctx, candidatememory.TriageListFilter{
+			OrgID:           permissions.OrgID,
+			SourceProjectID: permissions.ProjectID,
+			SourceKey:       request.SourceKey,
+			Limit:           request.Limit,
+			Offset:          request.Offset,
+		})
+		if err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "triage_list_rejected", "message": err.Error()})
+			return
+		}
+		c.JSON(consts.StatusOK, map[string]any{"triage_results": triageListResponse(ctx, repo, results)})
+	}
+}
+
 func candidateListResponse(candidates []candidatememory.Candidate) []map[string]any {
 	out := make([]map[string]any, 0, len(candidates))
 	for _, c := range candidates {
 		out = append(out, candidateResponse(c))
+	}
+	return out
+}
+
+func triageListResponse(ctx context.Context, repo candidatememory.TriageRepository, results []candidatememory.TriageResult) []map[string]any {
+	out := make([]map[string]any, 0, len(results))
+	for _, result := range results {
+		links, _ := repo.ListProjectLinks(ctx, candidatememory.CandidateProjectLinksFilter{
+			OrgID:       result.OrgID,
+			CandidateID: result.CandidateID,
+			Limit:       50,
+		})
+		out = append(out, map[string]any{
+			"candidate_id":            result.CandidateID,
+			"org_id":                  result.OrgID,
+			"source_project_id":       result.SourceProjectID,
+			"source_key":              result.SourceKey,
+			"triage_scope":            result.TriageScope,
+			"confidence":              result.Confidence,
+			"review_state":            result.ReviewState,
+			"reason":                  result.Reason,
+			"source_refs":             result.SourceRefs,
+			"project_links":           triageProjectLinkResponse(links),
+			"promoted_hot_memory_ids": result.PromotedHotMemoryIDs,
+			"attempts":                result.Attempts,
+			"last_error":              result.LastError,
+			"created_at":              result.CreatedAt.Format(time.RFC3339),
+			"updated_at":              result.UpdatedAt.Format(time.RFC3339),
+		})
+	}
+	return out
+}
+
+func triageProjectLinkResponse(links []candidatememory.CandidateProjectLink) []map[string]any {
+	out := make([]map[string]any, 0, len(links))
+	for _, link := range links {
+		out = append(out, map[string]any{
+			"linked_project_id":      link.LinkedProjectID,
+			"linked_source_key":      link.LinkedSourceKey,
+			"confidence":             link.Confidence,
+			"evidence":               link.Evidence,
+			"status":                 link.Status,
+			"promoted_hot_memory_id": link.PromotedHotMemoryID,
+		})
 	}
 	return out
 }
@@ -2368,8 +2537,7 @@ if secret_file.exists():
     existing = secret_file.read_text()
 lines = [
     line for line in existing.splitlines()
-    if not line.startswith("MEMORY_OS_TOKEN=")
-    and not line.startswith("MEMORY_OS_API_URL=")
+    if not line.startswith("MEMORY_OS_")
 ]
 lines.append("MEMORY_OS_TOKEN='" + config["token"].replace("'", "'\"'\"'") + "'")
 lines.append("MEMORY_OS_API_URL='" + config["api_url"].replace("'", "'\"'\"'") + "'")
@@ -2457,6 +2625,32 @@ def remove_toml_table(existing, table_name):
             output.append(line)
     return "\n".join(output).rstrip() + ("\n" if output else "")
 
+def clean_memory_os_managed_blocks(existing):
+    text = existing
+    for label in ("Memory OS MCP", "Memory OS Hermes Hook"):
+        text = remove_managed_text(text, label)
+    return text
+
+def is_memory_os_plugin_path(value):
+    text = str(value)
+    lower = text.lower()
+    return (
+        "memory-os" in lower
+        or "memory_os" in lower
+        or ".memory-os" in lower
+    )
+
+def prune_memory_os_plugin_paths(data):
+    plugins = data.get("plugin")
+    if isinstance(plugins, str):
+        if is_memory_os_plugin_path(plugins):
+            data["plugin"] = []
+        else:
+            data["plugin"] = [plugins]
+        return
+    if isinstance(plugins, list):
+        data["plugin"] = [plugin for plugin in plugins if not is_memory_os_plugin_path(plugin)]
+
 def selected(*names):
     normalized = agent.strip().lower()
     return normalized == "auto" or normalized in names
@@ -2506,6 +2700,7 @@ def register_opencode_mcp():
 def register_hermes_mcp():
     hermes_config = home / ".hermes" / "config.yaml"
     existing = hermes_config.read_text() if hermes_config.exists() else ""
+    existing = clean_memory_os_managed_blocks(existing)
     block = "\n".join([
         "mcp_servers:",
         "  memory-os:",
@@ -2648,7 +2843,11 @@ text = clean_text(extract_text(data, raw))
 if not text:
     sys.exit(0)
 
-digest = hashlib.sha256((agent + "\n" + cwd + "\n" + text).encode("utf-8")).hexdigest()[:24]
+event_type = os.environ.get("MEMORY_OS_HOOK_EVENT", "assistant_final")
+if event_type not in ("assistant_final", "user_message"):
+    event_type = "assistant_final"
+
+digest = hashlib.sha256((agent + "\n" + event_type + "\n" + cwd + "\n" + text).encode("utf-8")).hexdigest()[:24]
 
 body = {
     "request_id": f"{agent}_hook_{digest}",
@@ -2659,7 +2858,7 @@ body = {
         "turn_id": f"turn_{agent}_{digest}",
         "thread_id": f"thread_{agent}_{hashlib.sha256(cwd.encode()).hexdigest()[:16]}",
         "session_id": f"session_{agent}_{hashlib.sha256((cwd + socket.gethostname()).encode()).hexdigest()[:16]}",
-        "type": "assistant_final",
+        "type": event_type,
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "actor": {"agent_id": agent},
         "source": {"platform": agent, "host": socket.gethostname()},
@@ -2684,8 +2883,8 @@ except (urllib.error.URLError, TimeoutError, OSError):
     hook_path.chmod(0o700)
     return hook_path
 
-def hook_command(agent_name, hook_path):
-    return "MEMORY_OS_HOOK_AGENT=" + shlex.quote(agent_name) + " python3 " + shlex.quote(str(hook_path))
+def hook_command(agent_name, hook_path, event_type="assistant_final"):
+    return "MEMORY_OS_HOOK_AGENT=" + shlex.quote(agent_name) + " MEMORY_OS_HOOK_EVENT=" + shlex.quote(event_type) + " python3 " + shlex.quote(str(hook_path))
 
 def append_hook(data, event_name, hook_entry):
     hooks = data.setdefault("hooks", {})
@@ -2747,9 +2946,15 @@ def register_claude_code_hook(hook_path):
     data = json_file(settings_path)
     append_hook(data, "Stop", {
         "type": "command",
-        "command": hook_command("claude-code", hook_path),
+        "command": hook_command("claude-code", hook_path, "assistant_final"),
         "statusMessage": "保存对话到 Memory OS",
         "timeout": 30,
+        "async": True,
+    })
+    append_hook(data, "UserPromptSubmit", {
+        "type": "command",
+        "command": hook_command("claude-code", hook_path, "user_message"),
+        "timeout": 5,
         "async": True,
     })
     atomic_json_write(settings_path, data)
@@ -2759,13 +2964,20 @@ def register_codex_hook(hook_path):
     data = json_file(hooks_path)
     append_hook(data, "Stop", {
         "type": "command",
-        "command": hook_command("codex", hook_path),
+        "command": hook_command("codex", hook_path, "assistant_final"),
         "statusMessage": "Saving conversation to Memory OS",
         "timeout": 30,
+    })
+    append_hook(data, "UserPromptSubmit", {
+        "type": "command",
+        "command": hook_command("codex", hook_path, "user_message"),
+        "statusMessage": "Saving prompt to Memory OS",
+        "timeout": 5,
     })
     atomic_json_write(hooks_path, data)
 
 def add_plugin_path(data, plugin_path):
+    prune_memory_os_plugin_paths(data)
     plugins = data.setdefault("plugin", [])
     if isinstance(plugins, str):
         plugins = [plugins]
@@ -2815,6 +3027,7 @@ def post_llm_call(user_message=None, assistant_response=None, conversation_histo
     atomic_text_write(plugin_path, code)
     hermes_config = home / ".hermes" / "config.yaml"
     existing = hermes_config.read_text() if hermes_config.exists() else ""
+    existing = remove_managed_text(existing)
     block = "plugins:\n  - " + json.dumps(str(plugin_path))
     atomic_text_write(hermes_config, managed_text(existing, block))
 
@@ -4010,9 +4223,9 @@ func hotMemoryResponse(memory hotmemory.Memory) map[string]any {
 		"access_count":      memory.AccessCount,
 		"returned_count":    memory.ReturnedCount,
 		"used_count":        memory.UsedCount,
-		"last_accessed_at":  memory.LastAccessedAt,
-		"last_returned_at":  memory.LastReturnedAt,
-		"last_used_at":      memory.LastUsedAt,
+		"last_accessed_at":  nullableTime(memory.LastAccessedAt),
+		"last_returned_at":  nullableTime(memory.LastReturnedAt),
+		"last_used_at":      nullableTime(memory.LastUsedAt),
 		"pinned":            memory.Pinned,
 		"hot_score":         memory.HotScore,
 		"status":            memory.Status,
@@ -4020,6 +4233,13 @@ func hotMemoryResponse(memory hotmemory.Memory) map[string]any {
 		"updated_at":        memory.UpdatedAt,
 		"deleted_at":        memory.DeletedAt,
 	}
+}
+
+func nullableTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value
 }
 
 func filterHotMemories(items []hotmemory.Memory, status string, limit int) []hotmemory.Memory {
@@ -4558,6 +4778,11 @@ type maintenanceRunRequest struct {
 	ThreadID  string `json:"thread_id"`
 }
 
+type workspaceMaintenanceRequest struct {
+	OrgID string `json:"org_id"`
+	RunID string `json:"run_id"`
+}
+
 func MaintenanceRunHandler(service *candidatememory.MaintenanceService, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		var request maintenanceRunRequest
@@ -4589,6 +4814,48 @@ func MaintenanceRunHandler(service *candidatememory.MaintenanceService, authServ
 			ThreadID:  request.ThreadID,
 			Trigger:   candidatememory.MaintenanceTriggerManual,
 		}, run.RunID)
+		c.JSON(consts.StatusOK, run.ToStatusDTO())
+	}
+}
+
+func WorkspaceMaintenanceRunHandler(service *candidatememory.MaintenanceService, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		if !tenantService.Configured() {
+			c.JSON(consts.StatusServiceUnavailable, map[string]string{"error": "tenant_not_configured"})
+			return
+		}
+		var request workspaceMaintenanceRequest
+		if err := c.BindAndValidate(&request); err != nil || strings.TrimSpace(request.OrgID) == "" {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_workspace_maintenance_request"})
+			return
+		}
+		caller, ok := authorizePAT(c, authService, "memory:write", "maintenance_forbidden")
+		if !ok {
+			return
+		}
+		if err := tenantService.RequireOrgWrite(caller.SubjectID, request.OrgID); err != nil {
+			c.JSON(consts.StatusForbidden, map[string]string{"error": "maintenance_forbidden"})
+			return
+		}
+		projects, err := tenantService.ListProjects(caller.SubjectID, request.OrgID)
+		if err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "workspace_projects_rejected", "message": err.Error()})
+			return
+		}
+		projectIDs := make([]string, 0, len(projects))
+		for _, project := range projects {
+			projectIDs = append(projectIDs, project.ID)
+		}
+		if active, err := service.GetActiveRun(ctx, request.OrgID, ""); err == nil && active != nil {
+			c.JSON(consts.StatusOK, active.ToStatusDTO())
+			return
+		}
+		run, err := service.StartWorkspaceRun(ctx, request.OrgID)
+		if err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "maintenance_run_rejected", "message": err.Error()})
+			return
+		}
+		go service.ExecuteWorkspaceRun(context.Background(), request.OrgID, projectIDs, run.RunID)
 		c.JSON(consts.StatusOK, run.ToStatusDTO())
 	}
 }
@@ -4626,6 +4893,45 @@ func MaintenanceStatusHandler(service *candidatememory.MaintenanceService, authS
 		}
 		// 不传 run_id,返回当前项目正在运行的任务
 		active, err := service.GetActiveRun(ctx, request.OrgID, request.ProjectID)
+		if err != nil || active == nil {
+			c.JSON(consts.StatusOK, map[string]any{"active": false})
+			return
+		}
+		c.JSON(consts.StatusOK, active.ToStatusDTO())
+	}
+}
+
+func WorkspaceMaintenanceStatusHandler(service *candidatememory.MaintenanceService, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		if !tenantService.Configured() {
+			c.JSON(consts.StatusServiceUnavailable, map[string]string{"error": "tenant_not_configured"})
+			return
+		}
+		var request workspaceMaintenanceRequest
+		if err := c.BindAndValidate(&request); err != nil || strings.TrimSpace(request.OrgID) == "" {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_workspace_maintenance_status_request"})
+			return
+		}
+		caller, ok := authorizePAT(c, authService, "memory:read", "maintenance_forbidden")
+		if !ok {
+			return
+		}
+		if err := tenantService.RequireOrgWrite(caller.SubjectID, request.OrgID); err != nil {
+			c.JSON(consts.StatusForbidden, map[string]string{"error": "maintenance_forbidden"})
+			return
+		}
+		if request.RunID != "" {
+			run, err := service.GetRun(ctx, request.RunID)
+			if err != nil {
+				c.JSON(consts.StatusOK, map[string]any{"active": false})
+				return
+			}
+			dto := run.ToStatusDTO()
+			dto.Active = run.Status == candidatememory.MaintenanceRunRunning
+			c.JSON(consts.StatusOK, dto)
+			return
+		}
+		active, err := service.GetActiveRun(ctx, request.OrgID, "")
 		if err != nil || active == nil {
 			c.JSON(consts.StatusOK, map[string]any{"active": false})
 			return

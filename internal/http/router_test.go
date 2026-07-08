@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	stdhttp "net/http"
 	"net/http/httptest"
 	"os"
@@ -738,6 +739,71 @@ func TestArchiveAPIsRejectPATWithoutProjectMembership(t *testing.T) {
 	}
 }
 
+func TestTriageListHandlerRequiresProjectRead(t *testing.T) {
+	h := server.New(server.WithHostPorts("127.0.0.1:0"))
+	authService := auth.NewService(auth.NewMemoryRepository())
+	tenantService := archiveTenantService(t, tenant.RoleOwner)
+	triageRepo := candidatememory.NewInMemoryTriageRepository(candidatememory.NewInMemoryRepository())
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), AuthService: authService, TenantService: tenantService, TriageRepository: triageRepo})
+
+	body := `{"org_id":"org_1","project_id":"project_1","limit":10}`
+	response := ut.PerformRequest(h.Engine, "POST", "/memory/triage/list", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"})
+
+	assert.DeepEqual(t, 401, response.Code)
+	if !strings.Contains(response.Body.String(), "pat_required") {
+		t.Fatalf("triage list response = %s, want pat_required", response.Body.String())
+	}
+}
+
+func TestTriageListHandlerReturnsResults(t *testing.T) {
+	h := server.New(server.WithHostPorts("127.0.0.1:0"))
+	authService := auth.NewService(auth.NewMemoryRepository())
+	token, _, err := authService.CreatePAT("user_1", "reader", []string{"memory:read"}, time.Hour)
+	if err != nil {
+		t.Fatalf("CreatePAT: %v", err)
+	}
+	tenantService := archiveTenantService(t, tenant.RoleOwner)
+	triageRepo := candidatememory.NewInMemoryTriageRepository(candidatememory.NewInMemoryRepository())
+	if _, err := triageRepo.UpsertTriageResult(context.Background(), candidatememory.TriageResult{
+		OrgID:                "org_1",
+		CandidateID:          "cand_triage_1",
+		SourceProjectID:      "project_1",
+		SourceKey:            "local/tmp",
+		TriageScope:          candidatememory.TriageScopeTooling,
+		Confidence:           0.92,
+		ReviewState:          candidatememory.TriageReviewAutoApplied,
+		Reason:               "工具配置经验",
+		PromotedHotMemoryIDs: []string{"hm_global"},
+	}); err != nil {
+		t.Fatalf("UpsertTriageResult: %v", err)
+	}
+	if err := triageRepo.ReplaceProjectLinks(context.Background(), "org_1", "cand_triage_1", []candidatememory.CandidateProjectLink{{
+		LinkedProjectID:     "project_1",
+		LinkedSourceKey:     "local/tmp",
+		Confidence:          0.88,
+		Evidence:            "匹配当前项目",
+		Status:              "active",
+		PromotedHotMemoryID: "hm_project",
+	}}); err != nil {
+		t.Fatalf("ReplaceProjectLinks: %v", err)
+	}
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), AuthService: authService, TenantService: tenantService, TriageRepository: triageRepo})
+
+	body := `{"org_id":"org_1","project_id":"project_1","limit":10}`
+	response := ut.PerformRequest(h.Engine, "POST", "/memory/triage/list", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + token})
+
+	assert.DeepEqual(t, 200, response.Code)
+	payload := response.Body.String()
+	for _, required := range []string{`"triage_scope":"tooling"`, `"promoted_hot_memory_ids":["hm_global"]`, `"project_links"`, `"promoted_hot_memory_id":"hm_project"`} {
+		if !strings.Contains(payload, required) {
+			t.Fatalf("triage response missing %q: %s", required, payload)
+		}
+	}
+	if strings.Contains(payload, `"content"`) {
+		t.Fatalf("triage response should not expose candidate content: %s", payload)
+	}
+}
+
 func TestArchiveCreateUsesPATSubjectAndRequiresWritePermission(t *testing.T) {
 	h := server.New(server.WithHostPorts("127.0.0.1:0"))
 	archiveService := archive.NewService(archive.NewMemoryRepository(), t.TempDir())
@@ -1369,6 +1435,20 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 	defer server.Close()
 
 	home := t.TempDir()
+	secretDir := filepath.Join(home, ".config", "ai-secrets")
+	if err := os.MkdirAll(secretDir, 0o700); err != nil {
+		t.Fatalf("create preexisting secret dir: %v", err)
+	}
+	preexistingSecrets := strings.Join([]string{
+		"OTHER_SECRET='keep-me'",
+		"MEMORY_OS_TOKEN='pat_old_install_token'",
+		"MEMORY_OS_API_URL='http://old-api.example.test'",
+		"MEMORY_OS_MCP_URL='http://old-mcp.example.test/mcp'",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(secretDir, "secrets.env"), []byte(preexistingSecrets), 0o600); err != nil {
+		t.Fatalf("write preexisting secrets.env: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o755); err != nil {
 		t.Fatalf("create preexisting codex dir: %v", err)
 	}
@@ -1388,8 +1468,47 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte(preexistingCodexConfig), 0o600); err != nil {
 		t.Fatalf("write preexisting codex config: %v", err)
 	}
+	preexistingCodexHooks := `{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /Users/kanyun/.claude/scripts/mem0_queue.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "MEMORY_OS_HOOK_AGENT=codex python3 /old/.memory-os/hooks/turn_event.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /old/memory_os_turn_event.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
+`
+	if err := os.WriteFile(filepath.Join(home, ".codex", "hooks.json"), []byte(preexistingCodexHooks), 0o600); err != nil {
+		t.Fatalf("write preexisting Codex hooks: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
 		t.Fatalf("create preexisting claude dir: %v", err)
+	}
+	preexistingClaudeMCP := `{"mcpServers":{"memory-os":{"type":"http","url":"http://old.example.test/mcp","headers":{"Authorization":"Bearer ${MEMORY_OS_TOKEN}"}},"keep":{"type":"http","url":"http://keep.example.test/mcp"}}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude", ".mcp.json"), []byte(preexistingClaudeMCP), 0o600); err != nil {
+		t.Fatalf("write preexisting Claude MCP config: %v", err)
 	}
 	preexistingClaudeSettings := `{
   "hooks": {
@@ -1420,6 +1539,16 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "MEMORY_OS_HOOK_AGENT=claude-code python3 /old/.memory-os/hooks/turn_event.py"
+          }
+        ]
+      }
     ]
   }
 }
@@ -1432,6 +1561,39 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(preexistingClaudeSettings), 0o600); err != nil {
 		t.Fatalf("write preexisting Claude Code settings: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".config", "opencode"), 0o755); err != nil {
+		t.Fatalf("create preexisting opencode dir: %v", err)
+	}
+	preexistingOpencode := `{"mcp":{"memory-os":{"type":"remote","url":"http://old.example.test/mcp","headers":{"Authorization":"Bearer {env:MEMORY_OS_TOKEN}"}},"keep":{"type":"remote","url":"http://keep.example.test/mcp"}},"plugin":["/old/memory-os.js","/keep/plugin.js"]}`
+	if err := os.WriteFile(filepath.Join(home, ".config", "opencode", "opencode.json"), []byte(preexistingOpencode), 0o600); err != nil {
+		t.Fatalf("write preexisting opencode config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".hermes"), 0o755); err != nil {
+		t.Fatalf("create preexisting hermes dir: %v", err)
+	}
+	preexistingHermes := strings.Join([]string{
+		"keep: true",
+		"# BEGIN Memory OS Hermes Hook",
+		"mcp_servers:",
+		"  memory-os:",
+		"    url: \"http://old.example.test/mcp\"",
+		"# END Memory OS Hermes Hook",
+		"# BEGIN Memory OS MCP",
+		"plugins:",
+		"  - \"/old/memory_os_hook.py\"",
+		"# END Memory OS MCP",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(home, ".hermes", "config.yaml"), []byte(preexistingHermes), 0o600); err != nil {
+		t.Fatalf("write preexisting Hermes config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".openclaw"), 0o755); err != nil {
+		t.Fatalf("create preexisting openclaw dir: %v", err)
+	}
+	preexistingOpenClaw := `{"mcp":{"servers":{"memory-os":{"type":"http","url":"http://old.example.test/mcp","headers":{"Authorization":"Bearer ${MEMORY_OS_TOKEN}"}},"keep":{"type":"http","url":"http://keep.example.test/mcp"}}},"plugin":["/old/memory-os.js","/keep/openclaw.js"]}`
+	if err := os.WriteFile(filepath.Join(home, ".openclaw", "openclaw.json"), []byte(preexistingOpenClaw), 0o600); err != nil {
+		t.Fatalf("write preexisting OpenClaw config: %v", err)
 	}
 	scriptPath := filepath.Join(t.TempDir(), "install.sh")
 	if err := os.WriteFile(scriptPath, []byte(setupInstallScript()), 0o700); err != nil {
@@ -1455,6 +1617,12 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 	if !strings.Contains(string(secretBytes), "MEMORY_OS_API_URL='"+server.URL+"'") {
 		t.Fatalf("secrets.env missing API URL assignment: %s", secretBytes)
 	}
+	if strings.Contains(string(secretBytes), "pat_old_install_token") || strings.Contains(string(secretBytes), "old-api.example.test") || strings.Contains(string(secretBytes), "MEMORY_OS_MCP_URL=") {
+		t.Fatalf("secrets.env must remove old Memory OS environment lines before writing new values: %s", secretBytes)
+	}
+	if !strings.Contains(string(secretBytes), "OTHER_SECRET='keep-me'") {
+		t.Fatalf("secrets.env must preserve non-Memory OS values: %s", secretBytes)
+	}
 	if info, err := os.Stat(secretPath); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("secrets.env mode = %v, %v; want 0600", info, err)
 	}
@@ -1475,6 +1643,9 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 	headers := memoryOS["headers"].(map[string]any)
 	if memoryOS["type"] != "http" || memoryOS["url"] != server.URL+"/mcp" || headers["Authorization"] != "Bearer ${MEMORY_OS_TOKEN}" {
 		t.Fatalf("unexpected memory-os MCP config: %#v", memoryOS)
+	}
+	if _, ok := servers["keep"]; !ok {
+		t.Fatalf("Claude MCP config must preserve unrelated servers: %#v", servers)
 	}
 
 	codexBytes, err := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
@@ -1512,6 +1683,10 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 	if opencodeMCP["type"] != "remote" || opencodeMCP["url"] != server.URL+"/mcp" || opencodeHeaders["Authorization"] != "Bearer {env:MEMORY_OS_TOKEN}" {
 		t.Fatalf("unexpected opencode MCP config: %#v", opencodeMCP)
 	}
+	opencodePlugins := fmt.Sprint(opencodeConfig["plugin"])
+	if strings.Contains(opencodePlugins, "/old/memory-os.js") || !strings.Contains(opencodePlugins, "/keep/plugin.js") {
+		t.Fatalf("opencode plugins must prune Memory OS paths and preserve unrelated plugins: %v", opencodeConfig["plugin"])
+	}
 
 	hermesBytes, err := os.ReadFile(filepath.Join(home, ".hermes", "config.yaml"))
 	if err != nil {
@@ -1528,6 +1703,9 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 		if !strings.Contains(hermesConfig, marker) {
 			t.Fatalf("hermes config missing marker %q:\n%s", marker, hermesConfig)
 		}
+	}
+	if strings.Contains(hermesConfig, "old.example.test") || strings.Count(hermesConfig, "# BEGIN Memory OS Hermes Hook") != 1 || strings.Count(hermesConfig, "# BEGIN Memory OS MCP") != 1 || !strings.Contains(hermesConfig, "keep: true") {
+		t.Fatalf("Hermes config must replace old Memory OS blocks and preserve unrelated config:\n%s", hermesConfig)
 	}
 
 	openclawBytes, err := os.ReadFile(filepath.Join(home, ".openclaw", "openclaw.json"))
@@ -1546,6 +1724,10 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 	if openclawMCP["type"] != "http" || openclawMCP["url"] != server.URL+"/mcp" || openclawHeaders["Authorization"] != "Bearer ${MEMORY_OS_TOKEN}" {
 		t.Fatalf("unexpected openclaw MCP config: %#v", openclawMCP)
 	}
+	openclawPlugins := fmt.Sprint(openclawConfig["plugin"])
+	if strings.Contains(openclawPlugins, "/old/memory-os.js") || !strings.Contains(openclawPlugins, "/keep/openclaw.js") {
+		t.Fatalf("OpenClaw plugins must prune Memory OS paths and preserve unrelated plugins: %v", openclawConfig["plugin"])
+	}
 
 	hookScript := filepath.Join(home, ".memory-os", "hooks", "turn_event.py")
 	hookBytes, err := os.ReadFile(hookScript)
@@ -1558,6 +1740,15 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 	for _, marker := range []string{"/memory/turn-event", "MEMORY_OS_TOKEN", "MEMORY_OS_HOOK_AGENT"} {
 		if !strings.Contains(string(hookBytes), marker) {
 			t.Fatalf("common hook script missing marker %q", marker)
+		}
+	}
+	for _, marker := range []string{
+		"MEMORY_OS_HOOK_EVENT",
+		`event_type = os.environ.get("MEMORY_OS_HOOK_EVENT", "assistant_final")`,
+		`"type": event_type`,
+	} {
+		if !strings.Contains(string(hookBytes), marker) {
+			t.Fatalf("common hook script missing event type marker %q", marker)
 		}
 	}
 	for _, marker := range []string{
@@ -1582,13 +1773,18 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 	if !strings.Contains(string(claudeSettingsBytes), "MEMORY_OS_HOOK_AGENT=claude-code") || !strings.Contains(string(claudeSettingsBytes), hookScript) {
 		t.Fatalf("Claude Code settings missing Memory OS Stop hook: %s", claudeSettingsBytes)
 	}
+	if !strings.Contains(string(claudeSettingsBytes), "UserPromptSubmit") || !strings.Contains(string(claudeSettingsBytes), "MEMORY_OS_HOOK_EVENT=user_message") {
+		t.Fatalf("Claude Code settings missing Memory OS user prompt hook: %s", claudeSettingsBytes)
+	}
 	if strings.Contains(string(claudeSettingsBytes), "mem0_save.sh") {
 		t.Fatalf("Claude Code settings must prune missing local hook scripts: %s", claudeSettingsBytes)
 	}
 	if !strings.Contains(string(claudeSettingsBytes), "mem0_load.sh") {
 		t.Fatalf("Claude Code settings must preserve existing non-Memory OS hooks: %s", claudeSettingsBytes)
 	}
-	if strings.Contains(string(claudeSettingsBytes), "memory_os_turn_event.sh") || strings.Count(string(claudeSettingsBytes), "MEMORY_OS_HOOK_AGENT=claude-code") != 1 {
+	if strings.Contains(string(claudeSettingsBytes), "memory_os_turn_event.sh") ||
+		strings.Count(string(claudeSettingsBytes), "MEMORY_OS_HOOK_AGENT=claude-code MEMORY_OS_HOOK_EVENT=assistant_final") != 1 ||
+		strings.Count(string(claudeSettingsBytes), "MEMORY_OS_HOOK_AGENT=claude-code MEMORY_OS_HOOK_EVENT=user_message") != 1 {
 		t.Fatalf("Claude Code settings must replace old Memory OS hooks without duplicates: %s", claudeSettingsBytes)
 	}
 
@@ -1598,6 +1794,12 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 	}
 	if !strings.Contains(string(codexHooksBytes), "MEMORY_OS_HOOK_AGENT=codex") || !strings.Contains(string(codexHooksBytes), hookScript) {
 		t.Fatalf("Codex hooks missing Memory OS Stop hook: %s", codexHooksBytes)
+	}
+	if !strings.Contains(string(codexHooksBytes), "UserPromptSubmit") || !strings.Contains(string(codexHooksBytes), "MEMORY_OS_HOOK_EVENT=user_message") {
+		t.Fatalf("Codex hooks missing Memory OS user prompt hook: %s", codexHooksBytes)
+	}
+	if strings.Contains(string(codexHooksBytes), "/old/.memory-os") || strings.Contains(string(codexHooksBytes), "memory_os_turn_event.sh") || !strings.Contains(string(codexHooksBytes), "mem0_queue.sh") {
+		t.Fatalf("Codex hooks must prune old Memory OS hooks and preserve unrelated hooks: %s", codexHooksBytes)
 	}
 
 	opencodePluginBytes, err := os.ReadFile(filepath.Join(home, ".config", "opencode", "plugins", "memory-os.js"))
@@ -2506,6 +2708,47 @@ func TestHotMemoryCreateListAndLifecycleUsePATSubject(t *testing.T) {
 	}
 }
 
+type routerHotMemoryOrganizer struct {
+	result hotmemory.OrganizeDecision
+}
+
+func (o routerHotMemoryOrganizer) Organize(ctx context.Context, memories []hotmemory.Memory) (hotmemory.OrganizeDecision, error) {
+	return o.result, nil
+}
+
+func TestHotMemoryMaintenanceRunDemotesAISelectedMemories(t *testing.T) {
+	h := server.New(server.WithHostPorts("127.0.0.1:0"))
+	authService := auth.NewService(auth.NewMemoryRepository())
+	token, _, err := authService.CreatePAT("user_1", "writer", []string{"memory:read", "memory:write"}, time.Hour)
+	if err != nil {
+		t.Fatalf("CreatePAT() error = %v", err)
+	}
+	tenantService := archiveTenantService(t, tenant.RoleOwner)
+	repo := hotmemory.NewMemoryRepository()
+	hotService := hotmemory.NewService(repo).WithOrganizer(routerHotMemoryOrganizer{result: hotmemory.OrganizeDecision{DemoteIDs: []string{"hm_noise"}, KeepIDs: []string{"hm_keep"}, Summary: "降权低信号热记忆"}})
+	for _, memory := range []hotmemory.Memory{
+		{MemoryID: "hm_noise", OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: hotmemory.ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "噪声热记忆", FactHash: "hash_noise", Status: hotmemory.StatusActive},
+		{MemoryID: "hm_keep", OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: hotmemory.ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "稳定热记忆", FactHash: "hash_keep", Status: hotmemory.StatusActive},
+	} {
+		if _, err := repo.Upsert(memory); err != nil {
+			t.Fatalf("Upsert(%s) error = %v", memory.MemoryID, err)
+		}
+	}
+	RegisterRoutes(h.Engine, RouterOptions{HealthService: health.NewService(nil), AuthService: authService, TenantService: tenantService, HotMemoryService: hotService})
+
+	body := `{"org_id":"org_1","project_id":"project_1","agent_id":"codex","scope":"project","visibility":"project","limit":50}`
+	response := ut.PerformRequest(h.Engine, "POST", "/memory/hot-memory/maintenance/run", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + token})
+
+	assert.DeepEqual(t, 200, response.Code)
+	if !strings.Contains(response.Body.String(), `"processed":2`) || !strings.Contains(response.Body.String(), `"demoted":1`) || !strings.Contains(response.Body.String(), `"kept":1`) {
+		t.Fatalf("maintenance response mismatch: %s", response.Body.String())
+	}
+	noise, _ := hotService.Get("hm_noise")
+	if noise.Status != hotmemory.StatusDemoted {
+		t.Fatalf("noise status = %s, want demoted", noise.Status)
+	}
+}
+
 func TestHotMemoryPinAndUnpinOverrideWithAudit(t *testing.T) {
 	h := server.New(server.WithHostPorts("127.0.0.1:0"))
 	authService := auth.NewService(auth.NewMemoryRepository())
@@ -2919,6 +3162,23 @@ func TestHotMemoryResponseExposesUsageSignals(t *testing.T) {
 	for _, key := range []string{"last_accessed_at", "last_returned_at", "last_used_at"} {
 		if _, ok := response[key]; !ok {
 			t.Fatalf("hotMemoryResponse missing %q: %#v", key, response)
+		}
+	}
+}
+
+func TestHotMemoryResponseOmitsZeroUsageTimestamps(t *testing.T) {
+	memory := hotmemory.Memory{
+		MemoryID:    "hm_never_used",
+		AccessCount: 0,
+		HotScore:    1,
+		Status:      hotmemory.StatusActive,
+	}
+
+	response := hotMemoryResponse(memory)
+
+	for _, key := range []string{"last_accessed_at", "last_returned_at", "last_used_at"} {
+		if response[key] != nil {
+			t.Fatalf("%s = %v, want nil for never-recorded signal", key, response[key])
 		}
 	}
 }

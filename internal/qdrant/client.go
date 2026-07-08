@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -157,6 +158,15 @@ func (c *Client) EnsurePayloadIndexes(ctx context.Context, collection string, in
 		if strings.TrimSpace(index.FieldSchema) == "" {
 			return errors.New("qdrant payload index field schema is required")
 		}
+	}
+	info, err := c.CollectionInfo(ctx, collection)
+	if err != nil {
+		return fmt.Errorf("qdrant payload index schema lookup failed: %w", err)
+	}
+	for _, index := range indexes {
+		if info.PayloadSchema[index.FieldName] {
+			continue
+		}
 		body, err := json.Marshal(map[string]any{
 			"field_name":   index.FieldName,
 			"field_schema": index.FieldSchema,
@@ -173,12 +183,13 @@ func (c *Client) EnsurePayloadIndexes(ctx context.Context, collection string, in
 		if err != nil {
 			return fmt.Errorf("qdrant ensure payload index failed: %w", err)
 		}
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
 		if resp.StatusCode == http.StatusConflict {
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("qdrant ensure payload index status: %d", resp.StatusCode)
+			return fmt.Errorf("qdrant ensure payload index %q status: %d body: %s", index.FieldName, resp.StatusCode, strings.TrimSpace(string(responseBody)))
 		}
 	}
 	return nil
