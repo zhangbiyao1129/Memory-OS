@@ -68,6 +68,15 @@ func TestRunnerReportsAutoMaintenanceConfigured(t *testing.T) {
 	}
 }
 
+func TestRunnerReportsHotMemoryMaintenanceConfigured(t *testing.T) {
+	maintenance := &fakeHotMemoryMaintenance{}
+	runner := NewRunner(Options{Concurrency: 1, HotMemoryMaintenance: maintenance})
+
+	if !runner.HotMemoryMaintenanceConfigured() {
+		t.Fatal("HotMemoryMaintenanceConfigured() = false, want true")
+	}
+}
+
 func TestRunnerRunsCleanupOnExit(t *testing.T) {
 	cleaned := false
 	runner := NewRunner(Options{Concurrency: 1, Cleanup: func() { cleaned = true }})
@@ -94,6 +103,42 @@ func TestRunnerRunsAutoMaintenanceLoop(t *testing.T) {
 	}()
 
 	waitFor(t, func() bool { return maintenance.runCount() >= 1 })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestRunnerRunsHotMemoryMaintenanceLoop(t *testing.T) {
+	maintenance := &fakeHotMemoryMaintenance{}
+	runner := NewRunner(Options{Concurrency: 1, HotMemoryMaintenance: maintenance, HotMemoryMaintenanceInterval: time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runner.Run(ctx)
+	}()
+
+	waitFor(t, func() bool { return maintenance.runCount() >= 1 })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+}
+
+func TestRunnerKeepsHotMemoryMaintenanceLoopAfterError(t *testing.T) {
+	maintenance := &fakeHotMemoryMaintenance{errOnFirstRun: errors.New("model provider status: 429")}
+	runner := NewRunner(Options{Concurrency: 1, HotMemoryMaintenance: maintenance, HotMemoryMaintenanceInterval: time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runner.Run(ctx)
+	}()
+
+	waitFor(t, func() bool { return maintenance.runCount() >= 2 })
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -221,6 +266,12 @@ type fakeAutoMaintenance struct {
 	runs int
 }
 
+type fakeHotMemoryMaintenance struct {
+	mu            sync.Mutex
+	runs          int
+	errOnFirstRun error
+}
+
 func (m *fakeAutoMaintenance) RunAutoClean(ctx context.Context) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -229,6 +280,22 @@ func (m *fakeAutoMaintenance) RunAutoClean(ctx context.Context) (int, error) {
 }
 
 func (m *fakeAutoMaintenance) runCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.runs
+}
+
+func (m *fakeHotMemoryMaintenance) RunAutoOrganize(ctx context.Context) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.runs++
+	if m.runs == 1 && m.errOnFirstRun != nil {
+		return 0, m.errOnFirstRun
+	}
+	return 1, nil
+}
+
+func (m *fakeHotMemoryMaintenance) runCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.runs

@@ -11,7 +11,7 @@ v0.9 的重点是把记忆生命周期跑成闭环：事件写入、候选提炼
 - **项目级治理**：记忆写入、整理、归档和检索仍保留项目维度，用于隔离上下文和权限边界。
 - **Agent 来源标记**：Agent ID 只作为来源 metadata，不作为统计或存储隔离维度。
 - **候选记忆闭环**：TurnEvent 进入候选队列，worker 提炼候选；AI 整理把候选分流为待确认、丢弃、Hot Memory 或归档素材，归档任务再写成 Markdown Archive。
-- **Hot Memory**：高价值短期工作记忆可以进入 Hot Memory，并在检索命中后记录使用反馈。
+- **Hot Memory**：高价值短期工作记忆可以进入 Hot Memory，检索命中后记录使用反馈，并由 worker 定时执行 AI 整理降权。
 - **Archive RAG**：长期沉淀以 Markdown 为正文权威源，Qdrant 只保存可重建索引。
 - **Secret 安全边界**：Secret 明文只进入加密存储和本地解密路径，不进入日志、Markdown、Qdrant、Hot Memory 或模型回复。
 - **生产部署脚本**：通过 Docker Compose 管理 API、worker、MCP、Web、PostgreSQL、Redis、Qdrant。
@@ -57,7 +57,7 @@ TurnEvent -> candidate_memory_jobs -> memory-worker
 2. API 根据事件类型和价值判断创建 candidate job。
 3. `memory-worker` 消费 job，调用 LLM 提炼候选记忆。
 4. 候选按规则进入 Hot Memory、待整理候选或归档素材池。
-5. worker 按项目串行触发 AI 整理，避免模型 provider 并发过高。
+5. worker 按项目串行触发候选 AI 整理，并定时整理 Hot Memory，避免模型 provider 并发过高。
 6. AI 整理调用 LLM 做统一去向决策，执行丢弃、保留、待确认、写入 Hot Memory 或进入归档素材。
 7. Archive Composer 把满足条件的归档素材写成 Markdown Archive。
 8. Archive 进入索引队列，生成 Qdrant chunk 索引。
@@ -151,7 +151,7 @@ Memory OS 可以部署到任意支持 Docker 和 Docker Compose 的 Linux 主机
 | Web | 管理台前端 |
 | API | Memory OS HTTP API |
 | MCP | Streamable HTTP MCP 服务 |
-| Worker | 后台队列、候选提炼、AI 整理和归档 |
+| Worker | 后台队列、候选提炼、候选/热记忆 AI 整理和归档 |
 | PostgreSQL | 权威元数据源 |
 | Redis | 队列、锁、缓存和限流 |
 | Qdrant | 可重建向量索引 |
@@ -235,7 +235,7 @@ curl "$MEMORY_OS_API_URL/version"
 ```text
 cmd/
   memory-api           HTTP API 和管理台后端
-  memory-worker        后台队列、候选提炼、AI 整理和归档
+  memory-worker        后台队列、候选提炼、候选/热记忆 AI 整理和归档
   memory-mcp           远程 MCP Streamable HTTP 服务
   memory-mcp-local     stdio MCP 本地代理
 

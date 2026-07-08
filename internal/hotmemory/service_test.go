@@ -133,6 +133,31 @@ func TestServiceOrganizeDemotesAISelectedActiveMemories(t *testing.T) {
 	}
 }
 
+func TestServiceAutoOrganizeGroupsByMemoryScope(t *testing.T) {
+	repo := NewMemoryRepository()
+	organizer := &fakeOrganizer{result: OrganizeDecision{Summary: "整理完成"}}
+	service := NewService(repo).WithOrganizer(organizer)
+	memories := []Memory{
+		{MemoryID: "hm_p1_a", OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "项目一事实 A", FactHash: "hash_p1_a", Status: StatusActive},
+		{MemoryID: "hm_p1_b", OrgID: "org_1", ProjectID: "project_1", UserID: "user_1", AgentID: "codex", Scope: ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_1:read"}, Fact: "项目一事实 B", FactHash: "hash_p1_b", Status: StatusActive},
+		{MemoryID: "hm_p2", OrgID: "org_1", ProjectID: "project_2", UserID: "user_1", AgentID: "codex", Scope: ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_2:read"}, Fact: "项目二事实", FactHash: "hash_p2", Status: StatusActive},
+		{MemoryID: "hm_pinned", OrgID: "org_1", ProjectID: "project_3", UserID: "user_1", AgentID: "codex", Scope: ScopeProject, Visibility: "project", PermissionLabels: []string{"project:project_3:read"}, Fact: "固定事实", FactHash: "hash_pinned", Status: StatusActive, Pinned: true},
+	}
+	for _, memory := range memories {
+		if _, err := repo.Upsert(memory); err != nil {
+			t.Fatalf("Upsert(%s) error = %v", memory.MemoryID, err)
+		}
+	}
+
+	result, err := service.AutoOrganize(context.Background(), AutoOrganizeRequest{Limit: 50})
+	if err != nil {
+		t.Fatalf("AutoOrganize() error = %v", err)
+	}
+	if result.Groups != 2 || result.Processed != 3 {
+		t.Fatalf("result = %#v, want groups=2 processed=3", result)
+	}
+}
+
 func TestServiceUpsertsAndDeduplicatesFactWithinScope(t *testing.T) {
 	service := NewService(NewMemoryRepository())
 	request := UpsertRequest{

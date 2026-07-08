@@ -193,6 +193,7 @@ func buildWorker(cfg config.Config) (*jobs.Runner, error) {
 	var candidateWorker *jobs.CandidateMemoryWorker
 	var candidateQueue jobs.CandidateMemoryQueue
 	var autoMaintenance jobs.AutoMaintenance
+	var hotMemoryMaintenance jobs.HotMemoryMaintenance
 	var cleanup func()
 	if cfg.PostgresDSN != "" {
 		pool, err := newPostgresPool(context.Background(), cfg.PostgresDSN)
@@ -226,6 +227,8 @@ func buildWorker(cfg config.Config) (*jobs.Runner, error) {
 				closePostgresPool(pool)
 				return nil, err
 			}
+			hotMemoryService = hotMemoryService.WithOrganizer(hotmemory.NewLLMOrganizer(llmClient).WithModel(cfg.LLMModel))
+			hotMemoryMaintenance = hotMemoryService
 			extractor := candidatememory.NewLLMExtractor(llmClient).WithModel(cfg.LLMModel)
 			candidateService := candidatememory.NewService(candidateRepo, candidatememory.RuleScorer{})
 			eventLoader := eventlogCandidateLoader{eventlog: eventlog.NewService(eventlog.NewPGRepository(pool), eventlog.SanitizerOptions{MaxTurnEventBytes: 256 * 1024, MaxToolOutputBytes: 64 * 1024})}
@@ -251,7 +254,7 @@ func buildWorker(cfg config.Config) (*jobs.Runner, error) {
 			}
 		}
 	}
-	runner := jobs.NewRunner(jobs.Options{Concurrency: 1, ArchiveWorker: archiveWorker, ArchiveQueue: archiveQueue, RAGIndexWorker: ragIndexWorker, RAGIndexQueue: ragIndexQueue, CandidateWorker: candidateWorker, CandidateQueue: candidateQueue, AutoMaintenance: autoMaintenance, AutoMaintenanceInterval: 5 * time.Minute, Cleanup: cleanup})
+	runner := jobs.NewRunner(jobs.Options{Concurrency: 1, ArchiveWorker: archiveWorker, ArchiveQueue: archiveQueue, RAGIndexWorker: ragIndexWorker, RAGIndexQueue: ragIndexQueue, CandidateWorker: candidateWorker, CandidateQueue: candidateQueue, AutoMaintenance: autoMaintenance, HotMemoryMaintenance: hotMemoryMaintenance, AutoMaintenanceInterval: 5 * time.Minute, HotMemoryMaintenanceInterval: 30 * time.Minute, Cleanup: cleanup})
 	return &runner, nil
 }
 

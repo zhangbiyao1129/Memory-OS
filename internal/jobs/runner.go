@@ -27,19 +27,25 @@ type AutoMaintenance interface {
 	RunAutoClean(ctx context.Context) (int, error)
 }
 
+type HotMemoryMaintenance interface {
+	RunAutoOrganize(ctx context.Context) (int, error)
+}
+
 // Options 保存 worker 运行参数。
 type Options struct {
-	Concurrency             int
-	ArchiveWorker           *ArchiveWorker
-	ArchiveQueue            ArchiveQueue
-	RAGIndexWorker          *RAGIndexWorker
-	RAGIndexQueue           RAGIndexQueue
-	CandidateWorker         *CandidateMemoryWorker
-	CandidateQueue          CandidateMemoryQueue
-	AutoMaintenance         AutoMaintenance
-	PollInterval            time.Duration
-	AutoMaintenanceInterval time.Duration
-	Cleanup                 func()
+	Concurrency                  int
+	ArchiveWorker                *ArchiveWorker
+	ArchiveQueue                 ArchiveQueue
+	RAGIndexWorker               *RAGIndexWorker
+	RAGIndexQueue                RAGIndexQueue
+	CandidateWorker              *CandidateMemoryWorker
+	CandidateQueue               CandidateMemoryQueue
+	AutoMaintenance              AutoMaintenance
+	HotMemoryMaintenance         HotMemoryMaintenance
+	PollInterval                 time.Duration
+	AutoMaintenanceInterval      time.Duration
+	HotMemoryMaintenanceInterval time.Duration
+	Cleanup                      func()
 }
 
 // Runner 是 Phase 1 的后台任务骨架，后续承载 archive/index/hotmemory jobs。
@@ -84,6 +90,9 @@ func (r Runner) Run(ctx context.Context) error {
 	if r.options.AutoMaintenance != nil {
 		loops = append(loops, r.runAutoMaintenanceLoop)
 	}
+	if r.options.HotMemoryMaintenance != nil {
+		loops = append(loops, r.runHotMemoryMaintenanceLoop)
+	}
 	if len(loops) > 0 {
 		return runLoops(ctx, loops)
 	}
@@ -117,6 +126,10 @@ func (r Runner) CandidateQueueConfigured() bool {
 
 func (r Runner) AutoMaintenanceConfigured() bool {
 	return r.options.AutoMaintenance != nil
+}
+
+func (r Runner) HotMemoryMaintenanceConfigured() bool {
+	return r.options.HotMemoryMaintenance != nil
 }
 
 func (r Runner) runArchiveLoop(ctx context.Context) error {
@@ -230,6 +243,28 @@ func (r Runner) runAutoMaintenanceLoop(ctx context.Context) error {
 		if _, err := r.options.AutoMaintenance.RunAutoClean(ctx); err != nil {
 			return err
 		}
+		if err := waitForNextPoll(ctx, interval); err != nil {
+			return nil
+		}
+	}
+}
+
+func (r Runner) runHotMemoryMaintenanceLoop(ctx context.Context) error {
+	interval := r.options.HotMemoryMaintenanceInterval
+	if interval <= 0 {
+		interval = r.options.AutoMaintenanceInterval
+	}
+	if interval <= 0 {
+		interval = r.options.PollInterval
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		_, _ = r.options.HotMemoryMaintenance.RunAutoOrganize(ctx)
 		if err := waitForNextPoll(ctx, interval); err != nil {
 			return nil
 		}

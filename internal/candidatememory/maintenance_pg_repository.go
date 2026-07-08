@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const maintenanceRunColumns = "id, run_id, org_id, project_id, source_key, thread_id, trigger_type, status, stage, total_candidates, processed, discarded, kept, composed, archive_id, summary, last_error, locked_by, started_at, completed_at, created_at, updated_at"
+const maintenanceRunColumns = "id, run_id, org_id, project_id, source_key, thread_id, trigger_type, status, stage, total_candidates, processed, discarded, kept, composed, archive_material, promoted_hot, needs_review, hot_memory_demoted, archive_id, summary, last_error, locked_by, started_at, completed_at, created_at, updated_at"
 
 // PGMaintenanceRepository 基于 pgx 的 MaintenanceRepository 实现。
 type PGMaintenanceRepository struct {
@@ -50,9 +50,11 @@ func (r *PGMaintenanceRepository) UpdateRun(ctx context.Context, runID string, s
 	}
 	_, err := r.pool.Exec(ctx, `UPDATE candidate_maintenance_runs
 		SET status=$1, processed=$2, discarded=$3, kept=$4, composed=$5,
-		    archive_id=$6, summary=$7, last_error=$8, completed_at=$9, updated_at=now()
-		WHERE run_id=$10`,
+		    archive_material=$6, promoted_hot=$7, needs_review=$8, hot_memory_demoted=$9,
+		    archive_id=$10, summary=$11, last_error=$12, completed_at=$13, updated_at=now()
+		WHERE run_id=$14`,
 		string(status), update.Processed, update.Discarded, update.Kept, update.Composed,
+		update.ArchiveMaterial, update.PromotedHot, update.NeedsReview, update.HotMemoryDemoted,
 		update.ArchiveID, update.Summary, update.LastError, update.CompletedAt, runID,
 	)
 	return err
@@ -125,6 +127,7 @@ func scanMaintenanceRun(row rowScanner) (MaintenanceRun, error) {
 		&run.ID, &run.RunID, &run.OrgID, &run.ProjectID, &run.SourceKey, &run.ThreadID,
 		&triggerType, &status, &stage, &run.TotalCandidates,
 		&run.Processed, &run.Discarded, &run.Kept, &run.Composed,
+		&run.ArchiveMaterial, &run.PromotedHot, &run.NeedsReview, &run.HotMemoryDemoted,
 		&run.ArchiveID, &run.Summary, &run.LastError, &run.LockedBy,
 		&run.StartedAt, &completedAt, &run.CreatedAt, &run.UpdatedAt,
 	); err != nil {

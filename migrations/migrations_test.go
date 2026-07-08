@@ -261,6 +261,22 @@ func TestCandidateMaintenanceScopeLockMigrationNarrowsRunningUniqueIndex(t *test
 	}
 }
 
+func TestCandidateMaintenanceRunMetricsMigrationAddsAuditColumns(t *testing.T) {
+	sql := readMigration(t, "000028_candidate_maintenance_run_metrics.sql")
+
+	required := []string{
+		"ALTER TABLE candidate_maintenance_runs ADD COLUMN IF NOT EXISTS archive_material INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE candidate_maintenance_runs ADD COLUMN IF NOT EXISTS promoted_hot INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE candidate_maintenance_runs ADD COLUMN IF NOT EXISTS needs_review INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE candidate_maintenance_runs ADD COLUMN IF NOT EXISTS hot_memory_demoted INTEGER NOT NULL DEFAULT 0",
+	}
+	for _, item := range required {
+		if !strings.Contains(sql, item) {
+			t.Fatalf("candidate maintenance metrics migration missing %q", item)
+		}
+	}
+}
+
 func TestHotMemoryQdrantMigrationContainsRequiredPointTracking(t *testing.T) {
 	sql := readMigration(t, "000017_hot_memory_qdrant_points.sql")
 

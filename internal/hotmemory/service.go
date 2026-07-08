@@ -227,6 +227,17 @@ type OrganizeResult struct {
 	Summary   string
 }
 
+type AutoOrganizeRequest struct {
+	Limit int
+}
+
+type AutoOrganizeResult struct {
+	Groups    int
+	Processed int
+	Demoted   int
+	Kept      int
+}
+
 func (s Service) Organize(ctx context.Context, request OrganizeRequest) (OrganizeResult, error) {
 	if !s.Configured() {
 		return OrganizeResult{}, errors.New("hot memory service is not configured")
@@ -298,6 +309,78 @@ func organizeCandidates(memories []Memory, limit int) []Memory {
 		return candidates[:limit]
 	}
 	return candidates
+}
+
+func (s Service) AutoOrganize(ctx context.Context, request AutoOrganizeRequest) (AutoOrganizeResult, error) {
+	if !s.Configured() {
+		return AutoOrganizeResult{}, errors.New("hot memory service is not configured")
+	}
+	memories := s.repository.Search(map[string][]string{"status": {string(StatusActive)}})
+	groups := hotMemoryOrganizeGroups(memories)
+	result := AutoOrganizeResult{}
+	for _, filter := range groups {
+		organized, err := s.Organize(ctx, OrganizeRequest{Filter: filter, Limit: request.Limit})
+		if err != nil {
+			return result, err
+		}
+		if organized.Processed == 0 {
+			continue
+		}
+		result.Groups++
+		result.Processed += organized.Processed
+		result.Demoted += organized.Demoted
+		result.Kept += organized.Kept
+	}
+	return result, nil
+}
+
+func (s Service) RunAutoOrganize(ctx context.Context) (int, error) {
+	result, err := s.AutoOrganize(ctx, AutoOrganizeRequest{Limit: 50})
+	if err != nil {
+		return 0, err
+	}
+	return result.Groups, nil
+}
+
+func hotMemoryOrganizeGroups(memories []Memory) []map[string][]string {
+	seen := map[string]map[string][]string{}
+	keys := []string{}
+	for _, memory := range memories {
+		if memory.Status != StatusActive || memory.Pinned {
+			continue
+		}
+		filter := map[string][]string{
+			"doc_type":   {"hot_memory"},
+			"org_id":     {memory.OrgID},
+			"project_id": {memory.ProjectID},
+			"user_id":    {memory.UserID},
+			"scope":      {string(memory.Scope)},
+			"visibility": {memory.Visibility},
+			"status":     {string(StatusActive)},
+		}
+		if len(memory.PermissionLabels) > 0 {
+			filter["permission_labels"] = append([]string(nil), memory.PermissionLabels...)
+		}
+		key := strings.Join([]string{
+			memory.OrgID,
+			memory.ProjectID,
+			memory.UserID,
+			string(memory.Scope),
+			memory.Visibility,
+			strings.Join(memory.PermissionLabels, "\x00"),
+		}, "\x1f")
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = filter
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	groups := make([]map[string][]string, 0, len(keys))
+	for _, key := range keys {
+		groups = append(groups, seen[key])
+	}
+	return groups
 }
 
 func validateUpsert(request UpsertRequest) error {
