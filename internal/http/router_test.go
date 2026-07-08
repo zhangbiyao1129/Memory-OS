@@ -474,8 +474,8 @@ func TestTurnEventEndpointDefaultEnqueuesCandidateJob(t *testing.T) {
 	}
 }
 
-// 缺 source_key(workspace 无 source_key 且无 git_remote 可解析)→ 不写无归属候选,event 仍入库。
-func TestTurnEventEndpointCandidateJobRequiresSourceKey(t *testing.T) {
+// 缺 source_key(workspace 无 source_key 且无 git_remote 可解析)→ 归入 inbox,不丢候选。
+func TestTurnEventEndpointCandidateJobUsesInboxWhenSourceKeyMissing(t *testing.T) {
 	h := server.New(server.WithHostPorts("127.0.0.1:0"))
 	candidateQueue := &fakeCandidateQueue{}
 	eventService := eventlog.NewService(eventlog.NewMemoryRepository(), eventlog.SanitizerOptions{})
@@ -485,8 +485,11 @@ func TestTurnEventEndpointCandidateJobRequiresSourceKey(t *testing.T) {
 	response := ut.PerformRequest(h.Engine, "POST", "/memory/turn-event", &ut.Body{Body: strings.NewReader(body), Len: len(body)}, ut.Header{Key: "Content-Type", Value: "application/json"})
 
 	assert.DeepEqual(t, 200, response.Code)
-	if len(candidateQueue.jobs) != 0 {
-		t.Fatalf("缺 source_key 不应 enqueue candidate,得到 %d", len(candidateQueue.jobs))
+	if len(candidateQueue.jobs) != 1 {
+		t.Fatalf("缺 source_key 应 enqueue inbox candidate,得到 %d", len(candidateQueue.jobs))
+	}
+	if candidateQueue.jobs[0].SourceKey != "inbox/general" {
+		t.Fatalf("candidate source_key = %q, want inbox/general", candidateQueue.jobs[0].SourceKey)
 	}
 }
 

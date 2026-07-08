@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -14,9 +15,12 @@ import (
 	"memory-os/internal/archive"
 	"memory-os/internal/audit"
 	"memory-os/internal/auth"
+	"memory-os/internal/candidatememory"
 	"memory-os/internal/config"
+	"memory-os/internal/eventlog"
 	"memory-os/internal/hotmemory"
 	"memory-os/internal/mcp"
+	"memory-os/internal/memorystats"
 	"memory-os/internal/rag"
 	"memory-os/internal/retrieval"
 	"memory-os/internal/tenant"
@@ -261,6 +265,217 @@ func TestToolsCallMarkUsedRequiresWriteScope(t *testing.T) {
 	}
 }
 
+func TestToolsCallAppendEventWritesEventAndCandidateJob(t *testing.T) {
+	authService, tenantService, token := mcpAuthFixture(t)
+	eventService := eventlog.NewService(eventlog.NewMemoryRepository(), eventlog.SanitizerOptions{})
+	candidateQueue := &fakeCandidateQueue{}
+	auditService := audit.NewService(audit.NewMemoryRepository())
+	server := &Server{
+		Addr:            ":18082",
+		Tools:           mcp.Tools(),
+		Handler:         mcp.NewHandler(mcp.HandlerOptions{}),
+		AuthService:     authService,
+		TenantService:   tenantService,
+		AuditService:    auditService,
+		EventLogService: eventService,
+		CandidateQueue:  candidateQueue,
+		RequireAuth:     true,
+	}
+	body := `{"name":"memory_append_event","arguments":{"request_id":"mcp_append_1","workspace":{"git_remote":"git@gitlab.example.com:team/memory-os.git","git_root":"/work/memory-os","cwd":"/work/memory-os"},"event":{"version":"v1","event_id":"event_mcp_append_1","turn_id":"turn_mcp_append_1","thread_id":"thread_mcp_append_1","session_id":"session_mcp_append_1","type":"assistant_final","created_at":"2026-07-08T01:02:03Z","actor":{"agent_id":"claude-code"},"payload":{"text":"MCP append event should create a candidate job"}}}}`
+	request := httptest.NewRequest(http.MethodPost, "/tools/call", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("User-Agent", "Claude-Code/2.1.195")
+	response := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s, want 200", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"code":"ok"`) || !strings.Contains(response.Body.String(), `"event_id":"event_mcp_append_1"`) {
+		t.Fatalf("response = %s, want accepted event id", response.Body.String())
+	}
+	stored, err := eventService.GetEvent("event_mcp_append_1")
+	if err != nil {
+		t.Fatalf("GetEvent() error = %v", err)
+	}
+	if stored.Actor.UserID != "user_1" || stored.Actor.ProjectID == "" || stored.Actor.AgentID != "claude-code" {
+		t.Fatalf("stored actor = %#v, want PAT subject, resolved workspace project and agent", stored.Actor)
+	}
+	if len(candidateQueue.jobs) != 1 {
+		t.Fatalf("candidate jobs = %d, want 1", len(candidateQueue.jobs))
+	}
+	if candidateQueue.jobs[0].SourceEventID != "event_mcp_append_1" || candidateQueue.jobs[0].SourceKey != "gitlab.example.com/team/memory-os" {
+		t.Fatalf("candidate job = %#v, want source event and source key", candidateQueue.jobs[0])
+	}
+	logs, err := auditService.List(audit.ListFilter{OrgID: stored.Actor.OrgID, ProjectID: stored.Actor.ProjectID})
+	if err != nil {
+		t.Fatalf("audit List() error = %v", err)
+	}
+	if !hasAuditLog(logs, "turn_event.append", "event_mcp_append_1") {
+		t.Fatalf("append_event did not write audit log: %+v", logs)
+	}
+}
+
+func TestToolsCallAppendEventWithoutWorkspaceUsesInboxProject(t *testing.T) {
+	authService, tenantService, token := mcpAuthFixture(t)
+	eventService := eventlog.NewService(eventlog.NewMemoryRepository(), eventlog.SanitizerOptions{})
+	candidateQueue := &fakeCandidateQueue{}
+	server := &Server{
+		Addr:            ":18082",
+		Tools:           mcp.Tools(),
+		Handler:         mcp.NewHandler(mcp.HandlerOptions{}),
+		AuthService:     authService,
+		TenantService:   tenantService,
+		EventLogService: eventService,
+		CandidateQueue:  candidateQueue,
+		RequireAuth:     true,
+	}
+	body := `{"name":"memory_append_event","arguments":{"request_id":"mcp_append_inbox","event":{"version":"v1","event_id":"event_mcp_inbox","turn_id":"turn_mcp_inbox","thread_id":"thread_mcp_inbox","session_id":"session_mcp_inbox","type":"assistant_final","created_at":"2026-07-08T01:02:03Z","actor":{"agent_id":"codex"},"payload":{"text":"No directory conversation should still become memory"}}}}`
+	request := httptest.NewRequest(http.MethodPost, "/tools/call", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s, want 200", response.Code, response.Body.String())
+	}
+	stored, err := eventService.GetEvent("event_mcp_inbox")
+	if err != nil {
+		t.Fatalf("GetEvent() error = %v", err)
+	}
+	if stored.Actor.UserID != "user_1" || stored.Actor.ProjectID == "" {
+		t.Fatalf("stored actor = %#v, want PAT subject and inbox project", stored.Actor)
+	}
+	if len(candidateQueue.jobs) != 1 || candidateQueue.jobs[0].SourceKey != "inbox/general" {
+		t.Fatalf("candidate jobs = %#v, want inbox source key", candidateQueue.jobs)
+	}
+}
+
+func TestToolsCallAppendEventRequiresWriteScope(t *testing.T) {
+	authService := auth.NewService(auth.NewMemoryRepository())
+	readOnlyToken, _, err := authService.CreatePAT("user_1", "reader", []string{"memory:read"}, time.Hour)
+	if err != nil {
+		t.Fatalf("CreatePAT() error = %v", err)
+	}
+	tenantService := tenant.NewService(tenant.NewMemoryRepository())
+	server := &Server{Addr: ":18082", Tools: mcp.Tools(), Handler: mcp.NewHandler(mcp.HandlerOptions{}), AuthService: authService, TenantService: tenantService, EventLogService: eventlog.NewService(eventlog.NewMemoryRepository(), eventlog.SanitizerOptions{}), RequireAuth: true}
+	body := `{"name":"memory_append_event","arguments":{"request_id":"mcp_append_readonly","workspace":{"git_remote":"git@gitlab.example.com:team/memory-os.git"},"event":{"version":"v1","event_id":"event_mcp_readonly","turn_id":"turn_mcp_readonly","thread_id":"thread_mcp_readonly","session_id":"session_mcp_readonly","type":"assistant_final","created_at":"2026-07-08T01:02:03Z","actor":{"agent_id":"claude-code"},"payload":{"text":"read only should fail"}}}}`
+	request := httptest.NewRequest(http.MethodPost, "/tools/call", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+readOnlyToken)
+	response := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(response, request)
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d body = %s, want 403", response.Code, response.Body.String())
+	}
+}
+
+func TestMCPStreamableHTTPAppendEventRequiresWriteScope(t *testing.T) {
+	authService := auth.NewService(auth.NewMemoryRepository())
+	readOnlyToken, _, err := authService.CreatePAT("user_1", "reader", []string{"memory:read"}, time.Hour)
+	if err != nil {
+		t.Fatalf("CreatePAT() error = %v", err)
+	}
+	tenantService := tenant.NewService(tenant.NewMemoryRepository())
+	server := &Server{Addr: ":18082", Tools: mcp.Tools(), Handler: mcp.NewHandler(mcp.HandlerOptions{}), AuthService: authService, TenantService: tenantService, EventLogService: eventlog.NewService(eventlog.NewMemoryRepository(), eventlog.SanitizerOptions{}), RequireAuth: true}
+	body := `{"jsonrpc":"2.0","id":"append-readonly","method":"tools/call","params":{"name":"memory_append_event","arguments":{"request_id":"mcp_rpc_append_readonly","workspace":{"git_remote":"git@gitlab.example.com:team/memory-os.git"},"event":{"version":"v1","event_id":"event_mcp_rpc_readonly","turn_id":"turn_mcp_rpc_readonly","thread_id":"thread_mcp_rpc_readonly","session_id":"session_mcp_rpc_readonly","type":"assistant_final","created_at":"2026-07-08T01:02:03Z","actor":{"agent_id":"claude-code"},"payload":{"text":"read only should fail"}}}}}`
+	response := postMCPRPC(t, server, readOnlyToken, body)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s, want JSON-RPC 200 with tool error", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"isError":true`) || !strings.Contains(response.Body.String(), `mcp_forbidden`) {
+		t.Fatalf("response = %s, want mcp_forbidden tool error", response.Body.String())
+	}
+}
+
+func TestToolsCallMemoryStatsUsesPATSubject(t *testing.T) {
+	authService, tenantService, token := mcpAuthFixture(t)
+	statsRepo := memorystats.NewMemoryRepository(memorystats.Snapshot{Archives: memorystats.AssetStats{Total: 3, ByStatus: map[string]int64{"active": 3}}})
+	server := &Server{Addr: ":18082", Tools: mcp.Tools(), Handler: mcp.NewHandler(mcp.HandlerOptions{}), AuthService: authService, TenantService: tenantService, StatsService: memorystats.NewService(statsRepo), RequireAuth: true}
+	body := `{"name":"memory_stats","arguments":{}}`
+	request := httptest.NewRequest(http.MethodPost, "/tools/call", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s, want 200", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"code":"ok"`) || !strings.Contains(response.Body.String(), `"total":3`) {
+		t.Fatalf("response = %s, want stats snapshot", response.Body.String())
+	}
+	if statsRepo.LastFilter.UserID != "user_1" || statsRepo.LastFilter.OrgID != "" || statsRepo.LastFilter.ProjectID != "" {
+		t.Fatalf("stats filter = %#v, want PAT subject user scope", statsRepo.LastFilter)
+	}
+}
+
+func TestToolsCallMemoryArchiveCreatesSanitizedArchiveFromWorkspace(t *testing.T) {
+	authService, tenantService, token := mcpAuthFixture(t)
+	archiveService := archive.NewService(archive.NewMemoryRepository(), t.TempDir())
+	auditService := audit.NewService(audit.NewMemoryRepository())
+	server := &Server{Addr: ":18082", Tools: mcp.Tools(), Handler: mcp.NewHandler(mcp.HandlerOptions{}), AuthService: authService, TenantService: tenantService, AuditService: auditService, ArchiveService: archiveService, RequireAuth: true}
+	body := `{"name":"memory_archive","arguments":{"request_id":"mcp_archive_1","archive_id":"archive_mcp_1","title":"MCP Archive","content":"# MCP Archive\n\noperator pasted sk-test-redacted-example","workspace":{"git_remote":"git@gitlab.example.com:team/memory-os.git","git_root":"/work/memory-os","cwd":"/work/memory-os"},"actor":{"agent_id":"claude-code"},"created_at":"2026-07-08T01:02:03Z"}}`
+	request := httptest.NewRequest(http.MethodPost, "/tools/call", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s, want 200", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"archive_id":"archive_mcp_1"`) || !strings.Contains(response.Body.String(), `"project_id":"project_`) {
+		t.Fatalf("response = %s, want archive metadata with resolved workspace project", response.Body.String())
+	}
+	detail, err := archiveService.Detail("archive_mcp_1")
+	if err != nil {
+		t.Fatalf("Detail() error = %v", err)
+	}
+	if strings.Contains(detail.Content, "sk-test-redacted-example") || !strings.Contains(detail.Content, "secret_ref:") {
+		t.Fatalf("archive content was not sanitized: %s", detail.Content)
+	}
+	logs, err := auditService.List(audit.ListFilter{OrgID: detail.Metadata.OrgID, ProjectID: detail.Metadata.ProjectID})
+	if err != nil {
+		t.Fatalf("audit List() error = %v", err)
+	}
+	if !hasAuditLog(logs, "archive.create", "archive_mcp_1") {
+		t.Fatalf("memory_archive did not write audit log: %+v", logs)
+	}
+}
+
+func TestToolsCallMemoryGetArchiveReturnsContentAfterPermissionCheck(t *testing.T) {
+	authService, tenantService, token := mcpAuthFixture(t)
+	archiveService := archive.NewService(archive.NewMemoryRepository(), t.TempDir())
+	if _, err := archiveService.Create(archive.CreateRequest{RequestID: "seed_archive_1", ArchiveID: "archive_seed_1", Title: "Seed Archive", UserID: "user_1", OrgID: "org_1", ProjectID: "project_1", CreatedAt: time.Now().UTC(), Markdown: "# Seed Archive\n\nremember deploy flow"}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	server := &Server{Addr: ":18082", Tools: mcp.Tools(), Handler: mcp.NewHandler(mcp.HandlerOptions{}), AuthService: authService, TenantService: tenantService, ArchiveService: archiveService, RequireAuth: true}
+	body := `{"name":"memory_get_archive","arguments":{"archive_id":"archive_seed_1"}}`
+	request := httptest.NewRequest(http.MethodPost, "/tools/call", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+
+	server.routes().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s, want 200", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"content":"# Seed Archive`) || !strings.Contains(response.Body.String(), `"archive_id":"archive_seed_1"`) {
+		t.Fatalf("response = %s, want archive content and metadata", response.Body.String())
+	}
+}
+
 func TestMCPStreamableHTTPRequiresPATWhenAuthConfigured(t *testing.T) {
 	authService, tenantService, _ := mcpAuthFixture(t)
 	server := &Server{Addr: ":18082", Tools: mcp.Tools(), Handler: mcp.NewHandler(mcp.HandlerOptions{Retrieval: fixtureRetrievalService()}), AuthService: authService, TenantService: tenantService, RequireAuth: true}
@@ -276,6 +491,24 @@ func TestMCPStreamableHTTPRequiresPATWhenAuthConfigured(t *testing.T) {
 	if !strings.Contains(response.Body.String(), "pat_required") {
 		t.Fatalf("response = %s, want pat_required", response.Body.String())
 	}
+}
+
+type fakeCandidateQueue struct {
+	jobs []candidatememory.Job
+}
+
+func (q *fakeCandidateQueue) Enqueue(_ context.Context, job candidatememory.Job) error {
+	q.jobs = append(q.jobs, job)
+	return nil
+}
+
+func hasAuditLog(logs []audit.Log, action, resourceID string) bool {
+	for _, log := range logs {
+		if log.Action == action && log.ResourceID == resourceID && log.Metadata["source"] == "mcp" {
+			return true
+		}
+	}
+	return false
 }
 
 func TestMCPStreamableHTTPRejectsGET(t *testing.T) {

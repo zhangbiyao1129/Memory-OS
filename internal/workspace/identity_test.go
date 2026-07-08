@@ -41,10 +41,24 @@ func TestResolveDropsGitRemoteCredentials(t *testing.T) {
 	}
 }
 
-func TestResolveRequiresGitRemoteForWorkspaceProject(t *testing.T) {
-	_, err := Resolve(Identity{CWD: "/tmp/no-git"})
+func TestResolveFallsBackToLocalWorkspaceWhenGitRemoteMissing(t *testing.T) {
+	identity, err := Resolve(Identity{CWD: "/tmp/no-git"})
 
-	if err == nil {
-		t.Fatal("Resolve() error = nil, want missing git remote rejection")
+	if err != nil {
+		t.Fatalf("Resolve() error = %v, want local fallback", err)
+	}
+	if identity.SourceType != "local" || identity.SourceKey == "" {
+		t.Fatalf("identity = %#v, want local source", identity)
+	}
+}
+
+func TestResolveFallsBackToInboxWhenWorkspaceContextMissing(t *testing.T) {
+	identity, err := Resolve(Identity{})
+
+	if err != nil {
+		t.Fatalf("Resolve() error = %v, want inbox fallback", err)
+	}
+	if identity.SourceType != "inbox" || identity.SourceKey != "inbox/general" {
+		t.Fatalf("identity = %#v, want inbox source", identity)
 	}
 }

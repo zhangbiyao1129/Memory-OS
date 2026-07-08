@@ -614,6 +614,28 @@ func TestLogsPageUsesRealAuditAndSecurityLogAPIs(t *testing.T) {
 	}
 }
 
+func TestDiagnosticsPageShowsUserScopedLifecycleAndMaintenanceStatus(t *testing.T) {
+	content, err := os.ReadFile("../../frontend/pages/diagnostics/index.vue")
+	if err != nil {
+		t.Fatalf("read diagnostics page: %v", err)
+	}
+	page := string(content)
+	for _, required := range []string{
+		"useMemoryLifecycleStats({ userScoped: true })",
+		"/memory/organize/workspace/status",
+		"AI 整理任务",
+		"最近错误",
+		"全部记忆生命周期",
+		"candidate_jobs",
+		"oldest_pending_at",
+		"last_completed_at",
+	} {
+		if !strings.Contains(page, required) {
+			t.Fatalf("diagnostics page must expose lifecycle/maintenance marker %q", required)
+		}
+	}
+}
+
 func TestAppShellLogoutNavigatesToLogin(t *testing.T) {
 	content, err := os.ReadFile("../../frontend/components/AppShell.vue")
 	if err != nil {

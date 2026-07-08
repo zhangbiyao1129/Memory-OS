@@ -201,6 +201,100 @@ func TestCandidateMemoryWorkerGateAllowsManualArchive(t *testing.T) {
 	}
 }
 
+func TestCandidateMemoryWorkerFallsBackForEmptyManualArchiveExtraction(t *testing.T) {
+	loader := fakeEventLoader{
+		req: candidatememory.ExtractionRequest{
+			OrgID: "org-1", ProjectID: "proj-1", SourceKey: "sk",
+			UserID: "u", AgentID: "a", ThreadID: "thread-1", SessionID: "s",
+			Events: []candidatememory.ExtractionEvent{
+				{EventID: "e1", Type: "manual_archive_request", Payload: []byte(`{"text":"长期配置：Memory OS 使用 PostgreSQL 作为权威元数据源。","topic":"Memory OS 架构"}`)},
+			},
+		},
+	}
+	repo := candidatememory.NewInMemoryRepository()
+	worker := NewCandidateMemoryWorker(fakeExtractor{candidates: nil}, candidatememory.NewRouter(nil), candidatememory.NewService(repo, candidatememory.RuleScorer{}), repo, loader)
+
+	result, err := worker.Handle(candidatememory.Job{OrgID: "org-1", ProjectID: "proj-1", SourceKey: "sk", SourceEventID: "e1"})
+	if err != nil {
+		t.Fatalf("manual archive 兜底不应返回 error: %v", err)
+	}
+	if len(result.CandidateIDs) != 1 {
+		t.Fatalf("manual archive 提炼为空时应兜底产出 1 个候选,得到 %d", len(result.CandidateIDs))
+	}
+	candidate, err := repo.GetCandidate(context.Background(), "org-1", result.CandidateIDs[0])
+	if err != nil {
+		t.Fatalf("读取候选: %v", err)
+	}
+	if candidate.Content != "长期配置：Memory OS 使用 PostgreSQL 作为权威元数据源。" {
+		t.Fatalf("兜底候选内容不正确: %q", candidate.Content)
+	}
+	if candidate.MemoryType != candidatememory.MemoryTypeFact {
+		t.Fatalf("兜底候选类型 = %s, want fact", candidate.MemoryType)
+	}
+	if candidate.Status != candidatememory.StatusPending {
+		t.Fatalf("兜底候选状态 = %s, want pending", candidate.Status)
+	}
+	if len(candidate.SourceEventIDs) != 1 || candidate.SourceEventIDs[0] != "e1" {
+		t.Fatalf("兜底候选 source events 不正确: %v", candidate.SourceEventIDs)
+	}
+}
+
+func TestCandidateMemoryWorkerFallbackSanitizesManualArchiveSecret(t *testing.T) {
+	loader := fakeEventLoader{
+		req: candidatememory.ExtractionRequest{
+			OrgID: "org-1", ProjectID: "proj-1", SourceKey: "sk",
+			Events: []candidatememory.ExtractionEvent{
+				{EventID: "e1", Type: "manual_archive_request", Payload: []byte(`{"text":"长期配置：测试服务使用 token sk_test_secret1234567890 调用。 "}`)},
+			},
+		},
+	}
+	repo := candidatememory.NewInMemoryRepository()
+	worker := NewCandidateMemoryWorker(fakeExtractor{candidates: nil}, candidatememory.NewRouter(nil), candidatememory.NewService(repo, candidatememory.RuleScorer{}), repo, loader)
+
+	result, err := worker.Handle(candidatememory.Job{OrgID: "org-1", ProjectID: "proj-1", SourceKey: "sk", SourceEventID: "e1"})
+	if err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	candidate, err := repo.GetCandidate(context.Background(), "org-1", result.CandidateIDs[0])
+	if err != nil {
+		t.Fatalf("读取候选: %v", err)
+	}
+	if candidate.Content == "长期配置：测试服务使用 token sk_test_secret1234567890 调用。" {
+		t.Fatal("兜底候选不得保留 secret 明文")
+	}
+	if candidate.Content != "长期配置：测试服务使用 token secret_ref:secret_ref 调用。" {
+		t.Fatalf("兜底候选脱敏结果不正确: %q", candidate.Content)
+	}
+}
+
+func TestCandidateMemoryWorkerDoesNotFallbackForEmptyAssistantExtraction(t *testing.T) {
+	loader := fakeEventLoader{
+		req: candidatememory.ExtractionRequest{
+			OrgID: "org-1", ProjectID: "proj-1", SourceKey: "sk",
+			Events: []candidatememory.ExtractionEvent{
+				{EventID: "e1", Type: "assistant_final", Payload: []byte(`{"text":"我希望以后都用 Go。 "}`)},
+			},
+		},
+	}
+	repo := candidatememory.NewInMemoryRepository()
+	worker := NewCandidateMemoryWorker(fakeExtractor{candidates: nil}, candidatememory.NewRouter(nil), candidatememory.NewService(repo, candidatememory.RuleScorer{}), repo, loader)
+
+	result, err := worker.Handle(candidatememory.Job{OrgID: "org-1", ProjectID: "proj-1", SourceKey: "sk", SourceEventID: "e1"})
+	if err != nil {
+		t.Fatalf("不应返回 error: %v", err)
+	}
+	if len(result.CandidateIDs) != 0 {
+		t.Fatalf("assistant_final 提炼为空不应兜底产出候选: %v", result.CandidateIDs)
+	}
+	candidates, err := repo.ListCandidates(context.Background(), candidatememory.ListFilter{OrgID: "org-1"})
+	if err != nil {
+		t.Fatalf("list candidates: %v", err)
+	}
+	if len(candidates) != 0 {
+		t.Fatalf("assistant_final 不应兜底落库,得到 %d 条", len(candidates))
+	}
+}
+
 // 门控:高价值 assistant_final 时 extractor 必须被调用。
 func TestCandidateMemoryWorkerGateAllowsHighValueEvents(t *testing.T) {
 	extractorCalled := false

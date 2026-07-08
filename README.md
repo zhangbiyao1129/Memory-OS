@@ -86,11 +86,11 @@ POST <memory-os-mcp-url>/tools/call
 | Tool | 状态 | 说明 |
 | --- | --- | --- |
 | `memory_search` | 已实现 | 统一检索 Hot Memory 和 Archive RAG |
-| `memory_mark_used` | 已实现 | 标记检索结果已使用 |
-| `memory_stats` | 占位 | 当前仍返回 phase 1 not implemented |
-| `memory_archive` | 占位 | 后续接入手动归档 |
-| `memory_append_event` | 占位 | 后续接入完整事件写入工具 |
-| `memory_get_archive` | 占位 | 后续接入 Archive 读取 |
+| `memory_mark_used` | 已实现 | 标记检索结果已使用，并写入 MCP 来源审计 |
+| `memory_stats` | 已实现 | 返回账号级或项目级记忆生命周期统计 |
+| `memory_archive` | 已实现 | 创建手动 Markdown 归档；未传项目时按 workspace 自动归属 |
+| `memory_append_event` | 已实现 | 写入 TurnEvent，自动补齐 PAT actor、workspace/inbox 项目，并排候选提炼任务 |
+| `memory_get_archive` | 已实现 | 按权限读取 Archive 元数据和 Markdown 内容 |
 
 对于只支持 stdio MCP 的客户端，或需要使用 Secret 本机加解密工具的客户端，必须使用本地代理：
 
@@ -269,6 +269,9 @@ scripts/
 - `memory-worker` 正在运行。
 - candidate job 可以进入 done。
 - 自动 maintenance 可以产生 `auto|done|done` run。
+- `/diagnostics` 可以显示账号级生命周期、candidate job 队列、AI 整理任务状态和最近错误。
 - Archive 可以生成 active 记录。
 - archive index job 可以 completed。
 - `memory_search` 可以通过 MCP 或 HTTP 返回可解释来源。
+- MCP `memory_append_event` 在有 Git workspace 和无 workspace 两种场景都能写入事件；无 workspace 应落到 inbox 项目。
+- MCP `memory_archive` / `memory_mark_used` / `memory_append_event` 的成功写入可以在日志中心看到 `source=mcp` 审计记录。

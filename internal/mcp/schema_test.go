@@ -52,8 +52,41 @@ func TestToolsExposeActionableInputSchemas(t *testing.T) {
 		}
 	}
 	appendRequired := stringSetFromAnySlice(t, appendEvent.InputSchema["required"])
-	if !appendRequired["event"] || !appendRequired["workspace"] {
-		t.Fatalf("memory_append_event schema required = %#v, want event and workspace", appendEvent.InputSchema["required"])
+	if !appendRequired["event"] {
+		t.Fatalf("memory_append_event schema required = %#v, want event", appendEvent.InputSchema["required"])
+	}
+	if appendRequired["workspace"] {
+		t.Fatalf("memory_append_event workspace must be optional for inbox/no-project capture: %#v", appendEvent.InputSchema["required"])
+	}
+
+	stats := findTool(t, "memory_stats")
+	statsProperties := schemaProperties(t, stats.InputSchema)
+	for _, name := range []string{"org_id", "project_id"} {
+		if _, ok := statsProperties[name]; !ok {
+			t.Fatalf("memory_stats schema missing property %q: %#v", name, stats.InputSchema)
+		}
+	}
+
+	getArchive := findTool(t, "memory_get_archive")
+	getArchiveProperties := schemaProperties(t, getArchive.InputSchema)
+	if _, ok := getArchiveProperties["archive_id"]; !ok {
+		t.Fatalf("memory_get_archive schema missing archive_id: %#v", getArchive.InputSchema)
+	}
+	getArchiveRequired := stringSetFromAnySlice(t, getArchive.InputSchema["required"])
+	if !getArchiveRequired["archive_id"] {
+		t.Fatalf("memory_get_archive required = %#v, want archive_id", getArchive.InputSchema["required"])
+	}
+
+	archive := findTool(t, "memory_archive")
+	archiveProperties := schemaProperties(t, archive.InputSchema)
+	for _, name := range []string{"request_id", "archive_id", "title", "content", "workspace", "actor"} {
+		if _, ok := archiveProperties[name]; !ok {
+			t.Fatalf("memory_archive schema missing property %q: %#v", name, archive.InputSchema)
+		}
+	}
+	archiveRequired := stringSetFromAnySlice(t, archive.InputSchema["required"])
+	if !archiveRequired["request_id"] || !archiveRequired["title"] || !archiveRequired["content"] {
+		t.Fatalf("memory_archive required = %#v, want request_id/title/content", archive.InputSchema["required"])
 	}
 }
 

@@ -101,3 +101,52 @@ func TestProxyCallToolKeepsExplicitProjectActorWithoutGitDetection(t *testing.T)
 		t.Fatal("workspace detector was called even though project_id was explicit")
 	}
 }
+
+func TestProxyCallToolInjectsWorkspaceAndAgentForMemoryAppendEvent(t *testing.T) {
+	detector := &fakeDetector{id: workspace.Identity{
+		CWD:       "/Users/kanyun/tmp",
+		GitRoot:   "/Users/kanyun/tmp",
+		GitRemote: "local/Users/kanyun/tmp",
+	}}
+	var received map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"code":"ok","result":{"event_id":"event_1","status":"accepted"}}`))
+	}))
+	defer server.Close()
+
+	proxy := New(Config{MCPURL: server.URL, Token: "test-token", AgentID: "claude-code", CWD: "/Users/kanyun/tmp", Detector: detector})
+	_, err := proxy.CallTool(context.Background(), "memory_append_event", map[string]any{
+		"request_id": "append_1",
+		"event": map[string]any{
+			"version":    "v1",
+			"event_id":   "event_1",
+			"turn_id":    "turn_1",
+			"thread_id":  "thread_1",
+			"session_id": "session_1",
+			"type":       "assistant_final",
+			"created_at": "2026-07-08T01:02:03Z",
+			"actor":      map[string]any{},
+			"payload":    map[string]any{"text": "append from local proxy"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool() error = %v", err)
+	}
+
+	arguments := received["arguments"].(map[string]any)
+	workspaceArg := arguments["workspace"].(map[string]any)
+	if workspaceArg["git_remote"] != "local/Users/kanyun/tmp" {
+		t.Fatalf("workspace git_remote = %#v, want local source", workspaceArg["git_remote"])
+	}
+	event := arguments["event"].(map[string]any)
+	actor := event["actor"].(map[string]any)
+	if actor["agent_id"] != "claude-code" {
+		t.Fatalf("event actor agent_id = %#v, want claude-code", actor["agent_id"])
+	}
+	if !detector.called {
+		t.Fatal("workspace detector was not called")
+	}
+}

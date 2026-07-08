@@ -39,11 +39,11 @@ func NewHandler(options HandlerOptions) Handler {
 func Tools() []Tool {
 	return []Tool{
 		{Name: "memory_search", Description: "Search unified Memory OS memories", InputSchema: memorySearchSchema()},
-		{Name: "memory_archive", Description: "Archive current memory context", InputSchema: objectSchema()},
+		{Name: "memory_archive", Description: "Archive current memory context", InputSchema: memoryArchiveSchema()},
 		{Name: "memory_append_event", Description: "Append a TurnEvent v1", InputSchema: memoryAppendEventSchema()},
-		{Name: "memory_get_archive", Description: "Get a Markdown archive", InputSchema: objectSchema()},
+		{Name: "memory_get_archive", Description: "Get a Markdown archive", InputSchema: memoryGetArchiveSchema()},
 		{Name: "memory_mark_used", Description: "Mark memory result as used", InputSchema: objectSchema()},
-		{Name: "memory_stats", Description: "Get Memory OS statistics", InputSchema: objectSchema()},
+		{Name: "memory_stats", Description: "Get Memory OS statistics", InputSchema: memoryStatsSchema()},
 	}
 }
 
@@ -90,6 +90,45 @@ func (h Handler) HandleTool(name string, args map[string]any) ToolResponse {
 
 func objectSchema() map[string]any {
 	return map[string]any{"type": "object"}
+}
+
+func memoryStatsSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"org_id":     map[string]any{"type": "string"},
+			"project_id": map[string]any{"type": "string"},
+		},
+		"additionalProperties": true,
+	}
+}
+
+func memoryGetArchiveSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"archive_id": map[string]any{"type": "string"},
+		},
+		"required":             []any{"archive_id"},
+		"additionalProperties": true,
+	}
+}
+
+func memoryArchiveSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"request_id": map[string]any{"type": "string"},
+			"archive_id": map[string]any{"type": "string"},
+			"title":      map[string]any{"type": "string"},
+			"content":    map[string]any{"type": "string"},
+			"workspace":  workspaceSchema(),
+			"actor":      actorSchema(),
+			"created_at": map[string]any{"type": "string", "format": "date-time"},
+		},
+		"required":             []any{"request_id", "title", "content"},
+		"additionalProperties": true,
+	}
 }
 
 func memorySearchSchema() map[string]any {
@@ -148,7 +187,7 @@ func memoryAppendEventSchema() map[string]any {
 				"additionalProperties": true,
 			},
 		},
-		"required":             []any{"workspace", "event"},
+		"required":             []any{"event"},
 		"additionalProperties": true,
 	}
 }

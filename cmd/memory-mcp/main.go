@@ -11,17 +11,23 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"memory-os/internal/archive"
 	"memory-os/internal/audit"
 	"memory-os/internal/auth"
+	"memory-os/internal/candidatememory"
 	"memory-os/internal/config"
 	"memory-os/internal/db"
+	"memory-os/internal/eventlog"
 	"memory-os/internal/hotmemory"
+	"memory-os/internal/jobs"
 	"memory-os/internal/llm"
 	"memory-os/internal/logger"
 	"memory-os/internal/mcp"
+	"memory-os/internal/memorystats"
 	"memory-os/internal/qdrant"
 	"memory-os/internal/rag"
 	"memory-os/internal/retrieval"
+	"memory-os/internal/secret"
 	"memory-os/internal/tenant"
 	"memory-os/internal/workspace"
 )
@@ -34,13 +40,46 @@ var (
 )
 
 type Server struct {
-	Addr          string
-	Tools         []mcp.Tool
-	Handler       mcp.Handler
-	AuthService   auth.Service
-	TenantService tenant.Service
-	AuditService  audit.Service
-	RequireAuth   bool
+	Addr            string
+	Tools           []mcp.Tool
+	Handler         mcp.Handler
+	AuthService     auth.Service
+	TenantService   tenant.Service
+	AuditService    audit.Service
+	EventLogService eventlog.Service
+	ArchiveService  archive.Service
+	StatsService    memorystats.Service
+	CandidateQueue  candidateEnqueuer
+	RequireAuth     bool
+}
+
+type candidateEnqueuer interface {
+	Enqueue(ctx context.Context, job candidatememory.Job) error
+}
+
+type appendEventRequest struct {
+	RequestID string             `json:"request_id"`
+	Workspace workspace.Identity `json:"workspace"`
+	Event     eventlog.TurnEvent `json:"event"`
+}
+
+type archiveToolRequest struct {
+	RequestID string             `json:"request_id"`
+	ArchiveID string             `json:"archive_id"`
+	Title     string             `json:"title"`
+	Content   string             `json:"content"`
+	Workspace workspace.Identity `json:"workspace"`
+	Actor     eventlog.Actor     `json:"actor"`
+	CreatedAt time.Time          `json:"created_at"`
+}
+
+type getArchiveToolRequest struct {
+	ArchiveID string `json:"archive_id"`
+}
+
+type statsToolRequest struct {
+	OrgID     string `json:"org_id"`
+	ProjectID string `json:"project_id"`
 }
 
 type toolCallRequest struct {
@@ -131,6 +170,10 @@ func buildServerWithPool(cfg config.Config, pool *pgxpool.Pool) (*Server, error)
 	var authService auth.Service
 	var tenantService tenant.Service
 	var auditService audit.Service
+	var eventLogService eventlog.Service
+	var archiveService archive.Service
+	var statsService memorystats.Service
+	var candidateQueue candidateEnqueuer
 	if pool != nil && !(cfg.AppEnv == "development" && cfg.EnableDevEndpoints) {
 		service, hot, err := newProductionRetrieval(cfg, pool)
 		if err != nil {
@@ -140,8 +183,13 @@ func buildServerWithPool(cfg config.Config, pool *pgxpool.Pool) (*Server, error)
 		authService = auth.NewService(auth.NewPGRepository(pool))
 		tenantService = tenant.NewService(tenant.NewPGRepository(pool))
 		auditService = audit.NewService(audit.NewPGRepository(pool))
+		eventLogService = eventlog.NewService(eventlog.NewPGRepository(pool), eventlog.SanitizerOptions{MaxTurnEventBytes: 256 * 1024, MaxToolOutputBytes: 64 * 1024})
+		archiveService = archive.NewService(archive.NewPGRepository(pool), cfg.ArchiveDir)
+		statsService = memorystats.NewService(memorystats.NewPGRepository(pool))
+		candidateRepo := candidatememory.NewPGRepository(pool)
+		candidateQueue = jobs.NewPGCandidateMemoryQueue(candidateRepo, jobs.PGCandidateMemoryQueueOptions{WorkerID: "memory-mcp"})
 	}
-	return &Server{Addr: cfg.MCPAddr, Tools: mcp.Tools(), Handler: handler, AuthService: authService, TenantService: tenantService, AuditService: auditService, RequireAuth: cfg.AppEnv == "production"}, nil
+	return &Server{Addr: cfg.MCPAddr, Tools: mcp.Tools(), Handler: handler, AuthService: authService, TenantService: tenantService, AuditService: auditService, EventLogService: eventLogService, ArchiveService: archiveService, StatsService: statsService, CandidateQueue: candidateQueue, RequireAuth: cfg.AppEnv == "production"}, nil
 }
 
 func validateProductionConfig(cfg config.Config) error {
@@ -227,8 +275,8 @@ func (s *Server) routes() http.Handler {
 		if !s.authorizeToolCall(w, r, request.Name, request.Arguments) {
 			return
 		}
-		response := s.Handler.HandleTool(request.Name, request.Arguments)
-		s.recordMarkUsedAudit(r, request.Name, response)
+		response := s.handleTool(r, request.Name, request.Arguments)
+		s.recordMemoryToolAudit(r, request.Name, response)
 		if response.Code != "ok" {
 			w.WriteHeader(http.StatusBadRequest)
 		}
@@ -303,8 +351,8 @@ func (s *Server) handleMCPToolCall(r *http.Request, params json.RawMessage) map[
 	if !s.authorizeToolCallForMCP(r, request.Name, request.Arguments) {
 		return mcpToolContent(true, "mcp_forbidden")
 	}
-	response := s.Handler.HandleTool(request.Name, request.Arguments)
-	s.recordMarkUsedAudit(r, request.Name, response)
+	response := s.handleTool(r, request.Name, request.Arguments)
+	s.recordMemoryToolAudit(r, request.Name, response)
 	if response.Code != "ok" {
 		if response.Error != "" {
 			return mcpToolContent(true, response.Error)
@@ -325,15 +373,326 @@ func (s *Server) handleMCPToolCall(r *http.Request, params json.RawMessage) map[
 }
 
 func (s *Server) authorizeToolCallForMCP(r *http.Request, name string, args map[string]any) bool {
-	if !s.RequireAuth || name != "memory_search" {
+	if !s.RequireAuth {
 		return true
 	}
-	record, ok := s.patRecord(r, "memory:read")
+	required := requiredToolScope(name)
+	record, ok := s.patRecord(r, required)
 	if !ok {
 		return false
 	}
+	if name != "memory_search" {
+		return true
+	}
 	ok, _ = s.applyMemorySearchPermissions(record, r, args)
 	return ok
+}
+
+func (s *Server) handleTool(r *http.Request, name string, args map[string]any) mcp.ToolResponse {
+	switch name {
+	case "memory_append_event":
+		return s.handleAppendEvent(r, args)
+	case "memory_stats":
+		return s.handleStats(r, args)
+	case "memory_get_archive":
+		return s.handleGetArchive(r, args)
+	case "memory_archive":
+		return s.handleArchive(r, args)
+	}
+	return s.Handler.HandleTool(name, args)
+}
+
+func (s *Server) handleStats(r *http.Request, args map[string]any) mcp.ToolResponse {
+	if !s.StatsService.Configured() {
+		return mcp.ToolResponse{Code: "memory_stats_not_configured", Error: "memory stats service is not configured"}
+	}
+	var request statsToolRequest
+	if err := decodeToolArgs(args, &request); err != nil {
+		return mcp.ToolResponse{Code: "invalid_request", Error: err.Error()}
+	}
+	filter, err := s.statsFilter(r, request)
+	if err != nil {
+		return mcp.ToolResponse{Code: "memory_stats_rejected", Error: err.Error()}
+	}
+	snapshot, err := s.StatsService.Snapshot(r.Context(), filter)
+	if err != nil {
+		return mcp.ToolResponse{Code: "memory_stats_rejected", Error: err.Error()}
+	}
+	return mcp.ToolResponse{Code: "ok", Result: snapshot}
+}
+
+func (s *Server) handleGetArchive(r *http.Request, args map[string]any) mcp.ToolResponse {
+	if !s.ArchiveService.Configured() {
+		return mcp.ToolResponse{Code: "archive_not_configured", Error: "archive service is not configured"}
+	}
+	var request getArchiveToolRequest
+	if err := decodeToolArgs(args, &request); err != nil {
+		return mcp.ToolResponse{Code: "invalid_request", Error: err.Error()}
+	}
+	request.ArchiveID = strings.TrimSpace(request.ArchiveID)
+	if request.ArchiveID == "" {
+		return mcp.ToolResponse{Code: "invalid_request", Error: "archive_id is required"}
+	}
+	detail, err := s.ArchiveService.Detail(request.ArchiveID)
+	if err != nil {
+		return mcp.ToolResponse{Code: "archive_get_rejected", Error: err.Error()}
+	}
+	if err := s.authorizeArchiveMetadata(r, detail.Metadata, "memory:read"); err != nil {
+		return mcp.ToolResponse{Code: "archive_get_rejected", Error: err.Error()}
+	}
+	return mcp.ToolResponse{Code: "ok", Result: map[string]any{"metadata": archiveMetadataResult(detail.Metadata, false), "content": detail.Content}}
+}
+
+func (s *Server) handleArchive(r *http.Request, args map[string]any) mcp.ToolResponse {
+	if !s.ArchiveService.Configured() {
+		return mcp.ToolResponse{Code: "archive_not_configured", Error: "archive service is not configured"}
+	}
+	var request archiveToolRequest
+	if err := decodeToolArgs(args, &request); err != nil {
+		return mcp.ToolResponse{Code: "invalid_request", Error: err.Error()}
+	}
+	request.RequestID = strings.TrimSpace(request.RequestID)
+	request.ArchiveID = strings.TrimSpace(request.ArchiveID)
+	request.Title = strings.TrimSpace(request.Title)
+	if request.RequestID == "" || request.Title == "" || strings.TrimSpace(request.Content) == "" {
+		return mcp.ToolResponse{Code: "invalid_request", Error: "request_id, title and content are required"}
+	}
+	if request.ArchiveID == "" {
+		request.ArchiveID = archiveIDFromRequest(request.RequestID, request.Title)
+	}
+	permissions, err := s.archiveToolPermissions(r, &request)
+	if err != nil {
+		return mcp.ToolResponse{Code: "archive_create_rejected", Error: err.Error()}
+	}
+	if request.CreatedAt.IsZero() {
+		request.CreatedAt = time.Now().UTC()
+	}
+	content := secret.Sanitize(request.Content, func(index int, match string) string {
+		return fmt.Sprintf("secret_ref_archive_%s_%d", request.ArchiveID, index)
+	}).Text
+	result, err := s.ArchiveService.Create(archive.CreateRequest{
+		RequestID: request.RequestID,
+		ArchiveID: request.ArchiveID,
+		Title:     request.Title,
+		UserID:    permissions.UserID,
+		OrgID:     permissions.OrgID,
+		ProjectID: permissions.ProjectID,
+		CreatedAt: request.CreatedAt,
+		Markdown:  content,
+	})
+	if err != nil {
+		return mcp.ToolResponse{Code: "archive_create_rejected", Error: err.Error()}
+	}
+	return mcp.ToolResponse{Code: "ok", Result: archiveMetadataResult(result.Metadata, result.Deduped)}
+}
+
+func decodeToolArgs(args map[string]any, target any) error {
+	if args == nil {
+		return errors.New("arguments are required")
+	}
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, target)
+}
+
+func (s *Server) statsFilter(r *http.Request, request statsToolRequest) (memorystats.Filter, error) {
+	request.OrgID = strings.TrimSpace(request.OrgID)
+	request.ProjectID = strings.TrimSpace(request.ProjectID)
+	if s.RequireAuth {
+		record, ok := s.patRecord(r, "memory:read")
+		if !ok {
+			return memorystats.Filter{}, errors.New("mcp_forbidden")
+		}
+		if request.OrgID == "" && request.ProjectID == "" {
+			return memorystats.Filter{UserID: record.SubjectID}, nil
+		}
+		permissions, err := s.TenantService.PermissionContext(record.SubjectID, request.OrgID, request.ProjectID, inferAgentIDFromRequest(r))
+		if err != nil {
+			return memorystats.Filter{}, err
+		}
+		return memorystats.Filter{UserID: permissions.UserID, OrgID: permissions.OrgID, ProjectID: permissions.ProjectID, PermissionLabels: permissions.PermissionLabels}, nil
+	}
+	if request.OrgID == "" && request.ProjectID == "" {
+		return memorystats.Filter{}, errors.New("user scoped stats require PAT")
+	}
+	return memorystats.Filter{UserID: "mcp", OrgID: request.OrgID, ProjectID: request.ProjectID, PermissionLabels: []string{"project:" + request.ProjectID + ":read"}}, nil
+}
+
+func (s *Server) archiveToolPermissions(r *http.Request, request *archiveToolRequest) (tenant.PermissionContext, error) {
+	actor := request.Actor
+	if strings.TrimSpace(actor.AgentID) == "" {
+		actor.AgentID = inferAgentIDFromRequest(r)
+	}
+	if s.RequireAuth {
+		record, ok := s.patRecord(r, "memory:write")
+		if !ok {
+			return tenant.PermissionContext{}, errors.New("mcp_forbidden")
+		}
+		if strings.TrimSpace(actor.ProjectID) == "" {
+			return s.TenantService.EnsureWorkspaceProject(record.SubjectID, actor.AgentID, request.Workspace)
+		}
+		return s.TenantService.PermissionContext(record.SubjectID, actor.OrgID, actor.ProjectID, actor.AgentID)
+	}
+	if strings.TrimSpace(actor.UserID) == "" || strings.TrimSpace(actor.OrgID) == "" || strings.TrimSpace(actor.ProjectID) == "" {
+		return tenant.PermissionContext{}, errors.New("archive actor context is required")
+	}
+	return tenant.PermissionContext{UserID: actor.UserID, OrgID: actor.OrgID, ProjectID: actor.ProjectID, AgentID: actor.AgentID, PermissionLabels: []string{"project:" + actor.ProjectID + ":write"}}, nil
+}
+
+func (s *Server) authorizeArchiveMetadata(r *http.Request, metadata archive.Metadata, requiredScope string) error {
+	if !s.RequireAuth {
+		return nil
+	}
+	record, ok := s.patRecord(r, requiredScope)
+	if !ok {
+		return errors.New("mcp_forbidden")
+	}
+	_, err := s.TenantService.PermissionContext(record.SubjectID, metadata.OrgID, metadata.ProjectID, inferAgentIDFromRequest(r))
+	return err
+}
+
+func archiveIDFromRequest(requestID, title string) string {
+	base := strings.ToLower(strings.TrimSpace(requestID))
+	if base == "" {
+		base = strings.ToLower(strings.TrimSpace(title))
+	}
+	var builder strings.Builder
+	for _, r := range base {
+		valid := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-'
+		if valid {
+			builder.WriteRune(r)
+			continue
+		}
+		if builder.Len() > 0 && builder.String()[builder.Len()-1] != '-' {
+			builder.WriteByte('-')
+		}
+		if builder.Len() >= 80 {
+			break
+		}
+	}
+	value := strings.Trim(builder.String(), "-")
+	if value == "" {
+		return fmt.Sprintf("mcp-archive-%d", time.Now().UTC().UnixNano())
+	}
+	return "mcp-" + value
+}
+
+func archiveMetadataResult(metadata archive.Metadata, deduped bool) map[string]any {
+	return map[string]any{
+		"archive_id":       metadata.ArchiveID,
+		"user_id":          metadata.UserID,
+		"org_id":           metadata.OrgID,
+		"project_id":       metadata.ProjectID,
+		"title":            metadata.Title,
+		"file_path":        metadata.FilePath,
+		"status":           metadata.Status,
+		"index_generation": metadata.IndexGeneration,
+		"current_version":  metadata.CurrentVersion,
+		"content_hash":     metadata.ContentHash,
+		"created_at":       metadata.CreatedAt,
+		"updated_at":       metadata.UpdatedAt,
+		"deduped":          deduped,
+	}
+}
+
+func (s *Server) handleAppendEvent(r *http.Request, args map[string]any) mcp.ToolResponse {
+	if !s.EventLogService.Configured() {
+		return mcp.ToolResponse{Code: "eventlog_not_configured", Error: "event log service is not configured"}
+	}
+	request, err := appendEventRequestFromArgs(args)
+	if err != nil {
+		return mcp.ToolResponse{Code: "invalid_request", Error: err.Error()}
+	}
+	permissions, err := s.appendEventPermissions(r, &request)
+	if err != nil {
+		return mcp.ToolResponse{Code: "memory_append_event_rejected", Error: err.Error()}
+	}
+	result, err := s.EventLogService.Ingest(request.Event, request.RequestID, permissions)
+	if err != nil {
+		return mcp.ToolResponse{Code: "memory_append_event_rejected", Error: err.Error()}
+	}
+	if !result.Deduped && s.CandidateQueue != nil && shouldEnqueueCandidate(result.Event.Type) {
+		if job, ok := candidateJobFromAppendEvent(request, result.Event); ok {
+			if err := s.CandidateQueue.Enqueue(context.Background(), job); err != nil {
+				return mcp.ToolResponse{Code: "candidate_job_enqueue_failed", Error: err.Error()}
+			}
+		}
+	}
+	return mcp.ToolResponse{Code: "ok", Result: result}
+}
+
+func appendEventRequestFromArgs(args map[string]any) (appendEventRequest, error) {
+	if args == nil {
+		return appendEventRequest{}, errors.New("arguments are required")
+	}
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return appendEventRequest{}, err
+	}
+	var request appendEventRequest
+	if err := json.Unmarshal(raw, &request); err != nil {
+		return appendEventRequest{}, err
+	}
+	if strings.TrimSpace(request.RequestID) == "" {
+		return appendEventRequest{}, errors.New("request_id is required")
+	}
+	return request, nil
+}
+
+func (s *Server) appendEventPermissions(r *http.Request, request *appendEventRequest) (tenant.PermissionContext, error) {
+	actor := request.Event.Actor
+	if strings.TrimSpace(actor.AgentID) == "" {
+		actor.AgentID = inferAgentIDFromRequest(r)
+	}
+	if s.RequireAuth {
+		record, ok := s.patRecord(r, "memory:write")
+		if !ok {
+			return tenant.PermissionContext{}, errors.New("mcp_forbidden")
+		}
+		actor.UserID = record.SubjectID
+		var permissions tenant.PermissionContext
+		var err error
+		if strings.TrimSpace(actor.ProjectID) == "" {
+			permissions, err = s.TenantService.EnsureWorkspaceProject(record.SubjectID, actor.AgentID, request.Workspace)
+		} else {
+			permissions, err = s.TenantService.PermissionContext(record.SubjectID, actor.OrgID, actor.ProjectID, actor.AgentID)
+		}
+		if err != nil {
+			return tenant.PermissionContext{}, err
+		}
+		request.Event.Actor = eventlog.Actor{UserID: permissions.UserID, OrgID: permissions.OrgID, ProjectID: permissions.ProjectID, AgentID: permissions.AgentID}
+		return permissions, nil
+	}
+	if strings.TrimSpace(actor.UserID) == "" || strings.TrimSpace(actor.OrgID) == "" || strings.TrimSpace(actor.ProjectID) == "" {
+		return tenant.PermissionContext{}, errors.New("turn event actor context is required")
+	}
+	request.Event.Actor = actor
+	return tenant.PermissionContext{UserID: actor.UserID, OrgID: actor.OrgID, ProjectID: actor.ProjectID, AgentID: actor.AgentID, PermissionLabels: []string{"project:" + actor.ProjectID + ":write"}}, nil
+}
+
+func shouldEnqueueCandidate(eventType eventlog.EventType) bool {
+	return eventType == eventlog.EventAssistantFinal || eventType == eventlog.EventManualArchive
+}
+
+func candidateJobFromAppendEvent(request appendEventRequest, event eventlog.TurnEvent) (candidatememory.Job, bool) {
+	identity := request.Workspace
+	if identity.SourceKey == "" {
+		if resolved, err := workspace.Resolve(identity); err == nil {
+			identity = resolved
+		}
+	}
+	if identity.SourceKey == "" {
+		return candidatememory.Job{}, false
+	}
+	return candidatememory.Job{
+		IdempotencyKey: fmt.Sprintf("candidate:%s:%s:%s:extract", event.Actor.ProjectID, identity.SourceKey, event.EventID),
+		OrgID:          event.Actor.OrgID,
+		ProjectID:      event.Actor.ProjectID,
+		SourceKey:      identity.SourceKey,
+		SourceEventID:  event.EventID,
+	}, true
 }
 
 func mcpToolContent(isError bool, text string) map[string]any {
@@ -346,25 +705,29 @@ func mcpToolContent(isError bool, text string) map[string]any {
 	}
 }
 
-// recordMarkUsedAudit 在 MCP memory_mark_used 成功后写审计,
-// 让"显式标记使用"这一唯一提升 used_count 的动作可追溯到 actor/memory。
-func (s *Server) recordMarkUsedAudit(r *http.Request, name string, response mcp.ToolResponse) {
-	if name != "memory_mark_used" || response.Code != "ok" || !s.AuditService.Configured() {
+// recordMemoryToolAudit 记录 MCP 写入类工具的项目审计日志。
+func (s *Server) recordMemoryToolAudit(r *http.Request, name string, response mcp.ToolResponse) {
+	if response.Code != "ok" || !s.AuditService.Configured() {
 		return
 	}
+	switch name {
+	case "memory_mark_used":
+		s.recordMarkUsedAudit(r, response)
+	case "memory_append_event":
+		s.recordAppendEventAudit(r, response)
+	case "memory_archive":
+		s.recordArchiveCreateAudit(r, response)
+	}
+}
+
+func (s *Server) recordMarkUsedAudit(r *http.Request, response mcp.ToolResponse) {
 	memory, ok := response.Result.(hotmemory.Memory)
 	if !ok {
 		return
 	}
-	actorUserID := ""
-	if s.AuthService.Configured() {
-		if record, err := s.AuthService.ValidatePAT(bearerToken(r), time.Now()); err == nil {
-			actorUserID = record.SubjectID
-		}
-	}
 	action := "hot_memory.mark_used"
 	_ = s.AuditService.Record(audit.Log{
-		ActorUserID:  actorUserID,
+		ActorUserID:  s.auditActorUserID(r),
 		OrgID:        memory.OrgID,
 		ProjectID:    memory.ProjectID,
 		Action:       action,
@@ -374,6 +737,59 @@ func (s *Server) recordMarkUsedAudit(r *http.Request, name string, response mcp.
 		Result:       "ok",
 		Metadata:     map[string]string{"used_count": fmt.Sprintf("%d", memory.UsedCount), "source": "mcp"},
 	})
+}
+
+func (s *Server) recordAppendEventAudit(r *http.Request, response mcp.ToolResponse) {
+	result, ok := response.Result.(eventlog.IngestResult)
+	if !ok {
+		return
+	}
+	action := "turn_event.append"
+	_ = s.AuditService.Record(audit.Log{
+		ActorUserID:  s.auditActorUserID(r),
+		OrgID:        result.Event.Actor.OrgID,
+		ProjectID:    result.Event.Actor.ProjectID,
+		Action:       action,
+		ResourceType: "turn_event",
+		ResourceID:   result.EventID,
+		RequestID:    fmt.Sprintf("%s:%s:%d", action, result.EventID, time.Now().UTC().UnixNano()),
+		Result:       "ok",
+		Metadata:     map[string]string{"event_type": string(result.Event.Type), "deduped": fmt.Sprintf("%t", result.Deduped), "source": "mcp"},
+	})
+}
+
+func (s *Server) recordArchiveCreateAudit(r *http.Request, response mcp.ToolResponse) {
+	result, ok := response.Result.(map[string]any)
+	if !ok {
+		return
+	}
+	archiveID, _ := result["archive_id"].(string)
+	orgID, _ := result["org_id"].(string)
+	projectID, _ := result["project_id"].(string)
+	if archiveID == "" || orgID == "" || projectID == "" {
+		return
+	}
+	action := "archive.create"
+	_ = s.AuditService.Record(audit.Log{
+		ActorUserID:  s.auditActorUserID(r),
+		OrgID:        orgID,
+		ProjectID:    projectID,
+		Action:       action,
+		ResourceType: "archive",
+		ResourceID:   archiveID,
+		RequestID:    fmt.Sprintf("%s:%s:%d", action, archiveID, time.Now().UTC().UnixNano()),
+		Result:       "ok",
+		Metadata:     map[string]string{"source": "mcp"},
+	})
+}
+
+func (s *Server) auditActorUserID(r *http.Request) string {
+	if s.AuthService.Configured() {
+		if record, err := s.AuthService.ValidatePAT(bearerToken(r), time.Now()); err == nil {
+			return record.SubjectID
+		}
+	}
+	return ""
 }
 
 func convertHTTPTools(tools []mcp.Tool) []mcpHTTPTool {
@@ -388,17 +804,12 @@ func (s *Server) authorizeToolCall(w http.ResponseWriter, r *http.Request, name 
 	if !s.RequireAuth {
 		return true
 	}
-	record, ok := s.authorizePATRecord(w, r, "memory:read")
+	required := requiredToolScope(name)
+	record, ok := s.authorizePATRecord(w, r, required)
 	if !ok {
 		return false
 	}
-	// memory_mark_used 是写操作,必须持有 memory:write。
-	if name == "memory_mark_used" {
-		if !mcpPATScopeAllows(record.Scopes, "memory:write") {
-			w.WriteHeader(http.StatusForbidden)
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "mcp_forbidden"})
-			return false
-		}
+	if name == "memory_mark_used" || name == "memory_append_event" || name == "memory_archive" {
 		return true
 	}
 	if name != "memory_search" {
@@ -457,14 +868,16 @@ func (s *Server) applyMemorySearchPermissions(record auth.PATRecord, r *http.Req
 func workspaceFromToolArgs(value any) (workspace.Identity, error) {
 	raw, ok := value.(map[string]any)
 	if !ok {
-		return workspace.Identity{}, errors.New("workspace is required when actor project_id is omitted")
+		return workspace.Identity{}, nil
 	}
 	return workspace.Identity{
-		CWD:       stringToolArg(raw["cwd"]),
-		GitRoot:   stringToolArg(raw["git_root"]),
-		GitRemote: stringToolArg(raw["git_remote"]),
-		GitBranch: stringToolArg(raw["git_branch"]),
-		GitCommit: stringToolArg(raw["git_commit"]),
+		CWD:        stringToolArg(raw["cwd"]),
+		GitRoot:    stringToolArg(raw["git_root"]),
+		GitRemote:  stringToolArg(raw["git_remote"]),
+		GitBranch:  stringToolArg(raw["git_branch"]),
+		GitCommit:  stringToolArg(raw["git_commit"]),
+		SourceType: stringToolArg(raw["source_type"]),
+		SourceKey:  stringToolArg(raw["source_key"]),
 	}, nil
 }
 
@@ -599,4 +1012,13 @@ func mcpPATScopeAllows(scopes []string, required string) bool {
 		}
 	}
 	return false
+}
+
+func requiredToolScope(name string) string {
+	switch name {
+	case "memory_mark_used", "memory_append_event", "memory_archive":
+		return "memory:write"
+	default:
+		return "memory:read"
+	}
 }

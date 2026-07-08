@@ -2,10 +2,13 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"memory-os/internal/candidatememory"
+	"memory-os/internal/secret"
 )
 
 // CandidateMemoryJobResult 候选提炼任务完成结果。
@@ -71,9 +74,15 @@ func (w CandidateMemoryWorker) defaultHandle(job candidatememory.Job) (Candidate
 	if err != nil {
 		return CandidateMemoryJobResult{}, err
 	}
-	candidateIDs := make([]string, 0, len(extracted.Candidates))
-	for i := range extracted.Candidates {
-		c := extracted.Candidates[i]
+	candidates := extracted.Candidates
+	if len(candidates) == 0 && decision.Reason == "manual_archive" {
+		if fallback, ok := fallbackManualArchiveCandidate(request); ok {
+			candidates = []candidatememory.Candidate{fallback}
+		}
+	}
+	candidateIDs := make([]string, 0, len(candidates))
+	for i := range candidates {
+		c := candidates[i]
 		fillOwnership(&c, request)
 		routed, _, err := w.router.ApplyRouting(c)
 		if err != nil {
@@ -142,4 +151,65 @@ func fillOwnership(c *candidatememory.Candidate, request candidatememory.Extract
 	if c.SessionID == "" {
 		c.SessionID = request.SessionID
 	}
+}
+
+func fallbackManualArchiveCandidate(request candidatememory.ExtractionRequest) (candidatememory.Candidate, bool) {
+	content := manualArchiveText(request.Events)
+	content = strings.TrimSpace(secret.Sanitize(content, nil).Text)
+	if content == "" {
+		return candidatememory.Candidate{}, false
+	}
+	c := candidatememory.Candidate{
+		MemoryType:     candidatememory.MemoryTypeFact,
+		Content:        content,
+		Summary:        summarizeFallbackContent(content),
+		RiskLevel:      candidatememory.AssessRisk(content, candidatememory.RiskLow),
+		Confidence:     0.6,
+		Status:         candidatememory.StatusPending,
+		SourceEventIDs: eventIDsFromExtractionRequest(request.Events),
+	}
+	c.CandidateID = candidatememory.NewCandidateID(request.SourceKey, &c)
+	return c, true
+}
+
+func manualArchiveText(events []candidatememory.ExtractionEvent) string {
+	fields := []string{"text", "content", "note", "summary", "topic"}
+	for _, event := range events {
+		if event.Type != "manual_archive_request" {
+			continue
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			text := strings.TrimSpace(string(event.Payload))
+			if text != "" {
+				return text
+			}
+			continue
+		}
+		for _, field := range fields {
+			if value, ok := payload[field].(string); ok && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		}
+	}
+	return ""
+}
+
+func summarizeFallbackContent(content string) string {
+	const maxRunes = 80
+	runes := []rune(content)
+	if len(runes) <= maxRunes {
+		return content
+	}
+	return string(runes[:maxRunes])
+}
+
+func eventIDsFromExtractionRequest(events []candidatememory.ExtractionEvent) []string {
+	ids := make([]string, 0, len(events))
+	for _, event := range events {
+		if event.EventID != "" {
+			ids = append(ids, event.EventID)
+		}
+	}
+	return ids
 }

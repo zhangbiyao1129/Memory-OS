@@ -54,10 +54,43 @@ func TestServerHandlesInitializeToolsListAndToolCall(t *testing.T) {
 	}
 }
 
+func TestServerHandlesClaudeCodeJSONLineFrames(t *testing.T) {
+	var input bytes.Buffer
+	writeTestLine(t, &input, `{"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"roots":{"listChanged":true},"elicitation":{}},"clientInfo":{"name":"claude-code","version":"2.1.204"}},"jsonrpc":"2.0","id":0}`)
+	writeTestLine(t, &input, `{"method":"tools/list","params":{},"jsonrpc":"2.0","id":1}`)
+	output := bytes.Buffer{}
+	server := NewServer(mcpproxy.New(mcpproxy.Config{MCPURL: "http://127.0.0.1:1", Token: "test-token", AgentID: "claude-code", Detector: stdioFakeDetector{}}))
+
+	if err := server.Serve(context.Background(), &input, &output); err != nil {
+		t.Fatalf("Serve() error = %v", err)
+	}
+
+	responses := readTestLines(t, &output)
+	if len(responses) != 2 {
+		t.Fatalf("responses len = %d, want 2: %s", len(responses), output.String())
+	}
+	if !strings.Contains(responses[0], `"serverInfo"`) {
+		t.Fatalf("initialize response = %s, want serverInfo", responses[0])
+	}
+	if !strings.Contains(responses[1], `"memory_search"`) || !strings.Contains(responses[1], `"inputSchema"`) {
+		t.Fatalf("tools/list response = %s, want Memory OS tools", responses[1])
+	}
+	if strings.Contains(output.String(), "Content-Length") {
+		t.Fatalf("JSON-line transport must not return Content-Length frames: %s", output.String())
+	}
+}
+
 func writeTestFrame(t *testing.T, w io.Writer, body string) {
 	t.Helper()
 	if _, err := w.Write([]byte("Content-Length: " + itoa(len(body)) + "\r\n\r\n" + body)); err != nil {
 		t.Fatalf("write frame: %v", err)
+	}
+}
+
+func writeTestLine(t *testing.T, w io.Writer, body string) {
+	t.Helper()
+	if _, err := w.Write([]byte(body + "\n")); err != nil {
+		t.Fatalf("write line: %v", err)
 	}
 }
 
@@ -80,6 +113,19 @@ func readTestFrames(t *testing.T, r io.Reader) []string {
 		}
 	}
 	return frames
+}
+
+func readTestLines(t *testing.T, r io.Reader) []string {
+	t.Helper()
+	body := mustReadAll(t, r)
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	for _, line := range lines {
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(line), &payload); err != nil {
+			t.Fatalf("invalid json line response: %v; output=%s", err, string(body))
+		}
+	}
+	return lines
 }
 
 func mustReadAll(t *testing.T, r io.Reader) []byte {

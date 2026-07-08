@@ -104,7 +104,7 @@ func (e LLMExtractor) Extract(ctx context.Context, request ExtractionRequest) (E
 		c.SessionID = request.SessionID
 		c.SourceEventIDs = eventIDs
 		if c.CandidateID == "" {
-			c.CandidateID = newCandidateID(request.SourceKey, c)
+			c.CandidateID = NewCandidateID(request.SourceKey, c)
 		}
 		if c.Status == "" {
 			c.Status = StatusPending
@@ -178,7 +178,8 @@ func eventIDsFrom(events []ExtractionEvent) []string {
 	return ids
 }
 
-func newCandidateID(sourceKey string, c *Candidate) string {
+// NewCandidateID 基于来源、内容和类型生成稳定候选 ID,用于提炼器和兜底候选保持同一幂等规则。
+func NewCandidateID(sourceKey string, c *Candidate) string {
 	h := fnv.New32a()
 	h.Write([]byte(sourceKey))
 	h.Write([]byte(c.Content))

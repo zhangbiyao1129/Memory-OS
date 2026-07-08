@@ -74,6 +74,18 @@ make t480-deploy
 - Secret、权限、安全、索引生成、跨服务协议改动。
 - 不确定影响范围的改动。
 
+## 部署后验收清单
+
+涉及 MCP、候选记忆、AI 整理、归档、检索或诊断页的部署，除 `post-deploy-verify` 外还要确认：
+
+- MCP `/tools` 暴露 `memory_search`、`memory_append_event`、`memory_archive`、`memory_get_archive`、`memory_mark_used`、`memory_stats`，且 schema 中 `memory_append_event.workspace` 为可选。
+- MCP `memory_append_event` 可在 Git workspace 下写入 TurnEvent，并生成候选提炼任务。
+- MCP `memory_append_event` 在无 workspace 参数时可写入 TurnEvent，并落到 inbox 项目，不应返回 `workspace is required`。
+- MCP `memory_archive` 可以创建 Markdown Archive；内容中的测试 secret 形态应被替换为 `secret_ref`。
+- MCP `memory_stats` 可以返回账号级生命周期统计；`memory_get_archive` 可以按权限读取归档内容。
+- `/diagnostics` 能显示账号级生命周期、candidate job 队列、AI 整理任务状态和最近错误。
+- `/logs` 能看到 MCP 写入类审计记录，至少包括 `turn_event.append`、`archive.create` 或 `hot_memory.mark_used` 中的一类，且 metadata 中 `source=mcp`。
+
 ## 部署提速策略
 
 - API、Worker、MCP 共用 `deploy/backend/Dockerfile.backend` 生成的 `deploy-memory-backend` 镜像。

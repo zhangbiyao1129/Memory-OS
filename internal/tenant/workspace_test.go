@@ -52,16 +52,50 @@ func TestServiceEnsureWorkspaceProjectCreatesPersonalProject(t *testing.T) {
 	}
 }
 
-func TestServiceEnsureWorkspaceProjectRejectsMissingRemote(t *testing.T) {
+func TestServiceEnsureWorkspaceProjectCreatesLocalProjectWhenRemoteMissing(t *testing.T) {
 	service := NewService(NewMemoryRepository())
 	user, err := service.CreateUser("workspace-missing@example.test", "Workspace Missing")
 	if err != nil {
 		t.Fatalf("CreateUser() error = %v", err)
 	}
 
-	_, err = service.EnsureWorkspaceProject(user.ID, "codex", workspace.Identity{CWD: "/tmp/no-git"})
+	ctx, err := service.EnsureWorkspaceProject(user.ID, "codex", workspace.Identity{CWD: "/tmp/no-git"})
 
-	if err == nil {
-		t.Fatal("EnsureWorkspaceProject() error = nil, want missing remote rejection")
+	if err != nil {
+		t.Fatalf("EnsureWorkspaceProject() error = %v, want local fallback project", err)
+	}
+	projects, err := service.ListProjects(user.ID, ctx.OrgID)
+	if err != nil {
+		t.Fatalf("ListProjects() error = %v", err)
+	}
+	if len(projects) != 1 {
+		t.Fatalf("projects = %#v, want one local fallback project", projects)
+	}
+	if projects[0].SourceType != "local" || projects[0].SourceKey == "" {
+		t.Fatalf("workspace project source mismatch: %#v", projects[0])
+	}
+}
+
+func TestServiceEnsureWorkspaceProjectCreatesInboxProjectWhenNoWorkspaceContext(t *testing.T) {
+	service := NewService(NewMemoryRepository())
+	user, err := service.CreateUser("workspace-inbox@example.test", "Workspace Inbox")
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	ctx, err := service.EnsureWorkspaceProject(user.ID, "codex", workspace.Identity{})
+
+	if err != nil {
+		t.Fatalf("EnsureWorkspaceProject() error = %v, want inbox project", err)
+	}
+	projects, err := service.ListProjects(user.ID, ctx.OrgID)
+	if err != nil {
+		t.Fatalf("ListProjects() error = %v", err)
+	}
+	if len(projects) != 1 {
+		t.Fatalf("projects = %#v, want one inbox project", projects)
+	}
+	if projects[0].SourceType != "inbox" || projects[0].SourceKey != "inbox/general" {
+		t.Fatalf("workspace project source mismatch: %#v", projects[0])
 	}
 }

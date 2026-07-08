@@ -79,6 +79,11 @@ func (p Proxy) CallTool(ctx context.Context, name string, args map[string]any) (
 			return ToolResult{IsError: true, Text: err.Error()}, nil
 		}
 	}
+	if name == "memory_append_event" {
+		if err := p.ensureAppendEventContext(ctx, args); err != nil {
+			return ToolResult{IsError: true, Text: err.Error()}, nil
+		}
+	}
 	payload := map[string]any{"name": name, "arguments": args}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -132,6 +137,32 @@ func (p Proxy) ensureSearchContext(ctx context.Context, args map[string]any) err
 	identity, err := p.detector.Detect(detectCtx, p.cwd)
 	if err != nil {
 		return fmt.Errorf("无法自动识别当前 Git 项目：%w", err)
+	}
+	args["workspace"] = workspaceToArgs(identity)
+	return nil
+}
+
+func (p Proxy) ensureAppendEventContext(ctx context.Context, args map[string]any) error {
+	event := mapArg(args["event"])
+	if event == nil {
+		return errors.New("event is required")
+	}
+	actor := mapArg(event["actor"])
+	if actor == nil {
+		actor = map[string]any{}
+		event["actor"] = actor
+	}
+	if strings.TrimSpace(stringArg(actor["agent_id"])) == "" {
+		actor["agent_id"] = p.agentID
+	}
+	if _, ok := args["workspace"].(map[string]any); ok {
+		return nil
+	}
+	detectCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	identity, err := p.detector.Detect(detectCtx, p.cwd)
+	if err != nil {
+		return fmt.Errorf("无法自动识别当前工作区：%w", err)
 	}
 	args["workspace"] = workspaceToArgs(identity)
 	return nil

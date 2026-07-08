@@ -21,16 +21,54 @@ type Identity struct {
 }
 
 func Resolve(identity Identity) (Identity, error) {
+	if sourceKey := strings.Trim(strings.ToLower(identity.SourceKey), "/"); sourceKey != "" {
+		sourceType := strings.TrimSpace(identity.SourceType)
+		if sourceType == "" {
+			sourceType = "manual"
+		}
+		identity.SourceType = sourceType
+		identity.SourceKey = sourceKey
+		if strings.TrimSpace(identity.ProjectName) == "" {
+			identity.ProjectName = projectName(repoNameFromSourceKey(sourceKey))
+		}
+		if strings.TrimSpace(identity.ProjectSlug) == "" {
+			identity.ProjectSlug = slug(sourceType + "/" + sourceKey)
+		}
+		return identity, nil
+	}
 	sourceKey, err := NormalizeGitRemote(identity.GitRemote)
-	if err != nil {
+	if err == nil {
+		identity.SourceType = "git"
+		identity.SourceKey = sourceKey
+		repoName := repoNameFromSourceKey(sourceKey)
+		identity.ProjectName = projectName(repoName)
+		identity.ProjectSlug = slug(sourceKey)
+		return identity, nil
+	}
+	if strings.TrimSpace(identity.GitRemote) != "" {
 		return Identity{}, err
 	}
-	identity.SourceType = "git"
+	return resolveLocalOrInbox(identity), nil
+}
+
+func resolveLocalOrInbox(identity Identity) Identity {
+	localPath := strings.TrimSpace(identity.GitRoot)
+	if localPath == "" {
+		localPath = strings.TrimSpace(identity.CWD)
+	}
+	if localPath == "" {
+		identity.SourceType = "inbox"
+		identity.SourceKey = "inbox/general"
+		identity.ProjectName = "Inbox"
+		identity.ProjectSlug = "inbox-general"
+		return identity
+	}
+	sourceKey := "local/" + slug(localPath)
+	identity.SourceType = "local"
 	identity.SourceKey = sourceKey
-	repoName := repoNameFromSourceKey(sourceKey)
-	identity.ProjectName = projectName(repoName)
+	identity.ProjectName = projectName(repoNameFromSourceKey(localPath))
 	identity.ProjectSlug = slug(sourceKey)
-	return identity, nil
+	return identity
 }
 
 func NormalizeGitRemote(remote string) (string, error) {

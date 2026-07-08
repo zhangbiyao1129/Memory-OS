@@ -15,6 +15,13 @@ import (
 	"memory-os/internal/secretlocal"
 )
 
+type frameFormat int
+
+const (
+	frameFormatContentLength frameFormat = iota
+	frameFormatJSONLine
+)
+
 type Server struct {
 	proxy       mcpproxy.Proxy
 	secretTools *secretlocal.ToolHandler
@@ -58,7 +65,7 @@ func (s Server) WithSecretTools(handler *secretlocal.ToolHandler) Server {
 func (s Server) Serve(ctx context.Context, input io.Reader, output io.Writer) error {
 	reader := bufio.NewReader(input)
 	for {
-		body, err := ReadFrame(reader)
+		body, format, err := ReadFrameWithFormat(reader)
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
@@ -69,7 +76,7 @@ func (s Server) Serve(ctx context.Context, input io.Reader, output io.Writer) er
 		if !ok {
 			continue
 		}
-		if err := WriteFrame(output, response); err != nil {
+		if err := WriteFrameWithFormat(output, response, format); err != nil {
 			return err
 		}
 	}
@@ -150,13 +157,21 @@ func convertTools(tools []mcp.Tool) []mcpTool {
 }
 
 func ReadFrame(reader bytesLikeReader) ([]byte, error) {
+	body, _, err := ReadFrameWithFormat(reader)
+	return body, err
+}
+
+func ReadFrameWithFormat(reader bytesLikeReader) ([]byte, frameFormat, error) {
 	contentLength := 0
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			return nil, err
+			return nil, frameFormatContentLength, err
 		}
 		line = strings.TrimRight(line, "\r\n")
+		if strings.HasPrefix(strings.TrimSpace(line), "{") {
+			return []byte(strings.TrimSpace(line)), frameFormatJSONLine, nil
+		}
 		if line == "" {
 			break
 		}
@@ -167,17 +182,17 @@ func ReadFrame(reader bytesLikeReader) ([]byte, error) {
 		if strings.EqualFold(strings.TrimSpace(name), "Content-Length") {
 			parsed, err := strconv.Atoi(strings.TrimSpace(value))
 			if err != nil {
-				return nil, err
+				return nil, frameFormatContentLength, err
 			}
 			contentLength = parsed
 		}
 	}
 	if contentLength <= 0 {
-		return nil, errors.New("missing Content-Length")
+		return nil, frameFormatContentLength, errors.New("missing Content-Length")
 	}
 	body := make([]byte, contentLength)
 	_, err := io.ReadFull(reader, body)
-	return body, err
+	return body, frameFormatContentLength, err
 }
 
 type bytesLikeReader interface {
@@ -186,8 +201,19 @@ type bytesLikeReader interface {
 }
 
 func WriteFrame(writer io.Writer, payload any) error {
+	return WriteFrameWithFormat(writer, payload, frameFormatContentLength)
+}
+
+func WriteFrameWithFormat(writer io.Writer, payload any, format frameFormat) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
+		return err
+	}
+	if format == frameFormatJSONLine {
+		if _, err := writer.Write(body); err != nil {
+			return err
+		}
+		_, err = writer.Write([]byte("\n"))
 		return err
 	}
 	if _, err := fmt.Fprintf(writer, "Content-Length: %d\r\n\r\n", len(body)); err != nil {
