@@ -230,3 +230,18 @@ func TestInMemoryRepositoryTopicStateUpsertSameRow(t *testing.T) {
 		t.Fatalf("topic state not updated: %+v", again)
 	}
 }
+
+func TestInMemoryRepository_UpdateCandidateStatus_PreservesNeedsReview(t *testing.T) {
+	repo := NewInMemoryRepository()
+	cand := Candidate{CandidateID: "c1", OrgID: "o1", ProjectID: "p1", Status: StatusPending, NeedsReview: true, Scores: Scores{}}
+	_, _ = repo.CreateCandidate(context.Background(), cand)
+
+	// 状态变更不应丢失 NeedsReview 标记。
+	updated, err := repo.UpdateCandidateStatus(context.Background(), "o1", "c1", StatusAccepted, cand.Scores)
+	if err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+	if !updated.NeedsReview {
+		t.Fatal("NeedsReview should be preserved across UpdateCandidateStatus")
+	}
+}
