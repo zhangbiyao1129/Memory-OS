@@ -27,12 +27,12 @@ const (
 type Status string
 
 const (
-	StatusPending       Status = "pending"         // 新建,等待分流
+	StatusPending       Status = "pending"         // 新建,等待分流/整理
 	StatusAccepted      Status = "accepted"        // 用户确认接受
 	StatusDiscarded     Status = "discarded"       // 用户丢弃
 	StatusPromotedToHot Status = "promoted_to_hot" // 自动/手动提升为热记忆
-	StatusInComposePool Status = "in_compose_pool" // 进入主题沉淀池
-	StatusComposed      Status = "composed"        // 已沉淀进 Archive
+	StatusInComposePool Status = "in_compose_pool" // 归档素材池(原主题沉淀池)
+	StatusComposed      Status = "composed"        // 已归档进 Archive
 )
 
 // JobStatus 候选提炼任务状态(对应 candidate_memory_jobs.status)。
@@ -63,6 +63,7 @@ type Candidate struct {
 	RiskLevel      RiskLevel
 	Confidence     float64
 	Status         Status
+	NeedsReview    bool // AI 整理判定为待人工确认(needs_review 动作)
 	SimilarRefs    []SimilarRef
 	Scores         Scores
 	CreatedAt      time.Time
