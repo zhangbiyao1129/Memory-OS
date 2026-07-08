@@ -1401,10 +1401,12 @@ func TestSetupInstallScriptRegistersMainstreamAgentMCPWithoutPlainToken(t *testi
 		".openclaw",
 		"mcpServers",
 		"memory-os",
-		"bearer_token_env_var",
+		"memory-mcp-local-run",
+		"memory-mcp-local",
 		"{env:MEMORY_OS_TOKEN}",
 		"Bearer ${MEMORY_OS_TOKEN}",
 		"MEMORY_OS_TOKEN",
+		"MEMORY_OS_MCP_URL",
 		"secrets.env",
 	} {
 		if !strings.Contains(script, required) {
@@ -1600,12 +1602,48 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".openclaw", "openclaw.json"), []byte(preexistingOpenClaw), 0o600); err != nil {
 		t.Fatalf("write preexisting OpenClaw config: %v", err)
 	}
+	fakeSource := filepath.Join(t.TempDir(), "memory-os-source")
+	if err := os.MkdirAll(filepath.Join(fakeSource, "cmd", "memory-mcp-local"), 0o755); err != nil {
+		t.Fatalf("create fake source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeSource, "go.mod"), []byte("module memory-os\n"), 0o644); err != nil {
+		t.Fatalf("write fake go.mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeSource, "cmd", "memory-mcp-local", "main.go"), []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatalf("write fake memory-mcp-local main: %v", err)
+	}
+	fakeBin := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("create fake bin: %v", err)
+	}
+	fakeGo := filepath.Join(fakeBin, "go")
+	fakeGoScript := `#!/usr/bin/env sh
+set -eu
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    out="$2"
+    shift 2
+  else
+    shift
+  fi
+done
+if [ -z "$out" ]; then
+  exit 2
+fi
+mkdir -p "$(dirname "$out")"
+printf '#!/usr/bin/env sh\nexit 0\n' > "$out"
+chmod 700 "$out"
+`
+	if err := os.WriteFile(fakeGo, []byte(fakeGoScript), 0o700); err != nil {
+		t.Fatalf("write fake go: %v", err)
+	}
 	scriptPath := filepath.Join(t.TempDir(), "install.sh")
 	if err := os.WriteFile(scriptPath, []byte(setupInstallScript()), 0o700); err != nil {
 		t.Fatalf("write install script: %v", err)
 	}
 	cmd := exec.Command("sh", scriptPath, "--server", server.URL, "--code", "mosc_test", "--agent", "auto")
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(os.Environ(), "HOME="+home, "MEMORY_OS_SOURCE_DIR="+fakeSource, "PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("install script failed: %v\n%s", err, output)
@@ -1622,8 +1660,11 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 	if !strings.Contains(string(secretBytes), "MEMORY_OS_API_URL='"+server.URL+"'") {
 		t.Fatalf("secrets.env missing API URL assignment: %s", secretBytes)
 	}
-	if strings.Contains(string(secretBytes), "pat_old_install_token") || strings.Contains(string(secretBytes), "old-api.example.test") || strings.Contains(string(secretBytes), "MEMORY_OS_MCP_URL=") {
+	if strings.Contains(string(secretBytes), "pat_old_install_token") || strings.Contains(string(secretBytes), "old-api.example.test") {
 		t.Fatalf("secrets.env must remove old Memory OS environment lines before writing new values: %s", secretBytes)
+	}
+	if !strings.Contains(string(secretBytes), "MEMORY_OS_MCP_URL='"+server.URL+"/mcp'") {
+		t.Fatalf("secrets.env missing MCP URL assignment: %s", secretBytes)
 	}
 	if !strings.Contains(string(secretBytes), "OTHER_SECRET='keep-me'") {
 		t.Fatalf("secrets.env must preserve non-Memory OS values: %s", secretBytes)
@@ -1645,9 +1686,11 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 	}
 	servers := claudeConfig["mcpServers"].(map[string]any)
 	memoryOS := servers["memory-os"].(map[string]any)
-	headers := memoryOS["headers"].(map[string]any)
-	if memoryOS["type"] != "http" || memoryOS["url"] != server.URL+"/mcp" || headers["Authorization"] != "Bearer ${MEMORY_OS_TOKEN}" {
+	if memoryOS["command"] != filepath.Join(home, ".memory-os", "bin", "memory-mcp-local-run") {
 		t.Fatalf("unexpected memory-os MCP config: %#v", memoryOS)
+	}
+	if strings.Contains(fmt.Sprint(memoryOS), bootstrapToken) {
+		t.Fatalf("Claude local MCP config leaked plaintext token: %#v", memoryOS)
 	}
 	if _, ok := servers["keep"]; !ok {
 		t.Fatalf("Claude MCP config must preserve unrelated servers: %#v", servers)
@@ -1660,16 +1703,24 @@ func TestSetupInstallScriptConfiguresMainstreamAgentMCP(t *testing.T) {
 	codexConfig := string(codexBytes)
 	for _, marker := range []string{
 		`[mcp_servers.memory-os]`,
-		`url = "` + server.URL + `/mcp"`,
-		`bearer_token_env_var = "MEMORY_OS_TOKEN"`,
+		`command = "` + filepath.Join(home, ".memory-os", "bin", "memory-mcp-local-run") + `"`,
 		`[mcp_servers.other]`,
 	} {
 		if !strings.Contains(codexConfig, marker) {
 			t.Fatalf("codex config missing marker %q:\n%s", marker, codexConfig)
 		}
 	}
-	if strings.Count(codexConfig, "[mcp_servers.memory-os]") != 1 || strings.Contains(codexConfig, "192.168.188.20:18082") {
+	if strings.Count(codexConfig, "[mcp_servers.memory-os]") != 1 || strings.Contains(codexConfig, "192.168.188.20:18082") || strings.Contains(codexConfig, "bearer_token_env_var") {
 		t.Fatalf("codex config must replace old memory-os section without duplicates:\n%s", codexConfig)
+	}
+
+	localRunner := filepath.Join(home, ".memory-os", "bin", "memory-mcp-local-run")
+	if _, err := os.Stat(localRunner); err != nil {
+		t.Fatalf("local MCP runner not installed: %v", err)
+	}
+	localBinary := filepath.Join(home, ".memory-os", "bin", "memory-mcp-local")
+	if _, err := os.Stat(localBinary); err != nil {
+		t.Fatalf("local MCP binary not installed: %v", err)
 	}
 
 	opencodeBytes, err := os.ReadFile(filepath.Join(home, ".config", "opencode", "opencode.json"))

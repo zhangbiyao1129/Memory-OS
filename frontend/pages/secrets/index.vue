@@ -113,7 +113,7 @@ watch(() => [context.orgId, context.projectId, statusFilter.value], () => loadSe
     <div class="flex flex-wrap items-start justify-between gap-4">
       <div>
         <h2 class="text-3xl font-black">Secret 管理</h2>
-        <p class="mt-2 text-stone-600">服务端只保存密文和元信息。创建 secret 请通过本机 MCP，Web 端不接收明文。</p>
+        <p class="mt-2 text-stone-600">服务端只保存密文和元信息。创建 secret 必须通过本机 memory-mcp-local，Web 端不接收明文。</p>
       </div>
       <button class="rounded-2xl border px-4 py-2 font-bold" @click="loadSecrets">刷新</button>
     </div>
@@ -124,7 +124,7 @@ watch(() => [context.orgId, context.projectId, statusFilter.value], () => loadSe
     <div class="mt-6 grid gap-4 lg:grid-cols-[1fr_1fr]">
       <section class="rounded-3xl border bg-white p-5">
         <h3 class="font-black">如何创建 Secret</h3>
-        <p class="mt-2 text-sm text-stone-600">Web 不接收明文。复制模板后，在本机 MCP/终端里输入真实值。</p>
+        <p class="mt-2 text-sm text-stone-600">Web 不接收明文。复制模板后，在已配置 memory-mcp-local 的 Agent 里调用本机工具。</p>
         <div class="mt-4 grid gap-3 sm:grid-cols-2">
           <label class="text-sm font-bold text-stone-600">
             名称

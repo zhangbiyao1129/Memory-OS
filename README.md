@@ -92,7 +92,7 @@ POST <memory-os-mcp-url>/tools/call
 | `memory_append_event` | 占位 | 后续接入完整事件写入工具 |
 | `memory_get_archive` | 占位 | 后续接入 Archive 读取 |
 
-对于只支持 stdio MCP 的客户端，可以使用本地代理：
+对于只支持 stdio MCP 的客户端，或需要使用 Secret 本机加解密工具的客户端，必须使用本地代理：
 
 ```bash
 go build -o ~/bin/memory-mcp-local ./cmd/memory-mcp-local
@@ -107,6 +107,7 @@ go build -o ~/bin/memory-mcp-local ./cmd/memory-mcp-local
       "command": "/Users/your-name/bin/memory-mcp-local",
       "env": {
         "MEMORY_OS_MCP_URL": "<memory-os-mcp-url>",
+        "MEMORY_OS_API_URL": "<memory-os-api-url>",
         "MEMORY_OS_TOKEN": "<Memory OS PAT>"
       }
     }
@@ -114,7 +115,7 @@ go build -o ~/bin/memory-mcp-local ./cmd/memory-mcp-local
 }
 ```
 
-`memory-mcp-local` 会读取当前工作目录的 Git 信息，把去除凭据后的 `git_remote`、`git_root`、branch、commit 传给服务器。服务器按 Git 仓库自动创建或复用项目空间。
+`memory-mcp-local` 会读取当前工作目录的 Git 信息，把去除凭据后的 `git_remote`、`git_root`、branch、commit 传给服务器。服务器按 Git 仓库自动创建或复用项目空间。远程 HTTP MCP 不接收 secret 明文；`secret_create_local`、`secret_use_local`、`secret_list_local`、`secret_disable_local` 只由本机 `memory-mcp-local` 暴露。
 
 ## 管理台
 

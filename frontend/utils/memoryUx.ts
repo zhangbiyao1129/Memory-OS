@@ -60,9 +60,9 @@ export function buildSecretCommandTemplates(input: SecretTemplateInput) {
   const site = input.site || 'example'
   const purpose = input.purpose || '本机工具调用'
   return {
-    create: `secret_create_local name=${name} env_name=${envName} site=${site} purpose="${purpose}" value="<在本机输入明文>"`,
+    create: `secret_create_local name=${name} env_name=${envName} site=${site} purpose="${purpose}" plaintext="<在本机输入明文>"`,
     list: 'secret_list_local status=active',
-    use: `secret_use_local secret_ref=<复制 secret_ref> command="<需要注入 ${envName} 的本机命令>"`,
+    use: `secret_use_local secret_ref=<复制 secret_ref> template="<需要注入 ${envName} 的本机命令>"`,
     disable: 'secret_disable_local secret_ref=<复制 secret_ref>'
   }
 }

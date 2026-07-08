@@ -116,6 +116,47 @@ func TestToolHandlerCreateThenUseReturnsMaskedOutput(t *testing.T) {
 	}
 }
 
+func TestToolHandlerAcceptsLocalAliasesAndTemplateArguments(t *testing.T) {
+	server, captured := newToolTestServer(t)
+	defer server.Close()
+	handler := newTestHandler(t, server.URL)
+
+	createResult := handler.Handle(context.Background(), "secret_create_local", map[string]any{
+		"name":       "api-key",
+		"org_id":     "org_1",
+		"project_id": "project_1",
+		"value":      "fake-secret-value",
+	})
+	if createResult.IsError {
+		t.Fatalf("secret_create_local with value alias error: %s", createResult.Text)
+	}
+	createBody := (*captured)["create"].(map[string]any)
+	if _, ok := createBody["value"]; ok {
+		t.Fatal("server received value field")
+	}
+
+	useResult := handler.Handle(context.Background(), "secret_use_local", map[string]any{
+		"secret_ref": "secret_ref_1",
+		"command":    "TOKEN=${secret_ref_1}",
+	})
+	if useResult.IsError {
+		t.Fatalf("secret_use_local with command alias error: %s", useResult.Text)
+	}
+	if useResult.Injected != "TOKEN=fake-secret-value" {
+		t.Fatalf("secret_use_local Injected = %q, want TOKEN=fake-secret-value", useResult.Injected)
+	}
+	if strings.Contains(useResult.Text, "fake-secret-value") || !strings.Contains(useResult.Text, "****") {
+		t.Fatalf("secret_use_local visible output = %s, want masked only", useResult.Text)
+	}
+
+	if r := handler.Handle(context.Background(), "secret_list_local", map[string]any{"org_id": "org_1", "project_id": "project_1"}); r.IsError {
+		t.Fatalf("secret_list_local error: %s", r.Text)
+	}
+	if r := handler.Handle(context.Background(), "secret_disable_local", map[string]any{"secret_ref": "secret_ref_1"}); r.IsError {
+		t.Fatalf("secret_disable_local error: %s", r.Text)
+	}
+}
+
 func TestToolHandlerListAndDisable(t *testing.T) {
 	server, _ := newToolTestServer(t)
 	defer server.Close()
@@ -161,7 +202,7 @@ func TestToolHandlerTools(t *testing.T) {
 	for _, tool := range Tools() {
 		names[tool.Name] = true
 	}
-	for _, want := range []string{"secret_create_local", "secret_list", "secret_use", "secret_disable"} {
+	for _, want := range []string{"secret_create_local", "secret_list_local", "secret_use_local", "secret_disable_local"} {
 		if !names[want] {
 			t.Fatalf("missing tool %q in %v", want, names)
 		}

@@ -2530,6 +2530,7 @@ import json
 import os
 import pathlib
 import shlex
+import subprocess
 import tempfile
 import urllib.request
 
@@ -2559,6 +2560,7 @@ lines = [
 ]
 lines.append("MEMORY_OS_TOKEN='" + config["token"].replace("'", "'\"'\"'") + "'")
 lines.append("MEMORY_OS_API_URL='" + config["api_url"].replace("'", "'\"'\"'") + "'")
+lines.append("MEMORY_OS_MCP_URL='" + config["mcp_url"].replace("'", "'\"'\"'") + "'")
 secret_file.write_text("\n".join(lines) + "\n")
 secret_dir.chmod(0o700)
 secret_file.chmod(0o600)
@@ -2673,19 +2675,83 @@ def selected(*names):
     normalized = agent.strip().lower()
     return normalized == "auto" or normalized in names
 
+local_mcp_dir = home / ".memory-os" / "bin"
+local_mcp_binary = local_mcp_dir / "memory-mcp-local"
+local_mcp_runner = local_mcp_dir / "memory-mcp-local-run"
+
+def find_memory_os_source():
+    candidates = []
+    env_source = os.environ.get("MEMORY_OS_SOURCE_DIR", "").strip()
+    if env_source:
+        candidates.append(pathlib.Path(env_source).expanduser())
+    candidates.extend([
+        pathlib.Path.cwd(),
+        home / "Memory OS",
+        home / "MemoryOS",
+        home / "memory-os",
+    ])
+    for candidate in candidates:
+        try:
+            source = candidate.resolve()
+        except OSError:
+            continue
+        if (source / "cmd" / "memory-mcp-local" / "main.go").exists() and (source / "go.mod").exists():
+            return source
+    return None
+
+def ensure_local_mcp_runner():
+    local_mcp_dir.mkdir(parents=True, exist_ok=True)
+    source = find_memory_os_source()
+    if source is not None:
+        try:
+            subprocess.run(
+                ["go", "build", "-o", str(local_mcp_binary), "./cmd/memory-mcp-local"],
+                cwd=str(source),
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=120,
+            )
+            local_mcp_binary.chmod(0o700)
+        except (OSError, subprocess.SubprocessError) as exc:
+            if not local_mcp_binary.exists():
+                print("Memory OS local MCP build failed; falling back to remote MCP:", str(exc))
+                return None
+    if not local_mcp_binary.exists():
+        print("Memory OS local MCP source/binary not found; falling back to remote MCP.")
+        return None
+    runner = """#!/usr/bin/env sh
+set -eu
+if [ -f "$HOME/.config/ai-secrets/secrets.env" ]; then
+  set -a
+  . "$HOME/.config/ai-secrets/secrets.env"
+  set +a
+fi
+exec "$HOME/.memory-os/bin/memory-mcp-local" "$@"
+"""
+    atomic_text_write(local_mcp_runner, runner)
+    local_mcp_runner.chmod(0o700)
+    return local_mcp_runner
+
+local_mcp_command = ensure_local_mcp_runner() if selected("codex", "claude", "claude-code") else None
+
 def register_claude_code_mcp():
     claude_config = home / ".claude" / ".mcp.json"
     data = json_file(claude_config)
     servers = data.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
         raise ValueError("~/.claude/.mcp.json mcpServers must be a JSON object")
-    servers["memory-os"] = {
-        "type": "http",
-        "url": config["mcp_url"],
-        "headers": {
-            "Authorization": "Bearer ${MEMORY_OS_TOKEN}",
-        },
-    }
+    if local_mcp_command is not None:
+        servers["memory-os"] = {"command": str(local_mcp_command)}
+    else:
+        servers["memory-os"] = {
+            "type": "http",
+            "url": config["mcp_url"],
+            "headers": {
+                "Authorization": "Bearer ${MEMORY_OS_TOKEN}",
+            },
+        }
     atomic_json_write(claude_config, data)
 
 def register_codex_mcp():
@@ -2693,11 +2759,19 @@ def register_codex_mcp():
     existing = codex_config.read_text() if codex_config.exists() else ""
     existing = remove_managed_text(existing)
     existing = remove_toml_table(existing, "mcp_servers.memory-os")
-    block = "\n".join([
-        "[mcp_servers.memory-os]",
-        "url = " + json.dumps(config["mcp_url"]),
-        'bearer_token_env_var = "MEMORY_OS_TOKEN"',
-    ])
+    if local_mcp_command is not None:
+        block = "\n".join([
+            "[mcp_servers.memory-os]",
+            "command = " + json.dumps(str(local_mcp_command)),
+            "startup_timeout_sec = 30",
+            "tool_timeout_sec = 60",
+        ])
+    else:
+        block = "\n".join([
+            "[mcp_servers.memory-os]",
+            "url = " + json.dumps(config["mcp_url"]),
+            'bearer_token_env_var = "MEMORY_OS_TOKEN"',
+        ])
     atomic_text_write(codex_config, managed_text(existing, block))
 
 def register_opencode_mcp():
