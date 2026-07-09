@@ -294,3 +294,13 @@ func (s *Service) RunAutoGovernance(ctx context.Context) (int, error) {
 	// 生产版需要扫描最近 24 小时有活动的 scope
 	return 0, nil
 }
+
+// GetRun 获取治理运行详情。
+func (s *Service) GetRun(ctx context.Context, runID string) (GovernanceRun, error) {
+	return s.repository.GetRun(ctx, runID)
+}
+
+// ListUnits 查询 memory units。
+func (s *Service) ListUnits(ctx context.Context, filter UnitFilter) ([]MemoryUnit, error) {
+	return s.repository.ListUnits(ctx, filter)
+}

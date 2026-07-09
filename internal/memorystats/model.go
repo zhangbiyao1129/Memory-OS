@@ -13,6 +13,20 @@ type Snapshot struct {
 	Candidates    CandidateStats    `json:"candidates"`
 	CandidateJobs CandidateJobStats `json:"candidate_jobs"`
 	Topics        TopicStats        `json:"topics"`
+	MemoryKernel  MemoryKernelStats `json:"memory_kernel"`
+}
+
+// MemoryKernelStats Memory Kernel 治理统计。
+type MemoryKernelStats struct {
+	UnitsTotal          int64  `json:"units_total"`
+	UnitsCurrent        int64  `json:"units_current"`
+	UnitsNeedsReview    int64  `json:"units_needs_review"`
+	GovernanceRunsTotal int64  `json:"governance_runs_total"`
+	GovernanceRunsFailed int64 `json:"governance_runs_failed"`
+	CICasesActive       int64  `json:"ci_cases_active"`
+	CILatestFailed      int64  `json:"ci_latest_failed"`
+	LastRunAt           string `json:"last_run_at"`
+	LastRunSummary      string `json:"last_run_summary"`
 }
 
 type AssetStats struct {

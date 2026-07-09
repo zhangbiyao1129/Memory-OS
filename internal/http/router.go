@@ -25,6 +25,7 @@ import (
 	"memory-os/internal/health"
 	"memory-os/internal/hotmemory"
 	"memory-os/internal/jobs"
+	"memory-os/internal/memorykernel"
 	"memory-os/internal/memorystats"
 	"memory-os/internal/qdrant"
 	"memory-os/internal/rag"
@@ -61,6 +62,8 @@ type RouterOptions struct {
 	QdrantStatusService    qdrant.StatusService
 	MemoryStatsService     memorystats.Service
 	MaintenanceService     *candidatememory.MaintenanceService
+	MemoryKernelService    *memorykernel.Service
+	ContextPackService     memorykernel.ContextPackService
 }
 
 type archiveEnqueuer interface {
@@ -182,6 +185,14 @@ func RegisterRoutes(engine *route.Engine, options RouterOptions) {
 	engine.POST("/memory/retrieval/access-log/list", RetrievalAccessLogListHandler(options.RetrievalAccessLog, options.AuthService, options.TenantService))
 	engine.POST("/memory/qdrant/status", QdrantStatusHandler(options.QdrantStatusService, options.AuthService))
 	engine.POST("/memory/stats/lifecycle", MemoryStatsHandler(options.MemoryStatsService, options.AuthService, options.TenantService))
+	if options.MemoryKernelService != nil {
+		engine.POST("/memory/kernel/governance/run", MemoryKernelGovernanceRunHandler(options.MemoryKernelService, options.AuthService, options.TenantService))
+		engine.POST("/memory/kernel/governance/status", MemoryKernelGovernanceStatusHandler(options.MemoryKernelService, options.AuthService, options.TenantService))
+		engine.POST("/memory/kernel/units/list", MemoryKernelUnitListHandler(options.MemoryKernelService, options.AuthService, options.TenantService))
+	}
+	if options.ContextPackService != nil {
+		engine.POST("/memory/kernel/context-pack", MemoryKernelContextPackHandler(options.ContextPackService, options.AuthService, options.TenantService))
+	}
 	if options.AppEnv == "development" && options.EnableDevEndpoints {
 		engine.POST("/dev/smoke/phase2", DevPhase2SmokeHandler())
 		engine.POST("/dev/smoke/archive", DevArchiveSmokeHandler())
@@ -366,6 +377,38 @@ func OpenAPIHandler() app.HandlerFunc {
 						"summary": "Get memory lifecycle statistics",
 						"responses": map[string]any{
 							"200": map[string]any{"description": "Memory lifecycle statistics"},
+						},
+					},
+				},
+				"/memory/kernel/governance/run": map[string]any{
+					"post": map[string]any{
+						"summary": "Run memory kernel governance for a project",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Governance run result"},
+						},
+					},
+				},
+				"/memory/kernel/governance/status": map[string]any{
+					"post": map[string]any{
+						"summary": "Get governance run status",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Governance run status"},
+						},
+					},
+				},
+				"/memory/kernel/units/list": map[string]any{
+					"post": map[string]any{
+						"summary": "List memory kernel units",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Memory units list"},
+						},
+					},
+				},
+				"/memory/kernel/context-pack": map[string]any{
+					"post": map[string]any{
+						"summary": "Build task-oriented context pack from memory units",
+						"responses": map[string]any{
+							"200": map[string]any{"description": "Context pack"},
 						},
 					},
 				},
@@ -5029,5 +5072,168 @@ func WorkspaceMaintenanceStatusHandler(service *candidatememory.MaintenanceServi
 			return
 		}
 		c.JSON(consts.StatusOK, active.ToStatusDTO())
+	}
+}
+
+// --- Memory Kernel Handlers ---
+
+type memoryKernelGovernanceRunRequest struct {
+	RequestID   string `json:"request_id"`
+	OrgID       string `json:"org_id"`
+	ProjectID   string `json:"project_id"`
+	SourceKey   string `json:"source_key"`
+	ThreadID    string `json:"thread_id"`
+	TriggerType string `json:"trigger_type"`
+}
+
+func MemoryKernelGovernanceRunHandler(service *memorykernel.Service, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		var request memoryKernelGovernanceRunRequest
+		if err := c.BindAndValidate(&request); err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_request"})
+			return
+		}
+		if authService.Configured() {
+			record, ok := authorizePAT(c, authService, "memory:write", "kernel_governance_forbidden")
+			if !ok {
+				return
+			}
+			if request.OrgID == "" {
+				request.OrgID = record.SubjectID
+			}
+		}
+		if tenantService.Configured() {
+			permissions, err := tenantService.PermissionContext(request.OrgID, request.OrgID, request.ProjectID, "")
+			if err != nil {
+				c.JSON(consts.StatusForbidden, map[string]string{"error": "kernel_governance_forbidden"})
+				return
+			}
+			request.OrgID = permissions.OrgID
+			request.ProjectID = permissions.ProjectID
+		}
+		run, err := service.RunGovernance(ctx, memorykernel.GovernanceRequest{
+			OrgID:       request.OrgID,
+			ProjectID:   request.ProjectID,
+			SourceKey:   request.SourceKey,
+			ThreadID:    request.ThreadID,
+			TriggerType: request.TriggerType,
+		})
+		if err != nil {
+			c.JSON(consts.StatusInternalServerError, map[string]string{"error": "governance_failed", "message": err.Error()})
+			return
+		}
+		c.JSON(consts.StatusOK, map[string]interface{}{
+			"run_id":        run.RunID,
+			"status":        string(run.Status),
+			"created_units": run.CreatedUnits,
+			"summary":       run.Summary,
+		})
+	}
+}
+
+type memoryKernelGovernanceStatusRequest struct {
+	RunID string `json:"run_id"`
+}
+
+func MemoryKernelGovernanceStatusHandler(service *memorykernel.Service, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		var request memoryKernelGovernanceStatusRequest
+		if err := c.BindAndValidate(&request); err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_request"})
+			return
+		}
+		if authService.Configured() {
+			if _, ok := authorizePAT(c, authService, "memory:read", "kernel_status_forbidden"); !ok {
+				return
+			}
+		}
+		run, err := service.GetRun(ctx, request.RunID)
+		if err != nil {
+			c.JSON(consts.StatusNotFound, map[string]string{"error": "run_not_found"})
+			return
+		}
+		c.JSON(consts.StatusOK, map[string]interface{}{
+			"run_id":               run.RunID,
+			"status":               string(run.Status),
+			"created_units":        run.CreatedUnits,
+			"superseded_units":     run.SupersededUnits,
+			"stale_candidates":     run.StaleCandidates,
+			"demoted_hot_memories": run.DemotedHotMemories,
+			"ci_cases_created":     run.CICasesCreated,
+			"ci_cases_passed":      run.CICasesPassed,
+			"summary":              run.Summary,
+			"started_at":           run.StartedAt,
+			"completed_at":         run.CompletedAt,
+		})
+	}
+}
+
+type memoryKernelUnitListRequest struct {
+	OrgID     string `json:"org_id"`
+	ProjectID string `json:"project_id"`
+	Status    string `json:"status"`
+	Limit     int    `json:"limit"`
+}
+
+func MemoryKernelUnitListHandler(service *memorykernel.Service, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		var request memoryKernelUnitListRequest
+		if err := c.BindAndValidate(&request); err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_request"})
+			return
+		}
+		if authService.Configured() {
+			if _, ok := authorizePAT(c, authService, "memory:read", "kernel_units_forbidden"); !ok {
+				return
+			}
+		}
+		if request.Limit <= 0 {
+			request.Limit = 50
+		}
+		units, err := service.ListUnits(ctx, memorykernel.UnitFilter{
+			OrgID:     request.OrgID,
+			ProjectID: request.ProjectID,
+			Status:    request.Status,
+			Limit:     request.Limit,
+		})
+		if err != nil {
+			c.JSON(consts.StatusInternalServerError, map[string]string{"error": "list_units_failed"})
+			return
+		}
+		c.JSON(consts.StatusOK, map[string]interface{}{"units": units})
+	}
+}
+
+type memoryKernelContextPackRequest struct {
+	RequestID       string `json:"request_id"`
+	Query           string `json:"query"`
+	OrgID           string `json:"org_id"`
+	ProjectID       string `json:"project_id"`
+	MaxContextBytes int    `json:"max_context_bytes"`
+}
+
+func MemoryKernelContextPackHandler(cps memorykernel.ContextPackService, authService auth.Service, tenantService tenant.Service) app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		var request memoryKernelContextPackRequest
+		if err := c.BindAndValidate(&request); err != nil {
+			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_request"})
+			return
+		}
+		if authService.Configured() {
+			if _, ok := authorizePAT(c, authService, "memory:read", "kernel_context_pack_forbidden"); !ok {
+				return
+			}
+		}
+		pack, err := cps.Build(ctx, memorykernel.ContextPackRequest{
+			OrgID:           request.OrgID,
+			ProjectID:       request.ProjectID,
+			Query:           request.Query,
+			MaxContextBytes: request.MaxContextBytes,
+		})
+		if err != nil {
+			c.JSON(consts.StatusInternalServerError, map[string]string{"error": "context_pack_failed"})
+			return
+		}
+		c.JSON(consts.StatusOK, pack)
 	}
 }

@@ -41,7 +41,12 @@ func (r *PGRepository) Snapshot(ctx context.Context, filter Filter) (Snapshot, e
 	if err != nil {
 		return Snapshot{}, err
 	}
-	return Snapshot{Archives: archives, HotMemories: hot, Candidates: candidates, CandidateJobs: candidateJobs, Topics: topics}, nil
+	kernel, err := r.memoryKernelStats(ctx, filter)
+	if err != nil {
+		// memory kernel 表可能不存在（迁移前），返回零值
+		kernel = MemoryKernelStats{}
+	}
+	return Snapshot{Archives: archives, HotMemories: hot, Candidates: candidates, CandidateJobs: candidateJobs, Topics: topics, MemoryKernel: kernel}, nil
 }
 
 func (r *PGRepository) archiveStats(ctx context.Context, filter Filter) (AssetStats, error) {
@@ -338,4 +343,26 @@ func topicArgs(filter Filter) []any {
 		return []any{filter.OrgID, filter.ProjectID}
 	}
 	return []any{filter.UserID}
+}
+
+func (r *PGRepository) memoryKernelStats(ctx context.Context, filter Filter) (MemoryKernelStats, error) {
+	var stats MemoryKernelStats
+
+	// units total
+	err := r.pool.QueryRow(ctx, `SELECT count(*) FROM memory_units WHERE org_id=$1 AND project_id=$2`, filter.OrgID, filter.ProjectID).Scan(&stats.UnitsTotal)
+	if err != nil {
+		return stats, err
+	}
+	// units current
+	_ = r.pool.QueryRow(ctx, `SELECT count(*) FROM memory_units WHERE org_id=$1 AND project_id=$2 AND status='current'`, filter.OrgID, filter.ProjectID).Scan(&stats.UnitsCurrent)
+	// units needs_review
+	_ = r.pool.QueryRow(ctx, `SELECT count(*) FROM memory_units WHERE org_id=$1 AND project_id=$2 AND status='needs_review'`, filter.OrgID, filter.ProjectID).Scan(&stats.UnitsNeedsReview)
+	// governance runs
+	_ = r.pool.QueryRow(ctx, `SELECT count(*) FROM memory_governance_runs WHERE org_id=$1 AND project_id=$2`, filter.OrgID, filter.ProjectID).Scan(&stats.GovernanceRunsTotal)
+	_ = r.pool.QueryRow(ctx, `SELECT count(*) FROM memory_governance_runs WHERE org_id=$1 AND project_id=$2 AND status='failed'`, filter.OrgID, filter.ProjectID).Scan(&stats.GovernanceRunsFailed)
+	// ci cases
+	_ = r.pool.QueryRow(ctx, `SELECT count(*) FROM memory_ci_cases WHERE org_id=$1 AND project_id=$2 AND status='active'`, filter.OrgID, filter.ProjectID).Scan(&stats.CICasesActive)
+	// last run
+	_ = r.pool.QueryRow(ctx, `SELECT started_at, summary FROM memory_governance_runs WHERE org_id=$1 AND project_id=$2 ORDER BY started_at DESC LIMIT 1`, filter.OrgID, filter.ProjectID).Scan(&stats.LastRunAt, &stats.LastRunSummary)
+	return stats, nil
 }
