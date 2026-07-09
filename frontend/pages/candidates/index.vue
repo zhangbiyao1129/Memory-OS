@@ -338,7 +338,7 @@ onBeforeUnmount(() => {
   <AppShell>
     <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div>
-        <h2 class="text-3xl font-black">候选记忆</h2>
+        <h2 class="text-3xl font-black">待整理素材</h2>
         <p class="mt-2 text-stone-600">候选提炼结果，支持接受/丢弃；AI 会自动丢弃噪声、保留有效信息，并把可复用内容写入热记忆或长期归档。</p>
       </div>
       <button class="rounded-2xl border bg-white px-4 py-2 font-bold" :disabled="loading" @click="loadCandidates">{{ loading ? '刷新中...' : '刷新' }}</button>

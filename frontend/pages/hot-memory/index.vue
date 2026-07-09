@@ -274,7 +274,7 @@ watch(() => [context.orgId, context.projectId, context.agentId, scope.value, vis
       <div>
         <h2 class="text-3xl font-black">热记忆</h2>
         <p class="mt-2 text-stone-600">这里展示系统用于快速召回的工作记忆；长期事实优先进入 Archive。</p>
-        <p class="mt-2 rounded-2xl bg-stone-100 p-3 text-sm text-stone-600">热记忆是可重建的快速索引快照，不是权威记忆源。热度由召回、返回、使用三段信号驱动。</p>
+        <p class="mt-2 rounded-2xl bg-stone-100 p-3 text-sm text-stone-600">热记忆是可重建的快速索引快照，不是权威记忆源。热度由召回、返回、使用三段信号驱动。热记忆不是事实真相，低信号会被治理降级。</p>
       </div>
       <div class="flex flex-wrap gap-2">
         <NuxtLink class="rounded-2xl border bg-white px-4 py-2 font-bold" to="/candidates">去候选记忆</NuxtLink>

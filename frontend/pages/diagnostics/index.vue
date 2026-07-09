@@ -158,6 +158,20 @@ watch(() => [auth.token, context.orgId], () => {
       </div>
     </section>
 
+    <!-- Memory Kernel 统计 -->
+    <section v-if="stats?.memory_kernel" class="mt-6 rounded-3xl border bg-white p-5">
+      <h3 class="text-xl font-black">Memory Kernel</h3>
+      <div class="mt-4 grid gap-3 text-sm sm:grid-cols-4">
+        <p class="rounded-2xl bg-stone-50 p-4">可信事实<br><span class="text-2xl font-black">{{ stats.memory_kernel.units_current || 0 }}</span></p>
+        <p class="rounded-2xl bg-stone-50 p-4">待确认<br><span class="text-2xl font-black text-yellow-600">{{ stats.memory_kernel.units_needs_review || 0 }}</span></p>
+        <p class="rounded-2xl bg-stone-50 p-4">治理运行<br><span class="text-2xl font-black">{{ stats.memory_kernel.governance_runs_total || 0 }}</span></p>
+        <p class="rounded-2xl bg-stone-50 p-4">CI 用例<br><span class="text-2xl font-black">{{ stats.memory_kernel.ci_cases_active || 0 }}</span></p>
+      </div>
+      <div v-if="stats.memory_kernel.last_run_at" class="mt-3 text-sm text-stone-600">
+        最近治理: {{ stats.memory_kernel.last_run_at }} — {{ stats.memory_kernel.last_run_summary || '无摘要' }}
+      </div>
+    </section>
+
     <details class="mt-6 rounded-3xl border bg-white p-5">
       <summary class="cursor-pointer text-xl font-black">技术统计</summary>
       <pre class="mt-4 overflow-auto rounded-2xl bg-stone-950 p-4 text-sm text-stone-50">{{ JSON.stringify(stats, null, 2) }}</pre>

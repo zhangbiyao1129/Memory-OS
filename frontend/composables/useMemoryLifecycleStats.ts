@@ -27,6 +27,17 @@ export type LifecycleStats = {
     last_completed_at: string
   }
   topics: { total: number; ready_to_compose: number; composed: number; open: number }
+  memory_kernel?: {
+    units_total: number
+    units_current: number
+    units_needs_review: number
+    governance_runs_total: number
+    governance_runs_failed: number
+    ci_cases_active: number
+    ci_latest_failed: number
+    last_run_at: string
+    last_run_summary: string
+  }
 }
 
 type LifecycleStatsOptions = { userScoped?: boolean }
