@@ -85,6 +85,10 @@ make t480-deploy
 - MCP `memory_stats` 可以返回账号级生命周期统计；`memory_get_archive` 可以按权限读取归档内容。
 - `/diagnostics` 能显示账号级生命周期、candidate job 队列、AI 整理任务状态和最近错误。
 - `/logs` 能看到 MCP 写入类审计记录，至少包括 `turn_event.append`、`archive.create` 或 `hot_memory.mark_used` 中的一类，且 metadata 中 `source=mcp`。
+- `/memory/kernel/governance/run` 可触发项目级记忆体检。
+- `/memory/kernel/context-pack` 对"部署"类问题返回 DEPLOYMENT.md 规则。
+- MCP `/tools` 暴露 `memory_context_pack`。
+- Memory CI 用例 `memory_archive 现在实现了吗？` 通过，返回不含"尚未实现"。
 
 ## 部署提速策略
 

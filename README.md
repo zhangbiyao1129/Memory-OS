@@ -13,6 +13,7 @@ v0.9 的重点是把记忆生命周期跑成闭环：事件写入、候选提炼
 - **候选记忆闭环**：TurnEvent 进入候选队列，worker 提炼候选；AI 整理把候选分流为待确认、丢弃、Hot Memory 或归档素材，归档任务再写成 Markdown Archive。
 - **Hot Memory**：高价值短期工作记忆可以进入 Hot Memory，检索命中后记录使用反馈，并由 worker 定时执行 AI 整理降权。
 - **Archive RAG**：长期沉淀以 Markdown 为正文权威源，Qdrant 只保存可重建索引。
+- **Memory Kernel（记忆内核）**：自动识别过期/冲突/重复候选，生成当前可信 `memory_units`，构建面向 Agent 任务的 Context Pack，并用 Memory CI 验证召回结果不被旧事实污染。Memory Kernel 是当前可信上下文层，Archive 是历史证据库，不等于当前事实。
 - **Secret 安全边界**：Secret 明文只进入加密存储和本地解密路径，不进入日志、Markdown、Qdrant、Hot Memory 或模型回复。
 - **生产部署脚本**：通过 Docker Compose 管理 API、worker、MCP、Web、PostgreSQL、Redis、Qdrant。
 
