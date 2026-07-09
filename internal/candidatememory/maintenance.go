@@ -484,6 +484,7 @@ func (s *MaintenanceService) promoteCandidateToHotMemory(candidate Candidate, de
 		request.ProjectID = GlobalHotMemoryProjectID
 		request.Scope = hotmemory.ScopeUser
 		request.Visibility = "private"
+		request.PermissionLabels = []string{}
 	} else {
 		request.PermissionLabels = []string{"project:" + candidate.ProjectID + ":read"}
 	}

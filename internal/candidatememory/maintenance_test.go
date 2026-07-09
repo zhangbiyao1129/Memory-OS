@@ -1079,6 +1079,9 @@ func TestExecuteRun_PromotesHotMemoryDecision(t *testing.T) {
 	if req.ProjectID != GlobalHotMemoryProjectID || req.Scope != hotmemory.ScopeUser || req.Visibility != "private" {
 		t.Fatalf("hot memory request = %#v", req)
 	}
+	if req.PermissionLabels == nil || len(req.PermissionLabels) != 0 {
+		t.Fatalf("private hot memory permission labels = %#v, want empty non-nil slice", req.PermissionLabels)
+	}
 	got, _ := candRepo.GetCandidate(ctx, "o1", "c-hot")
 	if got.Status != StatusPromotedToHot {
 		t.Fatalf("candidate status = %s, want promoted_to_hot", got.Status)

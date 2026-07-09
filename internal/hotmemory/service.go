@@ -43,6 +43,7 @@ func (s Service) Upsert(request UpsertRequest) (Memory, error) {
 	sanitized := secret.Sanitize(request.Fact, func(index int, match string) string { return fmt.Sprintf("secret_ref_hot_memory_%d", index) })
 	fact := strings.TrimSpace(sanitized.Text)
 	factHash := hash(normalizeFact(fact))
+	permissionLabels := append([]string{}, request.PermissionLabels...)
 	memory := Memory{
 		MemoryID:         "hm_" + factHash[:16],
 		OrgID:            request.OrgID,
@@ -51,7 +52,7 @@ func (s Service) Upsert(request UpsertRequest) (Memory, error) {
 		AgentID:          request.AgentID,
 		Scope:            request.Scope,
 		Visibility:       request.Visibility,
-		PermissionLabels: append([]string(nil), request.PermissionLabels...),
+		PermissionLabels: permissionLabels,
 		Fact:             fact,
 		FactHash:         factHash,
 		Sources:          []Source{{SourceType: request.SourceType, SourceRef: request.SourceRef, Confidence: request.Confidence}},

@@ -166,16 +166,17 @@ func (s *TriageService) promote(ctx context.Context, candidate Candidate, decisi
 	promoted := 0
 	if isGlobalTriageScope(decision.Scope) && decision.Confidence >= globalTriagePromotionThreshold {
 		memory, err := s.hotMemory.Upsert(hotmemory.UpsertRequest{
-			OrgID:      candidate.OrgID,
-			ProjectID:  GlobalHotMemoryProjectID,
-			UserID:     candidate.UserID,
-			AgentID:    candidate.AgentID,
-			Scope:      hotmemory.ScopeUser,
-			Visibility: "private",
-			Fact:       candidate.Content,
-			SourceType: hotmemory.SourceTurnEvent,
-			SourceRef:  candidateSourceRef(candidate),
-			Confidence: decision.Confidence,
+			OrgID:            candidate.OrgID,
+			ProjectID:        GlobalHotMemoryProjectID,
+			UserID:           candidate.UserID,
+			AgentID:          candidate.AgentID,
+			Scope:            hotmemory.ScopeUser,
+			Visibility:       "private",
+			PermissionLabels: []string{},
+			Fact:             candidate.Content,
+			SourceType:       hotmemory.SourceTurnEvent,
+			SourceRef:        candidateSourceRef(candidate),
+			Confidence:       decision.Confidence,
 		})
 		if err != nil {
 			return promotedIDs, promoted, err

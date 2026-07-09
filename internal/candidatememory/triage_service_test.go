@@ -87,6 +87,9 @@ func TestTriageServicePromotesGlobalToolingToUserHotMemory(t *testing.T) {
 	if req.ProjectID != GlobalHotMemoryProjectID || req.Scope != hotmemory.ScopeUser || req.Visibility != "private" {
 		t.Fatalf("global hot memory request = %#v", req)
 	}
+	if req.PermissionLabels == nil || len(req.PermissionLabels) != 0 {
+		t.Fatalf("global hot memory permission labels = %#v, want empty non-nil slice", req.PermissionLabels)
+	}
 	stored, err := triageRepo.GetTriageResult(ctx, "org-1", "cand-1")
 	if err != nil {
 		t.Fatalf("GetTriageResult: %v", err)
