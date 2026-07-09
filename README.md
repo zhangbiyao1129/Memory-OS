@@ -1,278 +1,296 @@
-# Memory OS v0.9
+# Memory OS
 
-Memory OS 是一个原生多 Agent 记忆平台，用于把 Codex、Claude Code、Cursor、opencode、Hermes 等 Agent 的工作过程沉淀为可检索、可追溯、可治理的长期记忆。
+Memory OS is a self-hosted memory platform for coding agents. It captures work from Codex, Claude Code, Cursor, opencode, Hermes, and MCP clients, then turns that stream into searchable, traceable, and governable long-term memory.
 
-v0.9 的重点是把记忆生命周期跑成闭环：事件写入、候选提炼、Hot Memory、AI 整理、归档任务、Archive RAG、统一检索、MCP 接入和管理台总览已经形成一条可部署、可验证的生产路径。
+The project is built for one practical question:
 
-## 核心能力
+> Can an agent remember useful engineering context without leaking secrets, mixing projects, or trusting stale facts forever?
 
-- **统一记忆入口**：HTTP API 和 MCP 都走同一套 Memory OS 后端能力。
-- **用户级总览**：管理台展示当前用户的全部记忆，不按项目或 Agent 分开展示总数。
-- **项目级治理**：记忆写入、整理、归档和检索仍保留项目维度，用于隔离上下文和权限边界。
-- **Agent 来源标记**：Agent ID 只作为来源 metadata，不作为统计或存储隔离维度。
-- **候选记忆闭环**：TurnEvent 进入候选队列，worker 提炼候选；AI 整理把候选分流为待确认、丢弃、Hot Memory 或归档素材，归档任务再写成 Markdown Archive。
-- **Hot Memory**：高价值短期工作记忆可以进入 Hot Memory，检索命中后记录使用反馈，并由 worker 定时执行 AI 整理降权。
-- **Archive RAG**：长期沉淀以 Markdown 为正文权威源，Qdrant 只保存可重建索引。
-- **Memory Kernel（记忆内核）**：自动识别过期/冲突/重复候选，生成当前可信 `memory_units`，构建面向 Agent 任务的 Context Pack，并用 Memory CI 验证召回结果不被旧事实污染。Memory Kernel 是当前可信上下文层，Archive 是历史证据库，不等于当前事实。
-- **Secret 安全边界**：Secret 明文只进入加密存储和本地解密路径，不进入日志、Markdown、Qdrant、Hot Memory 或模型回复。
-- **生产部署脚本**：通过 Docker Compose 管理 API、worker、MCP、Web、PostgreSQL、Redis、Qdrant。
+Memory OS answers that with a production path for event ingestion, candidate extraction, hot memory, archive RAG, project permissions, MCP tools, and a governance layer called Memory Kernel.
 
-## 当前架构
+## What It Does
+
+- Captures agent activity as `TurnEvent` records from HTTP hooks or MCP tools.
+- Extracts useful facts, preferences, decisions, and follow-up items into candidate memories.
+- Routes candidates through review, discard, Hot Memory, or Markdown Archive flows.
+- Searches Hot Memory and Archive RAG through one unified retrieval API.
+- Exposes memory tools over Streamable HTTP MCP and a local stdio proxy.
+- Keeps tenant/project permissions in PostgreSQL and applies query-time filters in Qdrant.
+- Stores secrets only through the Secret Vault or local decrypt path, never in memory content.
+- Builds task-specific Context Packs from current trusted Memory Units.
+
+## Current Status
+
+Memory OS is usable as a single-node deployment and is actively evolving.
+
+| Area | Status |
+| --- | --- |
+| HTTP API | Implemented |
+| Web console | Implemented |
+| Streamable HTTP MCP | Implemented |
+| Local stdio MCP proxy | Implemented |
+| TurnEvent ingestion | Implemented |
+| Candidate extraction | Implemented |
+| Candidate AI maintenance | Implemented |
+| Hot Memory | Implemented |
+| Markdown Archive | Implemented |
+| Archive RAG | Implemented |
+| Unified retrieval | Implemented |
+| Secret Vault / local secret tools | Implemented |
+| Memory Kernel / Context Pack | Implemented, still being hardened |
+
+## Architecture
 
 ```text
-Agent / MCP Client
+Agent / Hook / MCP client
         |
         v
-memory-mcp / memory-api
+memory-api / memory-mcp
         |
         v
-TurnEvent -> candidate_memory_jobs -> memory-worker
-        |                                |
-        |                                v
-        |                         Candidate Memory
-        |                                |
-        |              +-----------------+-----------------+
-        |              |                                   |
-        v              v                                   v
-   Hot Memory      AI Organizer                      Archive Composer
-        |              |                                   |
-        |              v                                   v
-        |   discard / review / hot/archive         Markdown Archive
-        |                                                  |
-        +------------------------+-------------------------+
-                                 v
-                       Unified Retrieval
-                    Hot Memory + Archive RAG
+TurnEvent
+        |
+        v
+candidate_memory_jobs
+        |
+        v
+memory-worker
+        |
+        v
+Candidate Memory
+        |
+        +-------------------+-------------------+
+        |                   |                   |
+        v                   v                   v
+   Hot Memory        AI Maintenance       Archive Composer
+        |                   |                   |
+        |                   v                   v
+        |       discard / review / hot     Markdown Archive
+        |              / archive                 |
+        |                                       v
+        +-------------------------------> Archive RAG
+                                                |
+                                                v
+                                      Unified Retrieval
 ```
 
-权威数据源：
+Data ownership:
 
-- PostgreSQL：元数据、权限、任务、候选、Hot Memory、Archive 元信息。
-- Markdown 文件：Archive 正文权威源。
-- Qdrant：向量索引，可从 Archive/Hot Memory 重建。
-- Redis：队列、锁、缓存和限流。
+- PostgreSQL is the source of truth for metadata, permissions, jobs, candidates, Hot Memory, Memory Units, and Archive records.
+- Markdown files are the source of truth for Archive content.
+- Qdrant stores rebuildable vector indexes only.
+- Redis is used for queues, locks, cache, and rate limiting.
 
-## 记忆生命周期
+## Memory Lifecycle
 
-1. Agent 通过 MCP 或 HTTP 写入 TurnEvent。
-2. API 根据事件类型和价值判断创建 candidate job。
-3. `memory-worker` 消费 job，调用 LLM 提炼候选记忆。
-4. 候选按规则进入 Hot Memory、待整理候选或归档素材池。
-5. worker 按项目串行触发候选 AI 整理，并定时整理 Hot Memory，避免模型 provider 并发过高。
-6. AI 整理调用 LLM 做统一去向决策，执行丢弃、保留、待确认、写入 Hot Memory 或进入归档素材。
-7. Archive Composer 把满足条件的归档素材写成 Markdown Archive。
-8. Archive 进入索引队列，生成 Qdrant chunk 索引。
-9. `/memory/search` 和 MCP `memory_search` 统一检索 Hot Memory + Archive RAG。
-10. 检索使用情况写入反馈，用于后续排序和治理。
+1. An agent sends a `TurnEvent`.
+2. The API authenticates the actor and resolves the org/project/workspace scope.
+3. Useful event types enqueue candidate extraction jobs.
+4. The worker calls an LLM extractor and writes candidate memories.
+5. Candidate maintenance groups, filters, deduplicates, and routes candidates.
+6. High-value facts can become Hot Memory.
+7. Archive-ready material becomes Markdown Archive content.
+8. Archive chunks are indexed into Qdrant.
+9. `/memory/search` and MCP `memory_search` query Hot Memory and Archive RAG together.
+10. Retrieval usage is logged and fed back into future ranking and governance.
 
-## MCP 接入
+Memory Kernel adds a current-fact layer on top of this history:
 
-远程 MCP Streamable HTTP 入口：
+- `memory_units` represent trusted current facts.
+- governance runs can detect outdated, conflicting, duplicate, or unsupported units.
+- Context Pack builds task-ready context for agents.
+- Memory CI checks whether recall answers are polluted by stale facts.
+
+## MCP Tools
+
+Remote Streamable HTTP endpoint:
 
 ```text
-POST <memory-os-mcp-url>/mcp
+POST <MEMORY_OS_MCP_URL>/mcp
 Authorization: Bearer <Memory OS PAT>
 Accept: application/json, text/event-stream
 ```
 
-兼容 HTTP bridge：
+Compatibility bridge:
 
 ```text
-GET  <memory-os-mcp-url>/tools
-POST <memory-os-mcp-url>/tools/call
+GET  <MEMORY_OS_MCP_URL>/tools
+POST <MEMORY_OS_MCP_URL>/tools/call
 ```
 
-当前 MCP 工具状态：
+Implemented MCP tools:
 
-| Tool | 状态 | 说明 |
-| --- | --- | --- |
-| `memory_search` | 已实现 | 统一检索 Hot Memory 和 Archive RAG |
-| `memory_mark_used` | 已实现 | 标记检索结果已使用，并写入 MCP 来源审计 |
-| `memory_stats` | 已实现 | 返回账号级或项目级记忆生命周期统计 |
-| `memory_archive` | 已实现 | 创建手动 Markdown 归档；未传项目时按 workspace 自动归属 |
-| `memory_append_event` | 已实现 | 写入 TurnEvent，自动补齐 PAT actor、workspace/inbox 项目，并排候选提炼任务 |
-| `memory_get_archive` | 已实现 | 按权限读取 Archive 元数据和 Markdown 内容 |
+| Tool | Purpose |
+| --- | --- |
+| `memory_search` | Search Hot Memory and Archive RAG with traceable sources. |
+| `memory_context_pack` | Build a Memory Kernel context pack for a task. |
+| `memory_append_event` | Append an agent event and enqueue candidate extraction when applicable. |
+| `memory_archive` | Create a manual Markdown Archive. |
+| `memory_get_archive` | Read Archive metadata and Markdown content by permission. |
+| `memory_mark_used` | Mark a memory result as used and update feedback signals. |
+| `memory_stats` | Return memory lifecycle stats. |
 
-对于只支持 stdio MCP 的客户端，或需要使用 Secret 本机加解密工具的客户端，必须使用本地代理：
+For stdio-only clients, use the local proxy:
 
 ```bash
 go build -o ~/bin/memory-mcp-local ./cmd/memory-mcp-local
 ```
 
-配置示例：
+Example MCP client config:
 
 ```json
 {
   "mcpServers": {
     "memory-os": {
-      "command": "/Users/your-name/bin/memory-mcp-local",
+      "command": "/Users/you/bin/memory-mcp-local",
       "env": {
-        "MEMORY_OS_MCP_URL": "<memory-os-mcp-url>",
-        "MEMORY_OS_API_URL": "<memory-os-api-url>",
-        "MEMORY_OS_TOKEN": "<Memory OS PAT>"
+        "MEMORY_OS_MCP_URL": "https://memory.example.com",
+        "MEMORY_OS_API_URL": "https://memory-api.example.com",
+        "MEMORY_OS_TOKEN": "${MEMORY_OS_TOKEN}"
       }
     }
   }
 }
 ```
 
-`memory-mcp-local` 会读取当前工作目录的 Git 信息，把去除凭据后的 `git_remote`、`git_root`、branch、commit 传给服务器。服务器按 Git 仓库自动创建或复用项目空间。远程 HTTP MCP 不接收 secret 明文；`secret_create_local`、`secret_use_local`、`secret_list_local`、`secret_disable_local` 只由本机 `memory-mcp-local` 暴露。
+Do not put real tokens in committed config. Load them from your local secret manager or environment.
 
-## 管理台
+## HTTP Surfaces
 
-Web 控制台入口：
+Common production endpoints:
 
-```text
-<memory-os-web-url>
-```
-
-主要页面：
-
-- 总览：用户级记忆生命周期统计。
-- 记忆：Hot Memory 和候选状态。
-- 检索：统一检索调试。
-- 写入诊断：事件写入与候选链路检查。
-- Secret：Secret Vault 和本地解密接入向导。
-- 日志：运行与审计信息。
-- 高级设置：Qdrant、Token、权限和项目配置。
-
-展示口径：
-
-- 总览以用户为准，显示当前用户全部记忆。
-- 存储、整理、归档和检索仍按项目隔离。
-- Agent 只标记来源，不作为展示统计维度。
-
-## 部署
-
-Memory OS 可以部署到任意支持 Docker 和 Docker Compose 的 Linux 主机。仓库内提供 Compose 文件作为参考部署拓扑，具体端口、域名、TLS、反向代理、防火墙和数据目录应由部署方按自己的环境配置。
-
-服务拓扑：
-
-| 服务 | 说明 |
+| Endpoint | Purpose |
 | --- | --- |
-| Web | 管理台前端 |
-| API | Memory OS HTTP API |
-| MCP | Streamable HTTP MCP 服务 |
-| Worker | 后台队列、候选提炼、候选/热记忆 AI 整理和归档 |
-| PostgreSQL | 权威元数据源 |
-| Redis | 队列、锁、缓存和限流 |
-| Qdrant | 可重建向量索引 |
+| `GET /healthz` | Runtime health for database, Redis, and Qdrant. |
+| `GET /version` | Build version, commit, build time, and dirty flag. |
+| `GET /openapi.json` | Runtime API schema. |
+| `POST /memory/turn-event` | Agent event ingestion. |
+| `POST /memory/search` | Unified retrieval. |
+| `POST /memory/candidates/maintenance/run` | Manual candidate maintenance run. |
+| `POST /memory/kernel/governance/run` | Memory Kernel governance run. |
+| `POST /memory/kernel/context-pack` | Build a Context Pack. |
 
-部署、重启、验证和 T480 日常发布统一按 [DEPLOYMENT.md](DEPLOYMENT.md) 执行。不要把本地私有路径、主机名或密钥写入仓库。
+## Web Console
 
-## 本地验证
+The Nuxt console provides:
 
-后端：
+- workspace-level overview
+- candidate memory review
+- Hot Memory management
+- Archive and retrieval inspection
+- diagnostics for ingestion and maintenance
+- Secret Vault guidance
+- audit and access logs
+- tenant, token, and project settings
+
+The overview aggregates by user/workspace. Deeper workflows still keep project scoping and permission boundaries.
+
+## Deployment
+
+Reference stack:
+
+- Go / Hertz API
+- PostgreSQL
+- Redis
+- Qdrant
+- Nuxt 3 frontend
+- Docker Compose
+
+Typical production services:
+
+| Service | Role |
+| --- | --- |
+| `memory-api` | HTTP API and backend for the console. |
+| `memory-worker` | Background jobs, extraction, maintenance, archive indexing. |
+| `memory-mcp` | Streamable HTTP MCP server. |
+| `memory-web` | Web console. |
+| `postgres` | Metadata source of truth. |
+| `redis` | Queue, locks, cache, rate limiting. |
+| `qdrant` | Rebuildable vector index. |
+
+This repository includes deployment automation for the maintainer's single-node host. Read [DEPLOYMENT.md](DEPLOYMENT.md) before running deployment, restart, or production verification commands.
+
+Common verification commands:
 
 ```bash
 go test ./...
 go vet ./...
-```
-
-前端：
-
-```bash
 npm --prefix frontend run build
-```
-
-安全和格式：
-
-```bash
-make secret-scan
 git diff --check
 ```
 
-运行时检查：
-
-```bash
-curl "$MEMORY_OS_API_URL/version"
-curl "$MEMORY_OS_API_URL/healthz"
-curl "$MEMORY_OS_API_URL/openapi.json"
-curl -X POST "$MEMORY_OS_MCP_URL/mcp" \
-  -H "Authorization: Bearer $MEMORY_OS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
-```
-
-部署后：
+Post-deploy verification:
 
 ```bash
 VERIFY_MODE=full make post-deploy-verify
 ```
 
-## 版本
-
-当前版本：`v0.9`
-
-构建默认版本：`0.9.0-dev`
-
-运行时版本接口：
+Runtime checks:
 
 ```bash
+curl "$MEMORY_OS_API_URL/healthz"
 curl "$MEMORY_OS_API_URL/version"
+curl "$MEMORY_OS_API_URL/openapi.json"
 ```
 
-返回字段：
+## Security Model
 
-```json
-{
-  "version": "0.9.0-dev",
-  "commit": "<git short sha>",
-  "build_time": "<utc timestamp>",
-  "dirty": "false"
-}
-```
+Memory OS is designed around conservative memory safety:
 
-## 安全原则
+- Real API keys, PATs, passwords, cookies, private keys, and tokens must not enter code, logs, Markdown, Qdrant, Hot Memory, README examples, or test snapshots.
+- PAT plaintext is shown only once at creation.
+- Secret plaintext is allowed only in Secret Vault encryption or local decrypt injection paths.
+- Qdrant access must use query-time payload filters.
+- HTTP handlers do protocol/auth/validation/error mapping only.
+- Services own business behavior.
+- Repositories own SQL and transactions.
+- Adapters convert events; they do not write Markdown, Hot Memory, or Qdrant directly.
 
-- 不把真实密钥写入代码、日志、README、测试快照或 MCP 配置示例。
-- PAT 明文只在创建时展示一次。
-- Secret 明文只允许进入 Secret Vault 加密存储或本地解密注入路径。
-- Qdrant 查询必须使用 query-time payload filter。
-- Handler 只做协议、认证、校验和错误映射；业务逻辑在 Service；SQL 和事务在 Repository。
-- Adapter 只转换 TurnEvent，不直接写 Markdown、Hot Memory 或 Qdrant。
-
-## 目录速览
+## Repository Layout
 
 ```text
 cmd/
-  memory-api           HTTP API 和管理台后端
-  memory-worker        后台队列、候选提炼、候选/热记忆 AI 整理和归档
-  memory-mcp           远程 MCP Streamable HTTP 服务
-  memory-mcp-local     stdio MCP 本地代理
+  memory-api          HTTP API
+  memory-worker       background worker
+  memory-mcp          Streamable HTTP MCP server
+  memory-mcp-local    stdio MCP local proxy
+  memory-bootstrap    first-admin bootstrap helper
 
 internal/
-  eventlog             TurnEvent 写入和脱敏
-  candidatememory      候选记忆、AI 整理、归档素材
-  hotmemory            热记忆
-  archive              Markdown Archive
-  retrieval            统一检索
-  qdrant               向量索引和 payload filter
-  secret / secretlocal Secret Vault 和本地解密
-  memorystats          生命周期统计
+  eventlog            TurnEvent ingestion and payload handling
+  candidatememory     candidate extraction, triage, maintenance, archive material
+  hotmemory           short-term high-value memory
+  memorykernel        current facts, governance, context packs
+  archive             Markdown Archive metadata and content
+  retrieval           unified Hot Memory + Archive RAG retrieval
+  qdrant              vector index and payload filtering
+  tenant              users, orgs, projects, permissions
+  secret              encrypted Secret Vault
+  secretlocal         local secret decrypt bridge
+  mcp                 MCP schema and tool handling
+  http                API routes
 
 frontend/
-  Nuxt 3 管理台
+  Nuxt 3 web console
 
 deploy/
-  Docker Compose、Dockerfile、nginx 配置
+  Docker Compose and production container files
 
 scripts/
-  同步、部署、验证、安全扫描脚本
+  verification, deployment, backup, restore, and safety tooling
+
+migrations/
+  PostgreSQL schema migrations
 ```
 
-## 生产判断标准
+## Project Principles
 
-不能只看单个 smoke 结果判断系统健康。至少需要同时确认：
+- Keep memory traceable to source event, archive, chunk, project, thread, and actor.
+- Prefer explicit permission context over inferred trust.
+- Treat Archive as historical evidence and Memory Units as current context.
+- Make production health observable through logs, tables, diagnostics, and verification scripts.
+- Never call a schema-exposed MCP tool "done" until the server handler and downstream path work.
 
-- `/version` 指向预期 commit，且 `dirty=false`。
-- `/healthz` 中 db、redis、qdrant 都为 ok。
-- `memory-worker` 正在运行。
-- candidate job 可以进入 done。
-- 自动 maintenance 可以产生 `auto|done|done` run。
-- `/diagnostics` 可以显示账号级生命周期、candidate job 队列、AI 整理任务状态和最近错误。
-- Archive 可以生成 active 记录。
-- archive index job 可以 completed。
-- `memory_search` 可以通过 MCP 或 HTTP 返回可解释来源。
-- MCP `memory_append_event` 在有 Git workspace 和无 workspace 两种场景都能写入事件；无 workspace 应落到 inbox 项目。
-- MCP `memory_archive` / `memory_mark_used` / `memory_append_event` 的成功写入可以在日志中心看到 `source=mcp` 审计记录。
+## License
+
+No license file is included yet. Treat the repository as private/proprietary unless a license is added.
