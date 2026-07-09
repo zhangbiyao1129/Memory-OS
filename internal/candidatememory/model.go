@@ -33,6 +33,7 @@ const (
 	StatusPromotedToHot Status = "promoted_to_hot" // 自动/手动提升为热记忆
 	StatusInComposePool Status = "in_compose_pool" // 归档素材池
 	StatusComposed      Status = "composed"        // 已归档进 Archive
+	StatusSuperseded    Status = "superseded"      // 被新事实覆盖(Memory Kernel 治理)
 )
 
 // JobStatus 候选提炼任务状态(对应 candidate_memory_jobs.status)。
@@ -63,8 +64,10 @@ type Candidate struct {
 	RiskLevel      RiskLevel
 	Confidence     float64
 	Status         Status
-	NeedsReview    bool // AI 整理判定为待人工确认(needs_review 动作)
-	SimilarRefs    []SimilarRef
+	NeedsReview      bool   // AI 整理判定为待人工确认(needs_review 动作)
+	GovernanceReason string // Memory Kernel 治理原因
+	SupersededBy     string // 被哪个 memory unit 覆盖
+	SimilarRefs      []SimilarRef
 	Scores         Scores
 	CreatedAt      time.Time
 	UpdatedAt      time.Time

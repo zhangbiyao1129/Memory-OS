@@ -41,6 +41,7 @@ type Repository interface {
 	GetCandidate(ctx context.Context, orgID, candidateID string) (Candidate, error)
 	ListCandidates(ctx context.Context, filter ListFilter) ([]Candidate, error)
 	UpdateCandidateStatus(ctx context.Context, orgID, candidateID string, status Status, scores Scores, needsReview bool) (Candidate, error)
+	UpdateCandidateGovernance(ctx context.Context, orgID, candidateID string, status Status, needsReview bool, reason string, supersededBy string) (Candidate, error)
 
 	UpsertJob(ctx context.Context, job Job) (Job, error)
 	LeaseJob(ctx context.Context, now time.Time, lockedBy string, lockTTL time.Duration) (*Job, error)
@@ -162,6 +163,23 @@ func (r *InMemoryRepository) UpdateCandidateStatus(ctx context.Context, orgID, c
 	c.Status = status
 	c.Scores = scores
 	c.NeedsReview = needsReview
+	c.UpdatedAt = time.Now().UTC()
+	r.candidates[key] = c
+	return cloneCandidate(c), nil
+}
+
+func (r *InMemoryRepository) UpdateCandidateGovernance(_ context.Context, orgID, candidateID string, status Status, needsReview bool, reason string, supersededBy string) (Candidate, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := candidateKey(orgID, candidateID)
+	c, ok := r.candidates[key]
+	if !ok {
+		return Candidate{}, ErrNotFound
+	}
+	c.Status = status
+	c.NeedsReview = needsReview
+	c.GovernanceReason = reason
+	c.SupersededBy = supersededBy
 	c.UpdatedAt = time.Now().UTC()
 	r.candidates[key] = c
 	return cloneCandidate(c), nil

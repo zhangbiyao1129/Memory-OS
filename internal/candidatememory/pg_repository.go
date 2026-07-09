@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	candidateColumns = "candidate_id, org_id, project_id, source_key, user_id, agent_id, thread_id, session_id, source_event_ids, memory_type, content, summary, risk_level, confidence, status, similar_refs, scores, needs_review, created_at, updated_at"
+	candidateColumns = "candidate_id, org_id, project_id, source_key, user_id, agent_id, thread_id, session_id, source_event_ids, memory_type, content, summary, risk_level, confidence, status, similar_refs, scores, needs_review, governance_reason, superseded_by, created_at, updated_at"
 	jobColumns       = "id, idempotency_key, org_id, project_id, source_key, source_event_id, status, attempts, max_attempts, locked_by, locked_until, last_error, candidate_ids, created_at, updated_at, completed_at"
 	topicColumns     = "id, org_id, project_id, source_key, thread_id, candidate_count, completion_score, last_event_at, ready_to_compose, composed_archive_id, created_at, updated_at"
 )
@@ -44,14 +44,15 @@ func (r *PGRepository) CreateCandidate(ctx context.Context, c Candidate) (Candid
 	}
 	query := `INSERT INTO candidate_memories (
 		candidate_id, org_id, project_id, source_key, user_id, agent_id, thread_id, session_id,
-		source_event_ids, memory_type, content, summary, risk_level, confidence, status, similar_refs, scores, needs_review
-	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+		source_event_ids, memory_type, content, summary, risk_level, confidence, status, similar_refs, scores, needs_review,
+		governance_reason, superseded_by
+	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
 	ON CONFLICT (candidate_id) DO NOTHING
 	RETURNING ` + candidateColumns
 	row := r.pool.QueryRow(ctx, query,
 		c.CandidateID, c.OrgID, c.ProjectID, c.SourceKey, c.UserID, c.AgentID, c.ThreadID, c.SessionID,
 		c.SourceEventIDs, string(c.MemoryType), c.Content, c.Summary, string(c.RiskLevel), c.Confidence, string(c.Status),
-		similarRefs, scoresBytes, c.NeedsReview,
+		similarRefs, scoresBytes, c.NeedsReview, c.GovernanceReason, c.SupersededBy,
 	)
 	cand, err := scanCandidate(row)
 	if err != nil {
@@ -139,6 +140,16 @@ func (r *PGRepository) UpdateCandidateStatus(ctx context.Context, orgID, candida
 	query := `UPDATE candidate_memories SET status=$1, scores=$2, needs_review=$3, updated_at=now()
 	WHERE org_id=$4 AND candidate_id=$5 RETURNING ` + candidateColumns
 	row := r.pool.QueryRow(ctx, query, string(status), scoresBytes, needsReview, orgID, candidateID)
+	return scanCandidate(row)
+}
+
+func (r *PGRepository) UpdateCandidateGovernance(ctx context.Context, orgID, candidateID string, status Status, needsReview bool, reason string, supersededBy string) (Candidate, error) {
+	if err := r.check(); err != nil {
+		return Candidate{}, err
+	}
+	query := `UPDATE candidate_memories SET status=$1, needs_review=$2, governance_reason=$3, superseded_by=$4, updated_at=now()
+	WHERE org_id=$5 AND candidate_id=$6 RETURNING ` + candidateColumns
+	row := r.pool.QueryRow(ctx, query, string(status), needsReview, reason, supersededBy, orgID, candidateID)
 	return scanCandidate(row)
 }
 
@@ -304,7 +315,7 @@ func scanCandidate(row rowScanner) (Candidate, error) {
 	if err := row.Scan(
 		&c.CandidateID, &c.OrgID, &c.ProjectID, &c.SourceKey, &c.UserID, &c.AgentID, &c.ThreadID, &c.SessionID,
 		&c.SourceEventIDs, &memoryType, &c.Content, &c.Summary, &riskLevel, &c.Confidence, &status,
-		&similarRefs, &scores, &c.NeedsReview, &c.CreatedAt, &c.UpdatedAt,
+		&similarRefs, &scores, &c.NeedsReview, &c.GovernanceReason, &c.SupersededBy, &c.CreatedAt, &c.UpdatedAt,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Candidate{}, ErrNotFound
