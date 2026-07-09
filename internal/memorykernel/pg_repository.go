@@ -642,6 +642,10 @@ func buildCICaseFilter(f CICaseFilter) ([]string, []any) {
 		args = append(args, f.ProjectID)
 		where = append(where, fmt.Sprintf("project_id=$%d", len(args)))
 	}
+	if f.CaseID != "" {
+		args = append(args, f.CaseID)
+		where = append(where, fmt.Sprintf("case_id=$%d", len(args)))
+	}
 	if f.Status != "" {
 		args = append(args, f.Status)
 		where = append(where, fmt.Sprintf("status=$%d", len(args)))

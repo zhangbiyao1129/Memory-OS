@@ -292,6 +292,7 @@ type ActionFilter struct {
 type CICaseFilter struct {
 	OrgID     string
 	ProjectID string
+	CaseID    string
 	Status    string
 	Limit     int
 }
@@ -309,6 +310,7 @@ type GovernanceRequest struct {
 	ProjectID   string
 	SourceKey   string
 	ThreadID    string
+	UserID      string
 	TriggerType string
 }
 

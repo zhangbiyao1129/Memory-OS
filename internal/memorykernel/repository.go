@@ -331,6 +331,9 @@ func (r *InMemoryRepository) ListCICases(_ context.Context, filter CICaseFilter)
 		if filter.ProjectID != "" && c.ProjectID != filter.ProjectID {
 			continue
 		}
+		if filter.CaseID != "" && c.CaseID != filter.CaseID {
+			continue
+		}
 		if filter.Status != "" && c.Status != filter.Status {
 			continue
 		}
