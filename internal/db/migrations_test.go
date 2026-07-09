@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"strings"
 	"testing"
 	"testing/fstest"
 
@@ -108,6 +109,32 @@ func TestEmbeddedMigrationFSContainsSQLFiles(t *testing.T) {
 func TestRunEmbeddedMigrationsRejectsNilPool(t *testing.T) {
 	if err := RunEmbeddedMigrations(context.Background(), nil); err == nil {
 		t.Fatal("RunEmbeddedMigrations() error = nil, want nil pool rejection")
+	}
+}
+
+func TestEmbeddedMigrationsContainExpectedSchema(t *testing.T) {
+	files, err := MigrationFiles(EmbeddedMigrationFS())
+	if err != nil {
+		t.Fatalf("MigrationFiles() error = %v", err)
+	}
+	allSQL := ""
+	for _, f := range files {
+		allSQL += f.SQL + "\n"
+	}
+	required := []string{
+		"CREATE TABLE IF NOT EXISTS memory_units",
+		"CREATE TABLE IF NOT EXISTS memory_claims",
+		"CREATE TABLE IF NOT EXISTS memory_governance_runs",
+		"CREATE TABLE IF NOT EXISTS memory_governance_actions",
+		"CREATE TABLE IF NOT EXISTS memory_ci_cases",
+		"CREATE TABLE IF NOT EXISTS memory_ci_results",
+		"CREATE INDEX IF NOT EXISTS memory_units_scope_status_idx",
+		"CREATE UNIQUE INDEX IF NOT EXISTS memory_claims_unit_subject_predicate_unique",
+	}
+	for _, r := range required {
+		if !strings.Contains(allSQL, r) {
+			t.Errorf("embedded migrations missing %q", r)
+		}
 	}
 }
 
