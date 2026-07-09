@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"memory-os/internal/hotmemory"
+	"memory-os/internal/memorykernel"
 	"memory-os/internal/retrieval"
 )
 
@@ -23,17 +24,19 @@ type ToolResponse struct {
 }
 
 type HandlerOptions struct {
-	Retrieval retrieval.Service
-	HotMemory hotmemory.Service
+	Retrieval         retrieval.Service
+	HotMemory         hotmemory.Service
+	ContextPackService memorykernel.ContextPackService
 }
 
 type Handler struct {
-	retrieval retrieval.Service
-	hotMemory hotmemory.Service
+	retrieval          retrieval.Service
+	hotMemory          hotmemory.Service
+	contextPackService memorykernel.ContextPackService
 }
 
 func NewHandler(options HandlerOptions) Handler {
-	return Handler{retrieval: options.Retrieval, hotMemory: options.HotMemory}
+	return Handler{retrieval: options.Retrieval, hotMemory: options.HotMemory, contextPackService: options.ContextPackService}
 }
 
 func Tools() []Tool {
@@ -44,6 +47,7 @@ func Tools() []Tool {
 		{Name: "memory_get_archive", Description: "Get a Markdown archive", InputSchema: memoryGetArchiveSchema()},
 		{Name: "memory_mark_used", Description: "Mark memory result as used", InputSchema: objectSchema()},
 		{Name: "memory_stats", Description: "Get Memory OS statistics", InputSchema: memoryStatsSchema()},
+		{Name: "memory_context_pack", Description: "Build task-oriented Memory OS context pack", InputSchema: memoryContextPackSchema()},
 	}
 }
 
@@ -82,6 +86,31 @@ func (h Handler) HandleTool(name string, args map[string]any) ToolResponse {
 				}
 				return ToolResponse{Code: "ok", Result: updated}
 			}
+			if name == "memory_context_pack" {
+				if h.contextPackService == nil {
+					return ToolResponse{Code: "context_pack_not_configured", Error: "context pack service is not configured"}
+				}
+				query, _ := args["query"].(string)
+				if query == "" {
+					return ToolResponse{Code: "invalid_request", Error: "query is required"}
+				}
+				actor, _ := args["actor"].(map[string]any)
+				orgID := ""
+				projectID := ""
+				if actor != nil {
+					orgID = stringValue(actor["org_id"])
+					projectID = stringValue(actor["project_id"])
+				}
+				pack, err := h.contextPackService.Build(nil, memorykernel.ContextPackRequest{
+					OrgID:     orgID,
+					ProjectID: projectID,
+					Query:     query,
+				})
+				if err != nil {
+					return ToolResponse{Code: "context_pack_failed", Error: err.Error()}
+				}
+				return ToolResponse{Code: "ok", Result: pack}
+			}
 			return ToolResponse{Code: "not_implemented", Error: "MCP tool is not implemented in phase 1"}
 		}
 	}
@@ -99,6 +128,21 @@ func memoryStatsSchema() map[string]any {
 			"org_id":     map[string]any{"type": "string"},
 			"project_id": map[string]any{"type": "string"},
 		},
+		"additionalProperties": true,
+	}
+}
+
+func memoryContextPackSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"request_id":         map[string]any{"type": "string"},
+			"query":              map[string]any{"type": "string"},
+			"workspace":          workspaceSchema(),
+			"actor":              actorSchema(),
+			"max_context_bytes":  map[string]any{"type": "integer", "minimum": 1},
+		},
+		"required":             []any{"query"},
 		"additionalProperties": true,
 	}
 }
