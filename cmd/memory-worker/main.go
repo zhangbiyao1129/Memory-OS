@@ -18,8 +18,10 @@ import (
 	"memory-os/internal/jobs"
 	"memory-os/internal/llm"
 	"memory-os/internal/logger"
+	"memory-os/internal/memorykernel"
 	"memory-os/internal/qdrant"
 	"memory-os/internal/rag"
+	"memory-os/internal/retrieval"
 	"memory-os/internal/tenant"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -194,6 +196,7 @@ func buildWorker(cfg config.Config) (*jobs.Runner, error) {
 	var candidateQueue jobs.CandidateMemoryQueue
 	var autoMaintenance jobs.AutoMaintenance
 	var hotMemoryMaintenance jobs.HotMemoryMaintenance
+	var memoryKernelMaintenance jobs.MemoryKernelMaintenance
 	var cleanup func()
 	if cfg.PostgresDSN != "" {
 		pool, err := newPostgresPool(context.Background(), cfg.PostgresDSN)
@@ -252,9 +255,28 @@ func buildWorker(cfg config.Config) (*jobs.Runner, error) {
 			if service, ok := autoMaintenance.(*candidatememory.MaintenanceService); ok {
 				service.WithTriage(triageService)
 			}
+
+			kernelRepo := memorykernel.NewPGRepository(pool)
+			contextPack := memorykernel.NewContextPackBuilder(kernelRepo)
+			kernelCollector := memorykernel.NewCollector(memorykernel.CollectorOptions{
+				Candidates:    memorykernel.NewCandidateSource(candidateRepo),
+				HotMemories:   memorykernel.NewHotMemorySource(hotMemoryService),
+				Archives:      memorykernel.NewArchiveSource(archive.NewPGRepository(pool)),
+				Retrievals:    memorykernel.NewRetrievalSource(retrieval.NewPGAccessLog(pool)),
+				ExistingUnits: kernelRepo,
+			})
+			memoryKernelMaintenance = memorykernel.NewService(memorykernel.ServiceOptions{
+				Repository:       kernelRepo,
+				Collector:        kernelCollector,
+				Classifier:       memorykernel.NewLLMClassifier(llmClient).WithModel(cfg.LLMModel),
+				CandidateApplier: memorykernel.NewCandidateApplier(candidateRepo),
+				HotMemoryApplier: memorykernel.NewHotMemoryApplier(hotMemoryService),
+				ArchiveCreator:   memorykernel.NewCorrectionArchiveCreator(kernelRepo, archiveService),
+				CIRunner:         memorykernel.NewProductionCIRunner(kernelRepo, contextPack),
+			})
 		}
 	}
-	runner := jobs.NewRunner(jobs.Options{Concurrency: 1, ArchiveWorker: archiveWorker, ArchiveQueue: archiveQueue, RAGIndexWorker: ragIndexWorker, RAGIndexQueue: ragIndexQueue, CandidateWorker: candidateWorker, CandidateQueue: candidateQueue, AutoMaintenance: autoMaintenance, HotMemoryMaintenance: hotMemoryMaintenance, AutoMaintenanceInterval: 5 * time.Minute, HotMemoryMaintenanceInterval: 30 * time.Minute, Cleanup: cleanup})
+	runner := jobs.NewRunner(jobs.Options{Concurrency: 1, ArchiveWorker: archiveWorker, ArchiveQueue: archiveQueue, RAGIndexWorker: ragIndexWorker, RAGIndexQueue: ragIndexQueue, CandidateWorker: candidateWorker, CandidateQueue: candidateQueue, AutoMaintenance: autoMaintenance, HotMemoryMaintenance: hotMemoryMaintenance, MemoryKernelMaintenance: memoryKernelMaintenance, AutoMaintenanceInterval: 5 * time.Minute, HotMemoryMaintenanceInterval: 30 * time.Minute, MemoryKernelMaintenanceInterval: 15 * time.Minute, Cleanup: cleanup})
 	return &runner, nil
 }
 

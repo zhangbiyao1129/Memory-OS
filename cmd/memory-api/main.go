@@ -291,95 +291,29 @@ func routerOptions(cfg config.Config, healthService health.Service, pool *pgxpoo
 	llmClient, llmErr := llm.NewOpenAICompatible(llm.OpenAICompatibleConfig{BaseURL: cfg.LLMBaseURL, APIKey: cfg.LLMAPIKey, LLMModel: model, EmbeddingModel: cfg.EmbeddingModel, Timeout: 5 * time.Minute})
 	if llmErr == nil {
 		kernelCollector := memorykernel.NewCollector(memorykernel.CollectorOptions{
-			Candidates:    &kernelCandidateAdapter{repo: candidateRepo},
-			HotMemories:   &kernelHotMemoryAdapter{},
-			Archives:      &kernelArchiveAdapter{repo: archive.NewPGRepository(pool)},
-			Retrievals:    &kernelRetrievalAdapter{log: accessLog},
+			Candidates:    memorykernel.NewCandidateSource(candidateRepo),
+			HotMemories:   memorykernel.NewHotMemorySource(hot),
+			Archives:      memorykernel.NewArchiveSource(archive.NewPGRepository(pool)),
+			Retrievals:    memorykernel.NewRetrievalSource(accessLog),
 			ExistingUnits: kernelRepo,
 		})
 		kernelClassifier := memorykernel.NewLLMClassifier(llmClient).WithModel(model)
+		contextPackService := memorykernel.NewContextPackBuilder(kernelRepo)
 		kernelService := memorykernel.NewService(memorykernel.ServiceOptions{
 			Repository:       kernelRepo,
 			Collector:        kernelCollector,
 			Classifier:       kernelClassifier,
-			CandidateApplier: &kernelCandidateApplier{repo: candidateRepo},
+			CandidateApplier: memorykernel.NewCandidateApplier(candidateRepo),
+			HotMemoryApplier: memorykernel.NewHotMemoryApplier(hot),
+			ArchiveCreator:   memorykernel.NewCorrectionArchiveCreator(kernelRepo, options.ArchiveService),
+			CIRunner:         memorykernel.NewProductionCIRunner(kernelRepo, contextPackService),
 		})
 		options.MemoryKernelService = kernelService
-		options.ContextPackService = memorykernel.NewContextPackBuilder(kernelRepo)
+		options.ContextPackService = contextPackService
 	}
 	return options, nil
 }
 
 func productionAccessLog(pool *pgxpool.Pool) *retrieval.PGAccessLog {
 	return retrieval.NewPGAccessLog(pool)
-}
-
-// --- Memory Kernel adapters ---
-
-type kernelCandidateAdapter struct {
-	repo candidatememory.Repository
-}
-
-func (a *kernelCandidateAdapter) ListKernelCandidates(ctx context.Context, scope memorykernel.Scope, limit int) ([]memorykernel.CandidateInput, error) {
-	candidates, err := a.repo.ListCandidates(ctx, candidatememory.ListFilter{OrgID: scope.OrgID, ProjectID: scope.ProjectID, SourceKey: scope.SourceKey, Limit: limit})
-	if err != nil {
-		return nil, err
-	}
-	var out []memorykernel.CandidateInput
-	for _, c := range candidates {
-		out = append(out, memorykernel.CandidateInput{
-			ID: c.CandidateID, Content: c.Content, Summary: c.Summary,
-			Type: string(c.MemoryType), RiskLevel: string(c.RiskLevel), Status: string(c.Status), Confidence: c.Confidence,
-		})
-	}
-	return out, nil
-}
-
-type kernelHotMemoryAdapter struct{}
-
-func (a *kernelHotMemoryAdapter) ListKernelHotMemories(_ context.Context, _ memorykernel.Scope, _ int) ([]memorykernel.HotMemoryInput, error) {
-	return nil, nil
-}
-
-type kernelArchiveAdapter struct {
-	repo archive.Repository
-}
-
-func (a *kernelArchiveAdapter) ListKernelArchives(_ context.Context, scope memorykernel.Scope, limit int) ([]memorykernel.ArchiveInput, error) {
-	archives, err := a.repo.List(archive.ListFilter{OrgID: scope.OrgID, ProjectID: scope.ProjectID, Limit: limit})
-	if err != nil {
-		return nil, err
-	}
-	var out []memorykernel.ArchiveInput
-	for _, a := range archives {
-		out = append(out, memorykernel.ArchiveInput{ID: a.ArchiveID, Title: a.Title, Status: a.Status, UpdatedAt: a.UpdatedAt})
-	}
-	return out, nil
-}
-
-type kernelRetrievalAdapter struct {
-	log retrieval.AccessLogReader
-}
-
-func (a *kernelRetrievalAdapter) ListKernelRetrievals(_ context.Context, scope memorykernel.Scope, limit int) ([]memorykernel.RetrievalInput, error) {
-	if a.log == nil {
-		return nil, nil
-	}
-	results, err := a.log.ListResults(retrieval.AccessLogListFilter{OrgID: scope.OrgID, ProjectID: scope.ProjectID, Limit: limit})
-	if err != nil {
-		return nil, err
-	}
-	var out []memorykernel.RetrievalInput
-	for _, r := range results {
-		out = append(out, memorykernel.RetrievalInput{RequestID: r.RequestID, SourceKind: r.SourceKind, CreatedAt: r.CreatedAt})
-	}
-	return out, nil
-}
-
-type kernelCandidateApplier struct {
-	repo candidatememory.Repository
-}
-
-func (a *kernelCandidateApplier) UpdateCandidateGovernance(ctx context.Context, orgID, candidateID string, status interface{}, needsReview bool, reason string, supersededBy string) (interface{}, error) {
-	return a.repo.UpdateCandidateGovernance(ctx, orgID, candidateID, candidatememory.Status(status.(string)), needsReview, reason, supersededBy)
 }

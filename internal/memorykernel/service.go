@@ -100,6 +100,7 @@ func (s *Service) RunGovernance(ctx context.Context, req GovernanceRequest) (Gov
 		ProjectID: req.ProjectID,
 		SourceKey: req.SourceKey,
 		ThreadID:  req.ThreadID,
+		UserID:    req.UserID,
 	}
 
 	// 1. collect
@@ -118,11 +119,11 @@ func (s *Service) RunGovernance(ctx context.Context, req GovernanceRequest) (Gov
 
 	// 3. apply actions and upsert units/claims
 	update := GovernanceRunUpdate{
-		Status:              RunDone,
-		ProcessedCandidates: len(input.Candidates),
+		Status:               RunDone,
+		ProcessedCandidates:  len(input.Candidates),
 		ProcessedHotMemories: len(input.HotMemories),
-		ProcessedArchives:   len(input.Archives),
-		Summary:             result.Summary,
+		ProcessedArchives:    len(input.Archives),
+		Summary:              result.Summary,
 	}
 
 	for _, unit := range result.Units {
@@ -130,6 +131,12 @@ func (s *Service) RunGovernance(ctx context.Context, req GovernanceRequest) (Gov
 		unit.ProjectID = req.ProjectID
 		if unit.UserID == "" {
 			unit.UserID = req.UserID
+		}
+		if unit.SourceKey == "" {
+			unit.SourceKey = req.SourceKey
+		}
+		if unit.ThreadID == "" {
+			unit.ThreadID = req.ThreadID
 		}
 		if _, err := s.repository.UpsertUnit(ctx, unit); err != nil {
 			_ = s.repository.FailRun(ctx, runID, err)
@@ -155,9 +162,13 @@ func (s *Service) RunGovernance(ctx context.Context, req GovernanceRequest) (Gov
 
 	for i := range result.Actions {
 		action := &result.Actions[i]
-		if err := s.applyAction(ctx, action); err != nil {
+		correctionArchiveID, err := s.applyAction(ctx, req, result, action)
+		if err != nil {
 			_ = s.repository.FailRun(ctx, runID, err)
 			return run, fmt.Errorf("apply action %s: %w", action.ActionID, err)
+		}
+		if correctionArchiveID != "" {
+			update.CorrectionArchiveID = correctionArchiveID
 		}
 		if _, err := s.repository.RecordAction(ctx, *action); err != nil {
 			_ = s.repository.FailRun(ctx, runID, err)
@@ -217,11 +228,12 @@ func (s *Service) RunGovernance(ctx context.Context, req GovernanceRequest) (Gov
 	run.DemotedHotMemories = update.DemotedHotMemories
 	run.CICasesCreated = update.CICasesCreated
 	run.CICasesPassed = update.CICasesPassed
+	run.CorrectionArchiveID = update.CorrectionArchiveID
 	run.Summary = update.Summary
 	return run, nil
 }
 
-func (s *Service) applyAction(ctx context.Context, action *GovernanceAction) error {
+func (s *Service) applyAction(ctx context.Context, req GovernanceRequest, result ClassifyResult, action *GovernanceAction) (string, error) {
 	action.Applied = true // 默认已应用，特殊情况设为 false
 
 	switch action.Action {
@@ -229,7 +241,7 @@ func (s *Service) applyAction(ctx context.Context, action *GovernanceAction) err
 		if s.candidateApplier != nil && action.TargetType == "candidate" {
 			_, err := s.candidateApplier.UpdateCandidateGovernance(ctx, action.OrgID, action.TargetID, "discarded", false, action.Reason, "")
 			if err != nil {
-				return err
+				return "", err
 			}
 		}
 	case ActionMarkSuperseded:
@@ -243,18 +255,18 @@ func (s *Service) applyAction(ctx context.Context, action *GovernanceAction) err
 			}
 			_, err := s.candidateApplier.UpdateCandidateGovernance(ctx, action.OrgID, action.TargetID, "superseded", false, action.Reason, supersededBy)
 			if err != nil {
-				return err
+				return "", err
 			}
 		}
 	case ActionDemoteHotMemory:
 		if s.hotMemoryApplier != nil && action.TargetType == "hot_memory" {
 			hm, err := s.hotMemoryApplier.Get(action.TargetID)
 			if err != nil {
-				return err
+				return "", err
 			}
 			if hm.Pinned {
 				action.Applied = false
-				return nil
+				return "", nil
 			}
 			if hm.Status == "active" || hm.Status == "promoted" {
 				_, err := s.hotMemoryApplier.Update(HotMemoryUpdateRequest{
@@ -262,37 +274,64 @@ func (s *Service) applyAction(ctx context.Context, action *GovernanceAction) err
 					Status:   "demoted",
 				})
 				if err != nil {
-					return err
+					return "", err
 				}
 			}
 		}
 	case ActionCreateCorrection:
 		if s.archiveCreator != nil {
-			result, err := s.archiveCreator.CreateCorrectionArchive(ctx, CorrectionArchiveRequest{
+			archiveResult, err := s.archiveCreator.CreateCorrectionArchive(ctx, CorrectionArchiveRequest{
 				OrgID:     action.OrgID,
 				ProjectID: action.ProjectID,
+				SourceKey: req.SourceKey,
+				ThreadID:  req.ThreadID,
+				UserID:    req.UserID,
+				Units:     result.Units,
+				Actions:   result.Actions,
 			})
 			if err != nil {
-				return err
+				return "", err
 			}
-			_ = result // correction archive ID 记录在 run 中
+			return archiveResult.ArchiveID, nil
 		}
 	case ActionNeedsReview:
 		if s.candidateApplier != nil && action.TargetType == "candidate" {
 			_, err := s.candidateApplier.UpdateCandidateGovernance(ctx, action.OrgID, action.TargetID, "pending", true, action.Reason, "")
 			if err != nil {
-				return err
+				return "", err
 			}
 		}
 	}
-	return nil
+	return "", nil
 }
 
 // RunAutoGovernance 扫描最近活跃 scope 并自动运行治理。
 func (s *Service) RunAutoGovernance(ctx context.Context) (int, error) {
-	// 第一版简化实现：只对有 current units 的 scope 运行
-	// 生产版需要扫描最近 24 小时有活动的 scope
-	return 0, nil
+	units, err := s.repository.ListUnits(ctx, UnitFilter{Status: string(UnitCurrent), Limit: 500})
+	if err != nil {
+		return 0, err
+	}
+	seen := map[string]bool{}
+	count := 0
+	for _, unit := range units {
+		scopeKey := unit.OrgID + "\x00" + unit.ProjectID + "\x00" + unit.SourceKey + "\x00" + unit.ThreadID + "\x00" + unit.UserID
+		if seen[scopeKey] {
+			continue
+		}
+		seen[scopeKey] = true
+		if _, err := s.RunGovernance(ctx, GovernanceRequest{
+			OrgID:       unit.OrgID,
+			ProjectID:   unit.ProjectID,
+			SourceKey:   unit.SourceKey,
+			ThreadID:    unit.ThreadID,
+			UserID:      unit.UserID,
+			TriggerType: "auto",
+		}); err != nil {
+			return count, err
+		}
+		count++
+	}
+	return count, nil
 }
 
 // GetRun 获取治理运行详情。

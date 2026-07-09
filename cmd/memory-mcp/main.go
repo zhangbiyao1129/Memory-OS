@@ -23,6 +23,7 @@ import (
 	"memory-os/internal/llm"
 	"memory-os/internal/logger"
 	"memory-os/internal/mcp"
+	"memory-os/internal/memorykernel"
 	"memory-os/internal/memorystats"
 	"memory-os/internal/qdrant"
 	"memory-os/internal/rag"
@@ -179,7 +180,11 @@ func buildServerWithPool(cfg config.Config, pool *pgxpool.Pool) (*Server, error)
 		if err != nil {
 			return nil, err
 		}
-		handler = mcp.NewHandler(mcp.HandlerOptions{Retrieval: service, HotMemory: hot})
+		handler = mcp.NewHandler(mcp.HandlerOptions{
+			Retrieval:          service,
+			HotMemory:          hot,
+			ContextPackService: newProductionContextPackService(pool),
+		})
 		authService = auth.NewService(auth.NewPGRepository(pool))
 		tenantService = tenant.NewService(tenant.NewPGRepository(pool))
 		auditService = audit.NewService(audit.NewPGRepository(pool))
@@ -232,6 +237,10 @@ var newProductionRetrieval = func(cfg config.Config, pool *pgxpool.Pool) (retrie
 	accessLog := retrieval.NewPGAccessLog(pool)
 	service := retrieval.NewService(retrieval.Options{HotMemory: hot, ArchiveRAG: archiveRAG, ArchiveGenerationResolver: retrieval.NewPGArchiveGenerationResolver(pool), Reranker: newProductionReranker(cfg), AccessLog: accessLog, MinRerankScore: cfg.RerankMinScore})
 	return service, hot, nil
+}
+
+var newProductionContextPackService = func(pool *pgxpool.Pool) memorykernel.ContextPackService {
+	return memorykernel.NewContextPackBuilder(memorykernel.NewPGRepository(pool))
 }
 
 var newProductionReranker = func(cfg config.Config) retrieval.Reranker {
@@ -381,10 +390,10 @@ func (s *Server) authorizeToolCallForMCP(r *http.Request, name string, args map[
 	if !ok {
 		return false
 	}
-	if name != "memory_search" {
+	if name != "memory_search" && name != "memory_context_pack" {
 		return true
 	}
-	ok, _ = s.applyMemorySearchPermissions(record, r, args)
+	ok, _ = s.applyProjectToolPermissions(record, r, args)
 	return ok
 }
 
@@ -812,10 +821,10 @@ func (s *Server) authorizeToolCall(w http.ResponseWriter, r *http.Request, name 
 	if name == "memory_mark_used" || name == "memory_append_event" || name == "memory_archive" {
 		return true
 	}
-	if name != "memory_search" {
+	if name != "memory_search" && name != "memory_context_pack" {
 		return true
 	}
-	ok, err := s.applyMemorySearchPermissions(record, r, args)
+	ok, err := s.applyProjectToolPermissions(record, r, args)
 	if ok {
 		return true
 	}
@@ -829,7 +838,7 @@ func (s *Server) authorizeToolCall(w http.ResponseWriter, r *http.Request, name 
 	return false
 }
 
-func (s *Server) applyMemorySearchPermissions(record auth.PATRecord, r *http.Request, args map[string]any) (bool, error) {
+func (s *Server) applyProjectToolPermissions(record auth.PATRecord, r *http.Request, args map[string]any) (bool, error) {
 	actor, ok := args["actor"].(map[string]any)
 	if !ok {
 		actor = map[string]any{}

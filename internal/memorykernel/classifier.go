@@ -18,44 +18,44 @@ type Classifier interface {
 
 // allowedActions 治理动作白名单。
 var allowedActions = map[GovernanceActionName]bool{
-	ActionKeep:                true,
-	ActionDiscardNoise:        true,
-	ActionDiscardStale:        true,
-	ActionMarkSuperseded:      true,
-	ActionDemoteHotMemory:     true,
-	ActionCreateUnit:          true,
-	ActionSupersedeUnit:       true,
-	ActionCreateCorrection:    true,
-	ActionCreateCICase:        true,
-	ActionNeedsReview:         true,
+	ActionKeep:             true,
+	ActionDiscardNoise:     true,
+	ActionDiscardStale:     true,
+	ActionMarkSuperseded:   true,
+	ActionDemoteHotMemory:  true,
+	ActionCreateUnit:       true,
+	ActionSupersedeUnit:    true,
+	ActionCreateCorrection: true,
+	ActionCreateCICase:     true,
+	ActionNeedsReview:      true,
 }
 
 // highRiskAllowedActions 高风险 candidate 只允许这些动作。
 var highRiskAllowedActions = map[GovernanceActionName]bool{
-	ActionKeep:          true,
-	ActionNeedsReview:   true,
-	ActionCreateUnit:    true,
+	ActionKeep:        true,
+	ActionNeedsReview: true,
+	ActionCreateUnit:  true,
 }
 
 type llmClassifyResponse struct {
-	Units   []MemoryUnitJSON   `json:"units"`
-	Claims  []MemoryClaimJSON  `json:"claims"`
+	Units   []MemoryUnitJSON       `json:"units"`
+	Claims  []MemoryClaimJSON      `json:"claims"`
 	Actions []GovernanceActionJSON `json:"actions"`
-	CICases []CICaseJSON       `json:"ci_cases"`
-	Summary string             `json:"summary"`
+	CICases []CICaseJSON           `json:"ci_cases"`
+	Summary string                 `json:"summary"`
 }
 
 type MemoryUnitJSON struct {
-	UnitID      string        `json:"unit_id"`
-	Type        string        `json:"type"`
-	Content     string        `json:"content"`
-	AppliesWhen string        `json:"applies_when"`
-	AgentShould string        `json:"agent_should"`
-	Status      string        `json:"status"`
-	Confidence  float64       `json:"confidence"`
-	TrustScore  float64       `json:"trust_score"`
-	RiskLevel   string        `json:"risk_level"`
-	SourceRefs  []SourceRef   `json:"source_refs"`
+	UnitID      string      `json:"unit_id"`
+	Type        string      `json:"type"`
+	Content     string      `json:"content"`
+	AppliesWhen string      `json:"applies_when"`
+	AgentShould string      `json:"agent_should"`
+	Status      string      `json:"status"`
+	Confidence  float64     `json:"confidence"`
+	TrustScore  float64     `json:"trust_score"`
+	RiskLevel   string      `json:"risk_level"`
+	SourceRefs  []SourceRef `json:"source_refs"`
 }
 
 type MemoryClaimJSON struct {
@@ -193,6 +193,9 @@ func (c *LLMClassifier) parseResponse(text string, input ClassifyInput) (Classif
 		if uj.UnitID == "" || uj.Content == "" {
 			return ClassifyResult{}, errors.New("unit_id and content are required")
 		}
+		if err := validateSourceRefs("unit source refs", uj.SourceRefs, validIDs); err != nil {
+			return ClassifyResult{}, err
+		}
 		unit := MemoryUnit{
 			UnitID:      uj.UnitID,
 			OrgID:       input.Scope.OrgID,
@@ -211,9 +214,16 @@ func (c *LLMClassifier) parseResponse(text string, input ClassifyInput) (Classif
 		result.Units = append(result.Units, unit)
 	}
 
+	validUnitIDs := buildValidUnitIDSet(input, result.Units)
 	for _, cj := range resp.Claims {
 		if cj.ClaimID == "" || cj.UnitID == "" || cj.Subject == "" || cj.Predicate == "" {
 			return ClassifyResult{}, errors.New("claim_id, unit_id, subject, predicate are required")
+		}
+		if !validUnitIDs[cj.UnitID] {
+			return ClassifyResult{}, fmt.Errorf("claim unit_id %q not found in input or generated units", cj.UnitID)
+		}
+		if err := validateSourceRefs("claim evidence refs", cj.EvidenceRefs, validIDs); err != nil {
+			return ClassifyResult{}, err
 		}
 		claim := MemoryClaim{
 			ClaimID:      cj.ClaimID,
@@ -245,6 +255,12 @@ func (c *LLMClassifier) parseResponse(text string, input ClassifyInput) (Classif
 		// 高风险 candidate 校验
 		if isHighRiskCandidate(aj.TargetID, input) && !highRiskAllowedActions[actionName] {
 			return ClassifyResult{}, fmt.Errorf("action %s not allowed for high risk candidate %q", aj.Action, aj.TargetID)
+		}
+		if err := validateSourceRefs("action evidence refs", aj.EvidenceRefs, validIDs); err != nil {
+			return ClassifyResult{}, err
+		}
+		if actionName == ActionCreateUnit && isHighRiskCandidate(aj.TargetID, input) && !allUnitsNeedReview(result.Units) {
+			return ClassifyResult{}, fmt.Errorf("high risk candidate %q create_memory_unit requires generated units status=needs_review", aj.TargetID)
 		}
 		action := GovernanceAction{
 			ActionID:     aj.ActionID,
@@ -293,7 +309,46 @@ func buildValidIDSet(input ClassifyInput) map[string]bool {
 	for _, u := range input.ExistingUnits {
 		ids[u.UnitID] = true
 	}
+	for _, r := range input.Retrievals {
+		ids[r.RequestID] = true
+		if r.SourceID != "" {
+			ids[r.SourceID] = true
+		}
+	}
 	return ids
+}
+
+func buildValidUnitIDSet(input ClassifyInput, generated []MemoryUnit) map[string]bool {
+	ids := map[string]bool{}
+	for _, u := range input.ExistingUnits {
+		ids[u.UnitID] = true
+	}
+	for _, u := range generated {
+		ids[u.UnitID] = true
+	}
+	return ids
+}
+
+func validateSourceRefs(label string, refs []SourceRef, validIDs map[string]bool) error {
+	for _, ref := range refs {
+		id := strings.TrimSpace(ref.ID)
+		if id == "" || !validIDs[id] {
+			return fmt.Errorf("%s contain id %q not found in input", label, ref.ID)
+		}
+	}
+	return nil
+}
+
+func allUnitsNeedReview(units []MemoryUnit) bool {
+	if len(units) == 0 {
+		return false
+	}
+	for _, unit := range units {
+		if unit.Status != UnitNeedsReview {
+			return false
+		}
+	}
+	return true
 }
 
 func isHighRiskCandidate(targetID string, input ClassifyInput) bool {

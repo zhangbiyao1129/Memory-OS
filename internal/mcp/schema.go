@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -24,8 +25,8 @@ type ToolResponse struct {
 }
 
 type HandlerOptions struct {
-	Retrieval         retrieval.Service
-	HotMemory         hotmemory.Service
+	Retrieval          retrieval.Service
+	HotMemory          hotmemory.Service
 	ContextPackService memorykernel.ContextPackService
 }
 
@@ -101,10 +102,11 @@ func (h Handler) HandleTool(name string, args map[string]any) ToolResponse {
 					orgID = stringValue(actor["org_id"])
 					projectID = stringValue(actor["project_id"])
 				}
-				pack, err := h.contextPackService.Build(nil, memorykernel.ContextPackRequest{
-					OrgID:     orgID,
-					ProjectID: projectID,
-					Query:     query,
+				pack, err := h.contextPackService.Build(context.Background(), memorykernel.ContextPackRequest{
+					OrgID:           orgID,
+					ProjectID:       projectID,
+					Query:           query,
+					MaxContextBytes: intValue(args["max_context_bytes"]),
 				})
 				if err != nil {
 					return ToolResponse{Code: "context_pack_failed", Error: err.Error()}
@@ -136,11 +138,11 @@ func memoryContextPackSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"request_id":         map[string]any{"type": "string"},
-			"query":              map[string]any{"type": "string"},
-			"workspace":          workspaceSchema(),
-			"actor":              actorSchema(),
-			"max_context_bytes":  map[string]any{"type": "integer", "minimum": 1},
+			"request_id":        map[string]any{"type": "string"},
+			"query":             map[string]any{"type": "string"},
+			"workspace":         workspaceSchema(),
+			"actor":             actorSchema(),
+			"max_context_bytes": map[string]any{"type": "integer", "minimum": 1},
 		},
 		"required":             []any{"query"},
 		"additionalProperties": true,

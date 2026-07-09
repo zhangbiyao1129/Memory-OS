@@ -5093,29 +5093,16 @@ func MemoryKernelGovernanceRunHandler(service *memorykernel.Service, authService
 			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_request"})
 			return
 		}
-		if authService.Configured() {
-			record, ok := authorizePAT(c, authService, "memory:write", "kernel_governance_forbidden")
-			if !ok {
-				return
-			}
-			if request.OrgID == "" {
-				request.OrgID = record.SubjectID
-			}
-		}
-		if tenantService.Configured() {
-			permissions, err := tenantService.PermissionContext(request.OrgID, request.OrgID, request.ProjectID, "")
-			if err != nil {
-				c.JSON(consts.StatusForbidden, map[string]string{"error": "kernel_governance_forbidden"})
-				return
-			}
-			request.OrgID = permissions.OrgID
-			request.ProjectID = permissions.ProjectID
+		permissions, ok := authorizeProjectScope(c, authService, tenantService, request.OrgID, request.ProjectID, "memory:write", "project:"+request.ProjectID+":write", "kernel_governance_forbidden")
+		if !ok {
+			return
 		}
 		run, err := service.RunGovernance(ctx, memorykernel.GovernanceRequest{
-			OrgID:       request.OrgID,
-			ProjectID:   request.ProjectID,
+			OrgID:       permissions.OrgID,
+			ProjectID:   permissions.ProjectID,
 			SourceKey:   request.SourceKey,
 			ThreadID:    request.ThreadID,
+			UserID:      permissions.UserID,
 			TriggerType: request.TriggerType,
 		})
 		if err != nil {
@@ -5182,17 +5169,16 @@ func MemoryKernelUnitListHandler(service *memorykernel.Service, authService auth
 			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_request"})
 			return
 		}
-		if authService.Configured() {
-			if _, ok := authorizePAT(c, authService, "memory:read", "kernel_units_forbidden"); !ok {
-				return
-			}
+		permissions, ok := authorizeProjectScope(c, authService, tenantService, request.OrgID, request.ProjectID, "memory:read", "", "kernel_units_forbidden")
+		if !ok {
+			return
 		}
 		if request.Limit <= 0 {
 			request.Limit = 50
 		}
 		units, err := service.ListUnits(ctx, memorykernel.UnitFilter{
-			OrgID:     request.OrgID,
-			ProjectID: request.ProjectID,
+			OrgID:     permissions.OrgID,
+			ProjectID: permissions.ProjectID,
 			Status:    request.Status,
 			Limit:     request.Limit,
 		})
@@ -5219,14 +5205,13 @@ func MemoryKernelContextPackHandler(cps memorykernel.ContextPackService, authSer
 			c.JSON(consts.StatusBadRequest, map[string]string{"error": "invalid_request"})
 			return
 		}
-		if authService.Configured() {
-			if _, ok := authorizePAT(c, authService, "memory:read", "kernel_context_pack_forbidden"); !ok {
-				return
-			}
+		permissions, ok := authorizeProjectScope(c, authService, tenantService, request.OrgID, request.ProjectID, "memory:read", "", "kernel_context_pack_forbidden")
+		if !ok {
+			return
 		}
 		pack, err := cps.Build(ctx, memorykernel.ContextPackRequest{
-			OrgID:           request.OrgID,
-			ProjectID:       request.ProjectID,
+			OrgID:           permissions.OrgID,
+			ProjectID:       permissions.ProjectID,
 			Query:           request.Query,
 			MaxContextBytes: request.MaxContextBytes,
 		})

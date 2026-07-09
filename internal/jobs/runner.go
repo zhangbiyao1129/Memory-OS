@@ -38,21 +38,21 @@ type MemoryKernelMaintenance interface {
 
 // Options 保存 worker 运行参数。
 type Options struct {
-	Concurrency                  int
-	ArchiveWorker                *ArchiveWorker
-	ArchiveQueue                 ArchiveQueue
-	RAGIndexWorker               *RAGIndexWorker
-	RAGIndexQueue                RAGIndexQueue
-	CandidateWorker              *CandidateMemoryWorker
-	CandidateQueue               CandidateMemoryQueue
-	AutoMaintenance                   AutoMaintenance
-	HotMemoryMaintenance              HotMemoryMaintenance
-	MemoryKernelMaintenance           MemoryKernelMaintenance
-	PollInterval                      time.Duration
-	AutoMaintenanceInterval           time.Duration
-	HotMemoryMaintenanceInterval      time.Duration
-	MemoryKernelMaintenanceInterval   time.Duration
-	Cleanup                           func()
+	Concurrency                     int
+	ArchiveWorker                   *ArchiveWorker
+	ArchiveQueue                    ArchiveQueue
+	RAGIndexWorker                  *RAGIndexWorker
+	RAGIndexQueue                   RAGIndexQueue
+	CandidateWorker                 *CandidateMemoryWorker
+	CandidateQueue                  CandidateMemoryQueue
+	AutoMaintenance                 AutoMaintenance
+	HotMemoryMaintenance            HotMemoryMaintenance
+	MemoryKernelMaintenance         MemoryKernelMaintenance
+	PollInterval                    time.Duration
+	AutoMaintenanceInterval         time.Duration
+	HotMemoryMaintenanceInterval    time.Duration
+	MemoryKernelMaintenanceInterval time.Duration
+	Cleanup                         func()
 }
 
 // Runner 是 Phase 1 的后台任务骨架，后续承载 archive/index/hotmemory jobs。
@@ -140,6 +140,10 @@ func (r Runner) AutoMaintenanceConfigured() bool {
 
 func (r Runner) HotMemoryMaintenanceConfigured() bool {
 	return r.options.HotMemoryMaintenance != nil
+}
+
+func (r Runner) MemoryKernelMaintenanceConfigured() bool {
+	return r.options.MemoryKernelMaintenance != nil
 }
 
 func (r Runner) runArchiveLoop(ctx context.Context) error {
